@@ -99,9 +99,12 @@ So the machine keeps its own baseline, **outside git** (§3.3), one entry **per 
 }
 ```
 
-**Ledger invariant.** After a cycle settles, `files[F]` exists exactly when `F`'s live file
-matches the content of the published `HEAD`, and its `commit` is where that content entered
-history.
+**Ledger invariant.** After a cycle settles, `files[F]` exists exactly when this machine has a
+baseline for `F`. Normally that means the live file matches the content of the published
+`HEAD`, and `commit` is where that content entered history. The one exception is a
+**suppressed** file: its baseline is kept, with the digest it had when it disappeared, so the
+record is neither collected nor recreated. Suppression is derived, not stored — the entry
+exists and the live file does not.
 
 - `apply` writes an entry as each file lands.
 - `init` / `add` seed the ledger by adopting the live files as this machine's baseline.
