@@ -46,8 +46,15 @@ Open `src/syncintosh/crypto/` and confirm the envelope is
   in the ring: history and a merge-base that predates the rotation still need it. Rotation
   protects future data only, so "leave no object under the old key" is wrong as a goal — flag
   any code that drops a generation outside an explicit prune.
-- Confirm a routine rotation publishes the new key wrapped under the previous generation
-  (`keys/<id>.wrap`, domain `key-wrap`), and that a compromise rotation never does.
+- Confirm rotation is **fast-forward only and never merged**. Two machines that rotated
+  concurrently create two different keys for one generation id, and every object under one of
+  them then fails authentication on the other machine — a real "wrong key" reported as
+  tampering. A second `keys/<id>.wrap` with different contents for one id must be a hard
+  error, not something to reconcile.
+- Confirm only a **hygiene** rotation publishes the new key wrapped under the previous one
+  (`keys/<id>.wrap`, domain `key-wrap`). A rotation after a machine is removed, and a
+  compromise rotation, must distribute out of band: the removed machine still holds the old
+  key, so the wrap would hand it the new one.
 
 ### 3. Manifest and identifiers
 - Each tracked file has a stable random ID; the repo holds `objects/<id>.enc` only.

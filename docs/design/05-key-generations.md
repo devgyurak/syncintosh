@@ -63,23 +63,59 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
 - **Old generations stay in the ring**, so this machine's history — and any commit another
   Mac has not fetched yet — remains decryptable.
 
+### Rotation is exclusive, and fast-forward only
+
+- Rotation takes the same lock as `sync` ([01-sync-model.md](01-sync-model.md)), so it cannot
+  race a sync.
+- A rotation commit is published **fast-forward only**. On a non-fast-forward push, discard
+  the rotation and restart against the fresh `origin/<branch>`. **Never merge two
+  rotations:** two machines that rotated at the same time produced two different `KG_n` for
+  the *same* generation id, and every object encrypted under one of them then fails
+  authentication on the other machine — a real "wrong key" reported as tampering. That is the
+  same failure as [04-envelope-v1.md](04-envelope-v1.md)'s `UnknownKeyGeneration`, but worse,
+  because the id exists and merely holds the wrong key.
+- Two different keys for one generation id is a **hard error**. If a fetch brings a
+  `keys/<n>.wrap` that differs from the one already recorded for generation `n`, sync reports
+  it and refuses; the machines disagree about a key objects are already bound to, and picking
+  a winner would corrupt them.
+
 ## Threat model — one line that matters
 
 **Rotation protects future data only.** Ciphertext already in git history stays decryptable
-with the old key, so rotation is the right answer to "a device was removed" and the wrong
-answer to "the key leaked".
+with the old key, so rotation is the right answer to "this machine is being retired" and the
+wrong answer to "the key leaked". It also does not remove anyone's access by itself — a
+removed machine still holds the old key, which is why its new key must not travel through the
+repo ([the distribution table above](#distributing-a-new-generation)).
 
 **On compromise, migrate to a new repo.** Force-pushing to drop old commits is not an option:
 §7 denies force-push, and the merge-base model needs shared history
 ([01-sync-model.md](01-sync-model.md)). A fresh repo with a fresh generation 1 is the
 supported answer.
 
+### Not mitigated: rollback (replay)
+
+An attacker who controls the remote can present an **old** `manifest.enc`, or an old
+`objects/<id>.enc`, as a new commit. The AAD cannot stop this: the ciphertext is authentic, it
+is merely old. The record digest ([03-manifest.md](03-manifest.md)) blocks *mix-and-match* — an
+old object dropped into a slot whose record digest does not match — but it cannot block a
+*consistent* replay of an older manifest together with its matching objects.
+
+So: **git history and the remote are trusted for freshness, not only for authenticity.**
+Rollback means the remote was compromised, and the answer is the compromise answer — migrate
+to a new repo. The alternative, a per-machine signed monotonic counter, is out of scope for v1
+and would not survive a remote that can serve any commit it likes.
+
 ## Distributing a new generation
 
 | Situation | How the new key reaches the other Mac |
 |---|---|
-| **Routine rotation** (device removed, key not leaked) | Publish `keys/<new_id>.wrap` in the same rotation commit: `KG_{n+1}` encrypted under `KG_n`, domain `key-wrap`, subject `be32(n+1)` ([04-envelope-v1.md](04-envelope-v1.md)). Any machine holding `KG_n` unwraps it after the next fetch. |
-| **Compromise rotation** (the old key leaked) | **Never** wrap the new key under the leaked one — that leaks the new key too. Distribute out of band with `key export` / `key import`, or migrate to a new repo. |
+| **Hygiene rotation** — scheduled or routine, with **no known compromise and no machine being removed** | Publish `keys/<new_id>.wrap` in the same rotation commit: `KG_{n+1}` encrypted under `KG_n`, domain `key-wrap`, subject `be32(n+1)` ([04-envelope-v1.md](04-envelope-v1.md)). Any machine holding `KG_n` unwraps it after the next fetch. |
+| **A machine is being removed** | **Out of band** (`key export` / `key import`). The machine being removed is by definition a holder of `KG_n`, so if it can still fetch, the wrap hands it the new key. Treat removal like a compromise. The only exception is a removal where the machine's access to the remote was revoked **before** the wrap was published — which is hard to establish after the fact, so do not rely on it. |
+| **Key compromise** | **Never** wrap the new key under the leaked one — that leaks the new key too. Distribute out of band, or migrate to a new repo. |
+
+The wrap is only as safe as the old key. Any machine that can still read `KG_n` can unwrap
+`KG_{n+1}`, which is the same reasoning that forbids deriving a generation from its
+predecessor above — and the same reason a removed device cannot be handed the wrap.
 
 ## Open
 

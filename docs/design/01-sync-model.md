@@ -15,29 +15,60 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 
 | # | Step | Notes |
 |---|---|---|
-| 1 | **lock** | Take the advisory lock at `~/.local/share/syncintosh/sync.lock`. The daemon and the CLI share it; a second caller waits for a bounded time, then reports "another sync is running" instead of racing. |
+| 1 | **lock** | Take the advisory lock at `~/.local/share/syncintosh/sync.lock`. **Every** mutating operation takes it — `sync`, `resolve`, `rollback`, and `key rotate` — so a rotation cannot race a sync. The daemon and the CLI share it; a second caller waits for a bounded time, then reports "another sync is running" instead of racing. Read-only commands (`status`, `diff`) do not take it. |
 | 2 | **collect** | Read the preset paths into the plaintext mirror as **regular files, never symlinks** (§2.4). Dangerous paths are refused here, before anything is read (§3.4). |
-| 3 | **scan** | The secret scan runs over the collected plaintext. It runs before **every** encrypt, with no exception (§3.4). |
-| 4 | **stage** | Encrypt the objects whose plaintext changed. If the plaintext set is byte-identical to `HEAD`, write nothing and jump to step 6. |
+| 3 | **scan** | The secret scan runs over the collected plaintext (§3.4). It is part of the **encrypt boundary**, not a step that can be skipped — see below. |
+| 4 | **stage** | Encrypt the objects whose plaintext changed. Changed-ness is decided by comparing the file's digest with the record's `sha256` ([03-manifest.md](03-manifest.md)), **not** by decrypting `HEAD`. If nothing changed, write nothing and jump to step 6. |
 | 5 | **commit** | Commit the staged ciphertext on the local branch. This is the backup commit §3.5 requires. |
 | 6 | **fetch** | `git fetch` only. Never `git pull` — that would run a git-level merge. |
-| 7 | **base** | `git merge-base HEAD origin/<branch>`; see [02-base-and-merge.md](02-base-and-merge.md). |
-| 8 | **decrypt** | Materialize base, local, and remote into plaintext. |
-| 9 | **merge** | App-level, record-level manifest merge plus a per-object content merge ([03-manifest.md](03-manifest.md)). |
-| 10 | **gate** | If a conflict is unresolved: write `~/.local/share/syncintosh/pending/`, leave the local commit in place, and **stop without pushing**. |
-| 11 | **publish** | Re-encrypt only what changed, build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), and push. |
-| 12 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–11. The step-5 commit is kept. |
+| 7 | **classify** | Compare `HEAD` with `origin/<branch>`. Equal → nothing to publish, go to 14. `HEAD` is an ancestor → **fast-forward** to the origin commit, go to 14. `origin` is an ancestor → push at 12 without any merge commit. Neither is an ancestor → a real divergence, continue 8–12. |
+| 8 | **base** | `git merge-base HEAD origin/<branch>`; see [02-base-and-merge.md](02-base-and-merge.md). Divergence only. |
+| 9 | **decrypt** | Materialize base, local, and remote into plaintext. Divergence only. |
+| 10 | **merge** | The manifest record merge plus the per-object content merge ([03-manifest.md](03-manifest.md)). Divergence only. |
+| 11 | **gate** | If a conflict is unresolved: write `~/.local/share/syncintosh/pending/`, leave the local commit in place, and **stop without pushing**. Divergence only. |
+| 12 | **publish** | Push the step-5 commit when `origin` is an ancestor; otherwise re-encrypt only what changed and build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), then push. |
+| 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
+| 14 | **apply** | Write the merged records into the live files — **after** the push, and only after the per-file check below. |
+
+**Apply runs after the push, never before.** The remote is the source of truth: if the push
+fails, no live file has been touched and the step-5 commit still holds the collected state.
+
+**Every write is checked (compare-and-swap).** Before overwriting a file, compare its current
+bytes with the bytes collected in step 2. If they differ, the user edited that file while the
+sync was running: abort the write, leave the file alone, and tell the user to re-sync. Without
+this check a file edited between collect and apply is overwritten with the pre-edit version —
+and that version is in no commit, so it cannot be recovered.
+
+`apply` also skips records belonging to another machine
+([02-base-and-merge.md](02-base-and-merge.md)), and defers a record whose app is not
+installed, reporting the download URL or brew command instead of writing into a directory that
+does not exist.
+
+**Fast-forward is not a merge.** An ancestor relationship is resolved by moving or pushing,
+never by building a commit with two parents. Merging when one side is already an ancestor is
+harmless for correctness but adds an empty commit on every sync: the machines then alternate
+`M(X, Y)` and `N(Y, M)` forever, which contradicts "no change means no commit".
 
 **Conflicts never touch live files.** `apply` runs only on a conflict-free merge, so a failed
-sync leaves the user's files exactly as they were; the pending state records what was merged
-and what is unresolved so `resolve` can finish without re-collecting.
+sync leaves the user's files exactly as they were; the pending state records the merge inputs
+and the unresolved records.
 
 While a pending conflict exists, `sync` refuses to start a new merge (it reports the pending
 conflict and exits); the daemon treats that as a no-op and surfaces it. Only `resolve` (and
-`rollback`) may run.
+`rollback`) may run. **`resolve` re-runs the cycle from step 2**, so edits made after the
+failed sync become part of the new local side instead of being overwritten; step 14's check
+guards the write regardless.
 
 **Criss-cross history is a hard error.** If `git merge-base --all` returns more than one
 commit, sync stops and reports it rather than inventing a recursive merge.
+
+## The scan is not a step that can be skipped
+
+The scan is enforced at the **encrypt boundary** in `services/`: nothing reaches
+`crypto.encrypt` without passing it. That is what makes §3.4's "before every encrypt" true for
+the merge re-encrypt in step 12, for `resolve`, and for a change the LLM proposed — not only
+for the initial collect. A design that scans once at step 3 and then encrypts merge output at
+step 12 would violate the rule while looking compliant.
 
 ## Commits and rewrites
 
@@ -46,10 +77,10 @@ commit, sync stops and reports it rather than inventing a recursive merge.
 - **The backup commit is the HEAD before apply** — the step-5 collect commit — **not a fresh
   commit on every sync.** This is what §3.5 means; it avoids empty-commit churn.
 - **An object whose plaintext did not change is not rewritten.** A random nonce (§3.1) means
-  rewriting an object always changes its bytes, so any unconditional write would rewrite
+  rewriting an object always changes its bytes, so an unconditional write would rewrite
   every ciphertext on every sync and keep git history permanently dirty. Changed-ness is
-  decided on **plaintext**: decrypt the object at `HEAD` and compare with the newly
-  serialized plaintext. A missing object at `HEAD` counts as changed.
+  decided on **plaintext** — the file's digest against the record's `sha256`
+  ([03-manifest.md](03-manifest.md)) — with no need to decrypt the object at `HEAD`.
 - The manifest follows the same rule, which is why its serialization must be canonical
   ([03-manifest.md](03-manifest.md)). Without that, an unchanged manifest would re-serialize
   to different bytes and rewrite `manifest.enc` every sync.

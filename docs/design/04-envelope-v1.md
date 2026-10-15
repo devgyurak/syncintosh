@@ -63,6 +63,15 @@ change for every object**. What stays fixed is the *composition rule* — same d
 header shape, same file ID. File IDs do not change, so nothing is renamed and git sees a
 content rewrite, not a delete/add churn ([05-key-generations.md](05-key-generations.md)).
 
+### What the AAD does not prove
+
+The AAD binds a ciphertext to its slot, its header, and its generation, so a *substituted*
+object fails. It says nothing about *when* a ciphertext was written: an old `manifest.enc` and
+its matching `objects/<id>.enc` replayed as a new commit are authentic and stale. Freshness is
+out of scope for the envelope ([05-key-generations.md](05-key-generations.md)); the record
+digest in [03-manifest.md](03-manifest.md) narrows the gap to a *consistent* replay, but does
+not close it.
+
 ## Key derivation
 
 Per generation, subkeys are derived from the generation key `KG_g` by HKDF-SHA256, with
