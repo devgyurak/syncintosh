@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from syncintosh.core.errors import MasterKeyUnwrapError
-from syncintosh.crypto.primitives import KEY_ID_SIZE, KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, length_prefixed
+from syncintosh.crypto.primitives import KEY_ID_SIZE, KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
 
 MAGIC = b"SNTR"
 FORMAT_VERSION = 1
@@ -112,19 +112,19 @@ def _pack_ring(ring: Iterable[RingEntry]) -> bytes:
     if any(len(entry.key) != KEY_SIZE for entry in entries):
         raise ValueError(f"every generation key must be {KEY_SIZE} bytes")
     body = b"".join(be32(entry.key_id) + entry.key for entry in entries)
-    return len(entries).to_bytes(4, "big") + body
+    return be32(len(entries)) + body
 
 
 def _unpack_ring(plaintext: bytes) -> Ring:
     if len(plaintext) < 4:
         raise MasterKeyUnwrapError("ring export plaintext is truncated")
-    count = int.from_bytes(plaintext[:4], "big")
+    count = from_be32(plaintext[:4])
     body = plaintext[4:]
     if count == 0 or len(body) != count * (KEY_ID_SIZE + KEY_SIZE):
         raise MasterKeyUnwrapError("ring export plaintext does not match its record count")
     entries = tuple(
         RingEntry(
-            int.from_bytes(body[start : start + KEY_ID_SIZE], "big"),
+            from_be32(body[start : start + KEY_ID_SIZE]),
             body[start + KEY_ID_SIZE : start + KEY_ID_SIZE + KEY_SIZE],
         )
         for start in range(0, len(body), KEY_ID_SIZE + KEY_SIZE)

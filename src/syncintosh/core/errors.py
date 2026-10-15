@@ -39,7 +39,7 @@ class MasterKeyUnwrapError(CryptoError):
 
 
 class KeyStoreCorrupt(CryptoError):
-    """A stored generation entry is present but unreadable (not valid hex, or not 32 bytes).
+    """A stored generation entry, or the keyring index, is unreadable or the wrong shape.
 
     Deliberately distinct from `UnknownKeyGeneration`: the generation exists, it is corrupt,
     and the fix is to re-import it — not to report the ciphertext as tampered.

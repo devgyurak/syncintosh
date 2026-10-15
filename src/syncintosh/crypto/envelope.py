@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from syncintosh.core.errors import AuthenticationError, UnknownKeyGeneration, UnsupportedEnvelopeVersion
 from syncintosh.core.ports import Domain, KeyStore
 from syncintosh.crypto.hkdf import derive_subkey
-from syncintosh.crypto.primitives import KEY_ID_SIZE, NONCE_SIZE, TAG_SIZE, be32, length_prefixed
+from syncintosh.crypto.primitives import KEY_ID_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
 
 VERSION = 1
 HEADER_SIZE = 1 + KEY_ID_SIZE  # version(1) + key_id(4)
@@ -86,7 +86,7 @@ def decrypt(blob: bytes, *, file_id: str, keys: KeyStore, domain: Domain) -> byt
     version = blob[0]
     if version != VERSION:
         raise UnsupportedEnvelopeVersion(f"envelope version {version} is not supported by this build")
-    key_id = int.from_bytes(blob[1:HEADER_SIZE], "big")
+    key_id = from_be32(blob[1:HEADER_SIZE])
     if key_id == 0:
         raise AuthenticationError("generation 0 is not a valid key id")
     subject = _resolve_subject(domain, file_id)

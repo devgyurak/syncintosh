@@ -27,6 +27,11 @@ def be32(value: int) -> bytes:
     return value.to_bytes(KEY_ID_SIZE, "big")
 
 
+def from_be32(raw: bytes) -> int:
+    """Parse a 4-byte big-endian `uint32` — the inverse of `be32`."""
+    return int.from_bytes(raw, "big")
+
+
 def length_prefixed(*fields: bytes) -> bytes:
     """`be32(len(field)) || field` for each field — the AAD framing every slot uses.
 

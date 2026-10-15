@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from syncintosh.crypto.primitives import be32, length_prefixed
+from syncintosh.crypto.primitives import be32, from_be32, length_prefixed
 
 
 def test_be32_is_big_endian() -> None:
@@ -14,6 +14,12 @@ def test_be32_is_big_endian() -> None:
     assert be32(1) == b"\x00\x00\x00\x01"
     assert be32(0x01020304) == b"\x01\x02\x03\x04"
     assert be32(0xFFFF_FFFF) == b"\xff\xff\xff\xff"
+
+
+def test_from_be32_is_the_inverse_of_be32() -> None:
+    # when & then
+    assert from_be32(b"\x00\x00\x00\x01") == 1
+    assert from_be32(be32(0x01020304)) == 0x01020304
 
 
 @pytest.mark.parametrize("value", [-1, 2**32], ids=["negative", "too_large"])

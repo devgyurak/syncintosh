@@ -147,7 +147,7 @@ def test_a_corrupt_index_is_a_loud_failure() -> None:
     store = KeyringKeyStore(NAMESPACE, backend)
 
     # when & then
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyStoreCorrupt):
         store.generations()
 
 
@@ -203,8 +203,8 @@ def test_a_wrong_length_entry_is_a_crypto_error() -> None:
 
 @pytest.mark.parametrize(
     "raw",
-    ["12", "5", "[0, -3]", "[1, 2.5]", "[true]"],
-    ids=["string_number", "bare_number", "non_positive", "float", "bool"],
+    ["12", "5", "[0, -3]", "[1, 2.5]", "[true]", "[1, 1]", f"[{2**32}]"],
+    ids=["string_number", "bare_number", "non_positive", "float", "bool", "duplicate", "beyond_uint32"],
 )
 def test_an_index_that_is_not_a_list_of_ids_is_a_loud_failure(raw) -> None:
     # given
@@ -213,5 +213,5 @@ def test_an_index_that_is_not_a_list_of_ids_is_a_loud_failure(raw) -> None:
     store = KeyringKeyStore(NAMESPACE, backend)
 
     # when & then
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyStoreCorrupt):
         store.generations()

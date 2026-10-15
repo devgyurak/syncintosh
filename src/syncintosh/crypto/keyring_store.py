@@ -12,8 +12,8 @@ import json
 from typing import Protocol
 
 from syncintosh.core.errors import KeyStoreCorrupt
+from syncintosh.crypto.primitives import KEY_SIZE, UINT32_MAX
 
-KEY_SIZE = 32
 INDEX_USERNAME = "generations"
 
 
@@ -64,11 +64,15 @@ class KeyringKeyStore:
         try:
             values = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"the keyring index for {self._namespace!r} is not valid JSON") from exc
-        if not isinstance(values, list) or not all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 1 for value in values
+            raise KeyStoreCorrupt(f"the keyring index for {self._namespace!r} is not valid JSON") from exc
+        if (
+            not isinstance(values, list)
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= UINT32_MAX for value in values
+            )
+            or len(set(values)) != len(values)
         ):
-            raise ValueError(f"the keyring index for {self._namespace!r} is not a list of generation ids")
+            raise KeyStoreCorrupt(f"the keyring index for {self._namespace!r} is not a list of unique generation ids")
         return tuple(sorted(values))
 
     def generations(self) -> tuple[int, ...]:
@@ -104,6 +108,8 @@ class KeyringKeyStore:
             # published objects are already bound to one of them
             # (docs/design/05-key-generations.md). The dedicated error lands with #8.
             raise ValueError(f"generation {key_id} already holds a different key")
+        # A corrupt stored entry also raises here (via get()); whether an import may overwrite
+        # one is the import/rotation slice's decision (#8), not a silent behaviour of this store.
         if existing is None:
             self._active_backend().set_password(self._namespace, self._key_username(key_id), key.hex())
         self._index(key_id)
