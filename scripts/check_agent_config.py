@@ -20,7 +20,8 @@ Checks:
   8. `.agents/skills` resolves to `.claude/skills`.
   9. The subagent names appear in both CLAUDE.md and .agents/README.md.
  10. `.pi/settings.json` is valid JSON and the Pi extension + OpenCode plugin exist.
- 11. The envelope layout in `AGENTS.md` §3.1 matches the `crypto-auditor` body verbatim.
+ 11. The envelope layout in `AGENTS.md` §3.1 matches the `crypto-auditor` body verbatim and
+    any `.cursor/rules/*.mdc` that restates it.
 """
 
 from __future__ import annotations
@@ -279,14 +280,33 @@ def envelope_layout_mismatch(agents_text: str, auditor_body: str) -> str | None:
     return None
 
 
+def cursor_layout_mismatch(agents_text: str, rule_text: str) -> str | None:
+    """Return a message when a `.cursor/rules` highlight states a different envelope layout.
+
+    A rule may stay silent — it is a highlight, and AGENTS.md §3.1 is the canon — but if it
+    restates the layout, the bytes must match, or a Cursor agent would implement the wrong
+    envelope. This is the drift the always-on rule carried before the layout was removed.
+    """
+    canonical = ENVELOPE_LAYOUT_RE.findall(agents_text)
+    stated = ENVELOPE_LAYOUT_RE.findall(rule_text)
+    if stated and stated != canonical:
+        return f"the envelope layout differs from AGENTS.md §3.1: {stated!r}"
+    return None
+
+
 def check_envelope_layout(bodies: dict[str, str]) -> None:
+    agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     body = bodies.get("crypto-auditor")
     if body is None:
         fail("crypto-auditor has no body; cannot compare the envelope layout")
         return
-    message = envelope_layout_mismatch((ROOT / "AGENTS.md").read_text(encoding="utf-8"), body)
+    message = envelope_layout_mismatch(agents_text, body)
     if message:
         fail(message)
+    for rule in sorted((ROOT / ".cursor" / "rules").glob("*.mdc")):
+        rule_message = cursor_layout_mismatch(agents_text, rule.read_text(encoding="utf-8"))
+        if rule_message:
+            fail(f"{rule.relative_to(ROOT).as_posix()}: {rule_message}")
 
 
 def main() -> int:

@@ -80,3 +80,32 @@ def test_check_agent_config_passes_on_this_checkout() -> None:
 
     # then
     assert result.returncode == 0, result.stderr
+
+
+def test_the_cursor_rule_is_silent_or_matches_the_canon() -> None:
+    import check_agent_config  # ty: ignore[unresolved-import]  # scripts/ is on sys.path above
+
+    # given — a highlight may omit the layout, but must not state a different one
+    agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    rule_text = (ROOT / ".cursor" / "rules" / "architecture.mdc").read_text(encoding="utf-8")
+
+    # when
+    message = check_agent_config.cursor_layout_mismatch(agents_text, rule_text)
+
+    # then
+    assert message is None
+
+
+def test_a_cursor_rule_with_a_divergent_layout_is_rejected() -> None:
+    import check_agent_config  # ty: ignore[unresolved-import]  # scripts/ is on sys.path above
+
+    # given
+    agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    drifted = "The envelope is `version(1B) | nonce(12B) | ciphertext | tag(16B)`."
+
+    # when
+    message = check_agent_config.cursor_layout_mismatch(agents_text, drifted)
+
+    # then
+    assert message is not None
+    assert "differs" in message
