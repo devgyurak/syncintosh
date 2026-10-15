@@ -27,8 +27,8 @@ into code.**
 ## 0. Inspect the real environment (mandatory)
 
 ### 0-1. Locate the config files
-Confirm the actual paths on a Mac that has the app. Use the plan's table as a lead, not a
-fact. `mdfind "kMDItemCFBundleIdentifier == '…'"` finds the app bundle;
+Confirm the actual paths on a Mac that has the app. Use `docs/design/presets.md` as a lead, not
+a fact. `mdfind "kMDItemCFBundleIdentifier == '…'"` finds the app bundle;
 `~/Library/Application Support/<app>/` holds settings.
 
 ### 0-2. Record the format
@@ -121,5 +121,5 @@ Sample files go in `tests/fixtures/` with **real key names** — do not invent t
 uv run ruff format && uv run ruff check --fix && uv run ty check && uv run pytest
 ```
 
-Coverage must clear 90%. Update the plan/reference table with the preset's row, and put the
-0-6 evidence in the PR body.
+Coverage must clear 90%. Update the preset table (`docs/design/presets.md`) with the preset's
+row, and put the 0-6 evidence in the PR body.

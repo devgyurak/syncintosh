@@ -74,8 +74,8 @@ SECRET_DIRS = {
     # syncintosh's plaintext working copy — outside git, never for an agent to open.
     (Path.home() / ".local" / "share" / "syncintosh").resolve(),
 }
-# NOTE: ~/.config/syncintosh is intentionally NOT blocked — the plan ( §11.2 ) keeps only
-# non-secret values there (remote URL, model name).
+# NOTE: ~/.config/syncintosh is intentionally NOT blocked — the design note keeps only
+# non-secret values there (remote URL, model name, machine ID). See docs/design/README.md.
 
 # Exact files whose contents are secret-shaped. Docker's config.json holds `auths`, which
 # the docker adapter strips in code, so the raw file must not be read.
