@@ -24,7 +24,7 @@ def be32(value: int) -> bytes:
     """
     if not 0 <= value <= UINT32_MAX:
         raise ValueError(f"a uint32 must be 0..{UINT32_MAX}, got {value}")
-    return value.to_bytes(KEY_ID_SIZE, "big")
+    return value.to_bytes(4, "big")
 
 
 def from_be32(raw: bytes) -> int:
