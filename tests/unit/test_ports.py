@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from syncintosh.core.ports import Domain, KeyStore, MergeDriver
+from syncintosh.core.ports import Cipher, Domain, FileIdSource, KeyStore, MergeDriver, RepoFiles, SecretScanner
 
 
 def test_merge_driver_port_is_structural() -> None:
@@ -60,3 +60,86 @@ def test_domain_literal_covers_exactly_the_three_slots() -> None:
 
     # then
     assert domains == ("object", "manifest", "key-wrap")
+
+
+def test_file_id_source_port_is_structural() -> None:
+    # given
+    class FakeSource:
+        def new_file_id(self) -> str:
+            return "0" * 32
+
+    # when
+    matches = isinstance(FakeSource(), FileIdSource)
+
+    # then
+    assert matches is True
+
+
+def test_cipher_port_is_structural() -> None:
+    # given
+    class FakeCipher:
+        def seal(self, plaintext: bytes, *, domain, file_id, key_id) -> bytes:
+            return plaintext
+
+        def open(self, blob: bytes, *, domain, file_id) -> bytes:
+            return blob
+
+    # when
+    matches = isinstance(FakeCipher(), Cipher)
+
+    # then
+    assert matches is True
+
+
+def test_repo_files_port_is_structural() -> None:
+    # given
+    class FakeRepo:
+        def read(self, relpath: str) -> bytes | None:
+            return None
+
+        def write(self, relpath: str, data: bytes) -> None:
+            return None
+
+        def delete(self, relpath: str) -> None:
+            return None
+
+        def list_paths(self, prefix: str) -> tuple[str, ...]:
+            return ()
+
+    # when
+    matches = isinstance(FakeRepo(), RepoFiles)
+
+    # then
+    assert matches is True
+
+
+def test_a_repo_without_list_paths_does_not_conform() -> None:
+    # given — the builtin-shadowing name `list` is deliberately not the port's method
+    class LooksLikeRepo:
+        def read(self, relpath: str) -> bytes | None:
+            return None
+
+        def write(self, relpath: str, data: bytes) -> None:
+            return None
+
+        def delete(self, relpath: str) -> None:
+            return None
+
+    # when
+    matches = isinstance(LooksLikeRepo(), RepoFiles)
+
+    # then
+    assert matches is False
+
+
+def test_secret_scanner_port_is_structural() -> None:
+    # given
+    class FakeScanner:
+        def scan(self, plaintext: bytes, *, subject: str) -> None:
+            return None
+
+    # when
+    matches = isinstance(FakeScanner(), SecretScanner)
+
+    # then
+    assert matches is True
