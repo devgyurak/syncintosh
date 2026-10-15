@@ -9,12 +9,12 @@ domain lands with #8.
 from __future__ import annotations
 
 import os
-import re
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from syncintosh.core.errors import AuthenticationError, UnknownKeyGeneration, UnsupportedEnvelopeVersion
+from syncintosh.core.ids import is_file_id
 from syncintosh.core.ports import Domain, KeyStore
 from syncintosh.crypto.hkdf import derive_subkey
 from syncintosh.crypto.primitives import KEY_ID_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
@@ -24,7 +24,6 @@ HEADER_SIZE = 1 + KEY_ID_SIZE  # version(1) + key_id(4)
 # An empty plaintext still costs a header, a nonce, and a tag — anything shorter is not an
 # envelope at all, so it fails as an authentication error rather than a version error.
 MIN_BLOB_SIZE = HEADER_SIZE + NONCE_SIZE + TAG_SIZE
-FILE_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def build_aad(domain: Domain, header: bytes, subject: bytes) -> bytes:
@@ -44,7 +43,7 @@ def pack_header(key_id: int) -> bytes:
 def _resolve_subject(domain: Domain, file_id: str) -> bytes:
     """Validate `file_id` against `domain` and return the AAD `subject`."""
     if domain == "object":
-        if not FILE_ID_RE.fullmatch(file_id):
+        if not is_file_id(file_id):
             raise ValueError(f"an object file_id must be 32 lowercase hex characters, got {file_id!r}")
         return file_id.encode("ascii")
     if domain == "manifest":
