@@ -36,6 +36,9 @@ Open `src/syncintosh/crypto/` and confirm the envelope is
 - The `KeyStore` port addresses generations by id. Confirm `get(key_id) -> None` maps to
   `UnknownKeyGeneration` ("this machine does not hold it — import it"), not to
   "unrecoverable", and that it is distinct from an authentication failure.
+- Confirm a **present-but-unreadable** entry (not valid hex, or not 32 bytes) raises
+  `KeyStoreCorrupt`, distinct from both `UnknownKeyGeneration` and `AuthenticationError`. The
+  same applies to a corrupt ring index.
 - Export wraps the **whole ring** with scrypt (`N=2^17, r=8, p=1`, ~128 MiB). The blob is
   `magic "SNTR" | format(1) | kdf(1)=scrypt | log2_n(1) | r(be32) | p(be32) | salt(16) |
   nonce(12) | AES-256-GCM ciphertext | tag(16)`, with AAD = length-prefixed
