@@ -93,6 +93,8 @@ implements the key-level rules and calls the line-level `MergeDriver` port.
 
 Record merge is keyed by `file_id`. Two records are equal when their **canonical bytes** are
 equal — which, the digest being one of those bytes, makes a content change a record change.
+"Deleted" in the table below always means **absent from that side's manifest** (an explicit
+`untrack`), never a missing live file.
 
 | base | local | remote | result |
 |---|---|---|---|
@@ -133,6 +135,12 @@ itself unchanged from `base`.
 **Deleting a record deletes `objects/<file_id>.enc` in the same commit.** A record without its
 object, or an object without a record, is a corrupt repo; the manifest is the only index.
 
+**A missing live file is not a deletion.** A record's file can be absent on a machine — the app
+is not installed, so the apply is deferred, or the user deleted the file — and the record must
+survive either way. Otherwise one Mac without the app would delete that setting on every
+machine. Removing a record is an **explicit `untrack`**, and nothing else
+([01-sync-model.md](01-sync-model.md)).
+
 ## Apply-path validation — the manifest is untrusted input
 
 A record's `path` arrives from the repo, so it crosses a trust boundary: a compromised remote,
@@ -161,3 +169,8 @@ create a file in an arbitrary location.
 - A user-added path (Phase 4 "user item format inference") has no entry in the preset catalog,
   so the last apply check above would refuse it. It needs an explicit local allowlist entry
   that the user created, never one that arrived from the remote.
+- **Whether `apply` follows a symlink at the final path element.** Dotfile setups commonly have
+  `~/.zshrc → ~/dotfiles/zshrc`. Following it (and then requiring the *target* to be under
+  `$HOME`) keeps the user's link, but it contradicts §2.4, which forbids symlinks on the
+  *collection* side; writing a regular file over the link keeps §2.4 but silently breaks the
+  user's dotfiles setup. Decide with the first preset that needs it.

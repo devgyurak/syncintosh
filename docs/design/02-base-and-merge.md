@@ -42,6 +42,9 @@ The secondary unique key `(scope, machine, path)` catches it:
 
 - Two records in the **merged result** sharing that key are a `PathCollision`, reported with
   the same adopt-local / adopt-remote choice.
+- A machine that has **never written** a record's file — no apply-ledger entry, so a deferred
+  apply or a first connect — contributes its unapplied state, **not a deletion**
+  ([01-sync-model.md](01-sync-model.md)). A missing file never removes a record.
 - If their content is also identical, they are **deduplicated silently** — keep the
   lexicographically smaller ID, drop the other. This is deterministic, so both machines
   converge on the same manifest.

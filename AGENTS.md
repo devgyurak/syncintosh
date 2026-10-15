@@ -130,8 +130,8 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
   negligible; do not switch to a counter.
 - The **key ring** is wrapped with a KDF (scrypt or Argon2id) for export/import. Do not
   weaken the KDF parameters to speed up tests — stub the clock/work factor instead.
-- **Key generations are retained by default**, and rotation protects future data only
-  (`docs/design/05-key-generations.md`).
+- **Key generations are retained by default.** Rotation protects future data only, is
+  **fast-forward only**, and is never merged (`docs/design/05-key-generations.md`).
 
 ### 3.2 Manifest and identifiers (do not leak paths)
 
@@ -145,6 +145,8 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
 
 - The plaintext working copy lives **outside** the git directory, under
   `~/.local/share/syncintosh/work/`, and is git-ignored.
+- The **apply ledger** (`~/.local/share/syncintosh/applied.json`, content digests only) and the
+  pending-conflict state live there too, never inside the repo.
 - Nothing under that path, and no decrypted object, may be committed. The `guard-secrets`
   hook blocks this; do not work around it.
 

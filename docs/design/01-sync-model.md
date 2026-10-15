@@ -18,7 +18,7 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 1 | **lock** | Take the advisory lock at `~/.local/share/syncintosh/sync.lock`. **Every** mutating operation takes it — `sync`, `resolve`, `rollback`, and `key rotate` — so a rotation cannot race a sync. The daemon and the CLI share it; a second caller waits for a bounded time, then reports "another sync is running" instead of racing. Read-only commands (`status`, `diff`) do not take it. |
 | 2 | **collect** | Read the preset paths into the plaintext mirror as **regular files, never symlinks** (§2.4). Dangerous paths are refused here, before anything is read (§3.4). |
 | 3 | **scan** | The secret scan runs over the collected plaintext (§3.4). It is part of the **encrypt boundary**, not a step that can be skipped — see below. |
-| 4 | **stage** | Encrypt the objects whose plaintext changed. Changed-ness is decided by comparing the file's digest with the record's `sha256` ([03-manifest.md](03-manifest.md)), **not** by decrypting `HEAD`. If nothing changed, write nothing and jump to step 6. |
+| 4 | **stage** | Encrypt the records whose **live file changed against the apply ledger** — never against `HEAD` ([below](#change-detection-is-against-the-apply-ledger)). If nothing changed, write nothing and jump to step 6. |
 | 5 | **commit** | Commit the staged ciphertext on the local branch. This is the backup commit §3.5 requires. |
 | 6 | **fetch** | `git fetch` only. Never `git pull` — that would run a git-level merge. |
 | 7 | **classify** | Compare `HEAD` with `origin/<branch>`. Equal → nothing to publish, go to 14. `HEAD` is an ancestor → **fast-forward** to the origin commit, go to 14. `origin` is an ancestor → push at 12 without any merge commit. Neither is an ancestor → a real divergence, continue 8–12. |
@@ -28,7 +28,7 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 11 | **gate** | If a conflict is unresolved: write `~/.local/share/syncintosh/pending/`, leave the local commit in place, and **stop without pushing**. Divergence only. |
 | 12 | **publish** | Push the step-5 commit when `origin` is an ancestor; otherwise re-encrypt only what changed and build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), then push. |
 | 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
-| 14 | **apply** | Write the merged records into the live files — **after** the push, and only after the per-file check below. |
+| 14 | **apply** | Write the merged records into the live files — **after** the push, and only after the per-file check below — then record each written digest in the apply ledger. |
 
 **Apply runs after the push, never before.** The remote is the source of truth: if the push
 fails, no live file has been touched and the step-5 commit still holds the collected state.
@@ -37,7 +37,13 @@ fails, no live file has been touched and the step-5 commit still holds the colle
 bytes with the bytes collected in step 2. If they differ, the user edited that file while the
 sync was running: abort the write, leave the file alone, and tell the user to re-sync. Without
 this check a file edited between collect and apply is overwritten with the pre-edit version —
-and that version is in no commit, so it cannot be recovered.
+and that version is in no commit, so it cannot be recovered. The ledger is left untouched on
+abort, so the next sync sees the edit as a local change against the pre-merge baseline and
+merges it instead of reverting the remote.
+
+**`apply` never overwrites a file it does not track.** It creates a file that is absent, and
+overwrites a file whose record is in the ledger. A file that exists but has no record is
+deferred and reported, so a first connect cannot silently clobber a file the user already had.
 
 `apply` also skips records belonging to another machine
 ([02-base-and-merge.md](02-base-and-merge.md)), and defers a record whose app is not
@@ -62,6 +68,50 @@ guards the write regardless.
 **Criss-cross history is a hard error.** If `git merge-base --all` returns more than one
 commit, sync stops and reports it rather than inventing a recursive merge.
 
+## Change detection is against the apply ledger
+
+Step 4 must not compare the live files with `HEAD`. Apply runs *after* the push, so between
+the push and the apply, `HEAD` already holds content this machine has not written yet. A
+comparison against `HEAD` would then read the machine's own still-old files as "local edits",
+collect them, and silently revert the other machine's change.
+
+That window is not exotic. It is reached by **a crash before apply**, by a **compare-and-swap
+abort**, and by a **deferred apply** when the app is not installed — three ordinary outcomes,
+and the last one happens on every Mac that lacks the app.
+
+So the machine keeps its own baseline, **outside git** (§3.3):
+
+`~/.local/share/syncintosh/applied.json`
+
+```json
+{
+  "commit": "<the commit whose content this machine last applied>",
+  "files": { "<file_id>": "<sha256 of the bytes this machine last wrote>" }
+}
+```
+
+`apply` writes an entry as each file lands, and `init` / `add` seed the ledger by adopting the
+live files as this machine's baseline.
+
+Per record, step 4 decides:
+
+| Ledger | Live file | `HEAD` record | Classification |
+|---|---|---|---|
+| absent | — | present | **Not a local change.** This machine has never written the record: it arrived from the remote, or the app is not installed so the apply is deferred. Leave `HEAD`'s object alone and do not collect the live file. |
+| present | equals the ledger | equals the ledger | in sync |
+| present | equals the ledger | differs | **Pending apply** — `HEAD` holds content this machine has not written. Exclude from collect and finish the apply. |
+| present | differs | any | **Local change.** The `base` for its content merge is the object at `ledger.commit`; a stale base is ordinary (§5.7), not an error. |
+
+Two consequences:
+
+- **A missing file is never a deletion.** It means "not applied here" — the app is not
+  installed, or the user removed it — not "delete the record". The record stays in the
+  manifest and the other machines keep their copy. Only an explicit `untrack` removes a record
+  ([03-manifest.md](03-manifest.md)).
+- A record this machine has never written is **not evidence of anything**, so it neither
+  creates nor resolves a `PathCollision` beyond its manifest metadata
+  ([02-base-and-merge.md](02-base-and-merge.md)).
+
 ## The scan is not a step that can be skipped
 
 The scan is enforced at the **encrypt boundary** in `services/`: nothing reaches
@@ -79,7 +129,7 @@ step 12 would violate the rule while looking compliant.
 - **An object whose plaintext did not change is not rewritten.** A random nonce (§3.1) means
   rewriting an object always changes its bytes, so an unconditional write would rewrite
   every ciphertext on every sync and keep git history permanently dirty. Changed-ness is
-  decided on **plaintext** — the file's digest against the record's `sha256`
+  decided on **plaintext**, by comparing the merged plaintext with the record's `sha256`
   ([03-manifest.md](03-manifest.md)) — with no need to decrypt the object at `HEAD`.
 - The manifest follows the same rule, which is why its serialization must be canonical
   ([03-manifest.md](03-manifest.md)). Without that, an unchanged manifest would re-serialize
@@ -91,16 +141,18 @@ step 12 would violate the rule while looking compliant.
 objects/<file_id>.enc     one ciphertext per tracked file
 manifest.enc              the encrypted manifest
 keys/<generation>.wrap    a new generation key wrapped under the previous one
+keys/commitments.json     generation id -> key commitment, cleartext ([05-key-generations.md](05-key-generations.md))
 .gitattributes
 ```
 
-`.gitattributes` marks the ciphertext as binary so a human running `git pull` or `git merge`
-by hand cannot mangle it:
+`.gitattributes` marks the stored objects as binary so a human running `git pull` or
+`git merge` by hand cannot mangle them:
 
 ```
-objects/*.enc binary -diff -merge
-manifest.enc  binary -diff -merge
-keys/*.wrap   binary -diff -merge
+objects/*.enc         binary -diff -merge
+manifest.enc          binary -diff -merge
+keys/*.wrap           binary -diff -merge
+keys/commitments.json binary -diff -merge
 ```
 
 This is **defense in depth, not the primary mechanism**: syncintosh builds the merge tree

@@ -44,6 +44,7 @@ Machine-local state, and where it lives. This replaces the layout section of the
 | `~/.config/syncintosh/config.json` | **Non-secret** values only: remote URL, model name, this machine's ID | no |
 | `~/.local/share/syncintosh/repo/` | the clone: `objects/`, `manifest.enc`, `keys/`, `.gitattributes` | it *is* the repo |
 | `~/.local/share/syncintosh/work/` | the plaintext mirror (§3.3) | no — outside the repo |
+| `~/.local/share/syncintosh/applied.json` | the apply ledger: the commit this machine last applied, and the digest it last wrote per file ([01-sync-model.md](01-sync-model.md)) | no — outside the repo |
 | `~/.local/share/syncintosh/pending/` | unresolved merge state, plaintext (§3.3) | no — outside the repo |
 | `~/.local/share/syncintosh/sync.lock` | the advisory lock the CLI and the daemon share | no |
 

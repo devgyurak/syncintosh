@@ -68,16 +68,39 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
 - Rotation takes the same lock as `sync` ([01-sync-model.md](01-sync-model.md)), so it cannot
   race a sync.
 - A rotation commit is published **fast-forward only**. On a non-fast-forward push, discard
-  the rotation and restart against the fresh `origin/<branch>`. **Never merge two
-  rotations:** two machines that rotated at the same time produced two different `KG_n` for
-  the *same* generation id, and every object encrypted under one of them then fails
-  authentication on the other machine — a real "wrong key" reported as tampering. That is the
-  same failure as [04-envelope-v1.md](04-envelope-v1.md)'s `UnknownKeyGeneration`, but worse,
-  because the id exists and merely holds the wrong key.
-- Two different keys for one generation id is a **hard error**. If a fetch brings a
-  `keys/<n>.wrap` that differs from the one already recorded for generation `n`, sync reports
-  it and refuses; the machines disagree about a key objects are already bound to, and picking
-  a winner would corrupt them.
+  the rotation and restart against the fresh `origin/<branch>`; **never merge two rotations**.
+  Discarding must also **remove the not-yet-published generation from the ring**. Leaving it
+  there is worse than untidy: the abandoned `KG_n` would answer `get(n)` for the *other*
+  machine's genuine generation `n`, and every one of its objects would fail authentication as
+  if it had been tampered with.
+- Two different keys for one generation id is a **hard error**, not something to reconcile:
+  the machines disagree about a key that published objects are already bound to.
+
+### Key commitments make "same id, different key" detectable
+
+`keys/commitments.json` — cleartext, canonical JSON — maps every generation id to
+
+```
+commitment(n) = HMAC-SHA256(KG_n, b"syncintosh/v1/commit")
+```
+
+A commitment must be readable **without** the key: the manifest that would otherwise carry the
+list is itself encrypted *under* the generation in question. It leaks nothing — a PRF output
+over a public string, keyed by 256 random bits — so it can live in the repo as plaintext.
+
+On every fetch, a machine compares the published commitment for each id it holds:
+
+- equal → the ids name the same key, as they should be;
+- **different** → `KeyGenerationMismatch` ([04-envelope-v1.md](04-envelope-v1.md)). Report it
+  as a key disagreement, not as tampering, and do not merge.
+
+This is what covers an **out-of-band** rotation: a removal or a compromise rotation publishes
+no `keys/<n>.wrap`, so a wrap comparison has nothing to look at, while the commitment exists
+for every generation either way.
+
+When a locally held generation's commitment mismatches, it may be **replaced** by the
+published one only while no published object is encrypted under the local one — which is
+exactly the discarded-rotation case. Otherwise it is the hard error above.
 
 ## Threat model — one line that matters
 
@@ -115,7 +138,9 @@ and would not survive a remote that can serve any commit it likes.
 
 The wrap is only as safe as the old key. Any machine that can still read `KG_n` can unwrap
 `KG_{n+1}`, which is the same reasoning that forbids deriving a generation from its
-predecessor above — and the same reason a removed device cannot be handed the wrap.
+predecessor above — and the same reason a removed device cannot be handed the wrap. After
+unwrapping, verify the result against the published commitment for `n+1`
+([above](#key-commitments-make-same-id-different-key-detectable)) before adding it to the ring.
 
 ## Open
 
