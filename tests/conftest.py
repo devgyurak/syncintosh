@@ -13,6 +13,36 @@ import os
 import pytest
 
 
+class MemoryKeyStore:
+    """An in-memory KeyStore for tests; never touches the real keychain (``AGENTS.md`` §5.6)."""
+
+    def __init__(self, keys: dict[int, bytes] | None = None) -> None:
+        self._keys: dict[int, bytes] = dict(keys or {})
+
+    def generations(self) -> tuple[int, ...]:
+        return tuple(sorted(self._keys))
+
+    def get(self, key_id: int) -> bytes | None:
+        return self._keys.get(key_id)
+
+    def put(self, key_id: int, key: bytes) -> None:
+        self._keys[key_id] = key
+
+
+@pytest.fixture(scope="session")
+def memory_key_store():
+    """A factory for in-memory key rings, seeded with the given `{key_id: key}` map.
+
+    Session-scoped (a stateless factory) so a `@given` test can call it: hypothesis refuses
+    function-scoped fixtures in a property test, and each call still returns a fresh store.
+    """
+
+    def _make(keys: dict[int, bytes] | None = None) -> MemoryKeyStore:
+        return MemoryKeyStore(keys)
+
+    return _make
+
+
 @pytest.fixture(autouse=True)
 def _isolated_environment(tmp_path, monkeypatch):
     """Point HOME/XDG at a temp dir and neutralize the keychain and git config."""
