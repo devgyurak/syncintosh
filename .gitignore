@@ -1,0 +1,46 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.ty_cache/
+.hypothesis/
+.DS_Store
+
+# Coverage output
+.coverage
+.coverage.*
+coverage.xml
+junit.xml
+htmlcov/
+
+# Secrets — never commit a real key or credential (AGENTS.md §3, §6).
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Agent configuration and the .agents/skills symlink must be tracked so every Mac and
+# every clone gets the same workflow. The user's global exclude often ignores `.claude/`,
+# so re-include it here (a repo .gitignore outranks the global excludesFile).
+!.claude/
+!.claude/**
+!.codex/
+!.cursor/
+!.opencode/
+!.pi/
+!.agents/
+
+# Test fixtures may legitimately be secret-shaped (Docker ca.pem / cert.pem / key.pem), so
+# re-include the fixture tree after the secret patterns above (AGENTS.md §3.4 needs them).
+!tests/fixtures/**
