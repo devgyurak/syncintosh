@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Crypto domain errors.
+"""Domain errors.
 
 These live in `core` so `services` and `cli` can branch on a failure — "this machine does not
-hold generation N, import it" is a different user action from "the ciphertext is corrupt" —
-without importing the `crypto` infrastructure layer (``AGENTS.md`` §2.2). Standard library
-only.
+hold generation N, import it" is a different user action from "the ciphertext is corrupt", and
+"the manifest is corrupt" is different again — without importing an infrastructure layer
+(``AGENTS.md`` §2.2). Standard library only.
 """
 
 from __future__ import annotations
 
 
-class CryptoError(Exception):
+class DomainError(Exception):
+    """Base class for every domain failure that crosses a layer boundary."""
+
+
+class CryptoError(DomainError):
     """Base class for every crypto failure."""
 
 
@@ -43,4 +47,52 @@ class KeyStoreCorrupt(CryptoError):
 
     Deliberately distinct from `UnknownKeyGeneration`: the generation exists, it is corrupt,
     and the fix is to re-import it — not to report the ciphertext as tampered.
+    """
+
+
+class ManifestError(DomainError):
+    """Base class for every manifest failure."""
+
+
+class ManifestCorrupt(ManifestError):
+    """The manifest bytes, or a record in them, are not a valid manifest.
+
+    Raised both when parsing untrusted bytes and when a record fails a field rule, so a caller
+    can report "this repo's manifest is corrupt" without distinguishing an I/O boundary.
+    """
+
+
+class UnsupportedManifestSchema(ManifestError):
+    """The manifest's `schema` is newer than this build understands.
+
+    A schema bump is a migration, not a routine change (``docs/design/03-manifest.md``), so it
+    is distinct from a corrupt manifest — the fix is to upgrade, not to repair.
+    """
+
+    def __init__(self, schema: int) -> None:
+        self.schema = schema
+        super().__init__(f"manifest schema {schema} is not supported by this build")
+
+
+class GenerationDivergence(ManifestError):
+    """`local` and `remote` were written under different key generations.
+
+    Rotation is fast-forward only and is never merged (``docs/design/05-key-generations.md``),
+    so two sides on different generations are not reconciled here.
+    """
+
+    def __init__(self, local_generation: int, remote_generation: int) -> None:
+        self.local_generation = local_generation
+        self.remote_generation = remote_generation
+        super().__init__(
+            f"local key generation {local_generation} diverges from remote {remote_generation}; "
+            "rotation is fast-forward only and is never merged"
+        )
+
+
+class SecretScanError(DomainError):
+    """The secret scan refused a plaintext before it reached the encrypt boundary.
+
+    Carries no secret value: a scanner is expected to name the location, never the matched
+    bytes (``AGENTS.md`` §3.4, §4 "Never log secrets").
     """

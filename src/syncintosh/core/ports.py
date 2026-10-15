@@ -50,3 +50,70 @@ class KeyStore(Protocol):
     def put(self, key_id: int, key: bytes) -> None:
         """Store a generation key. Raises on failure."""
         ...
+
+
+@runtime_checkable
+class FileIdSource(Protocol):
+    """Mints the stable, random, fixed-width ID a newly tracked path keeps forever.
+
+    Randomness is the OS entropy pool, which `core` may not touch, so the source lives in
+    `crypto` (``AGENTS.md`` §2.1, §2.2). The port is intentionally tiny: `core` needs one fresh
+    ID per new `(scope, machine, path)` and revalidates it (`docs/design/03-manifest.md`).
+    """
+
+    def new_file_id(self) -> str:
+        """Return a fresh 32-lowercase-hex file ID."""
+        ...
+
+
+@runtime_checkable
+class Cipher(Protocol):
+    """Seals and opens stored objects under the current key generation.
+
+    `services` never touches a raw key or nonce: it hands a plaintext to `seal` and gets the
+    envelope bytes back (``docs/design/04-envelope-v1.md``). `open` reads the generation from
+    the blob header, so only `seal` takes `key_id` explicitly.
+    """
+
+    def seal(self, plaintext: bytes, *, domain: Domain, file_id: str, key_id: int) -> bytes:
+        """Encrypt `plaintext` for `domain`, binding it to `file_id` and generation `key_id`."""
+        ...
+
+    def open(self, blob: bytes, *, domain: Domain, file_id: str) -> bytes:
+        """Decrypt `blob`, raising a distinct error per failure mode."""
+        ...
+
+
+@runtime_checkable
+class RepoFiles(Protocol):
+    """Reads and writes files in the repo's working tree, addressed by repo-relative path."""
+
+    def read(self, relpath: str) -> bytes | None:
+        """Return the file's bytes, or `None` when it does not exist."""
+        ...
+
+    def write(self, relpath: str, data: bytes) -> None:
+        """Write `data`, creating parent directories. Raises on failure."""
+        ...
+
+    def delete(self, relpath: str) -> None:
+        """Remove the file if present. Raises on any other failure."""
+        ...
+
+    def list_paths(self, prefix: str) -> tuple[str, ...]:
+        """Return the repo-relative paths of existing files under `prefix`, sorted."""
+        ...
+
+
+@runtime_checkable
+class SecretScanner(Protocol):
+    """The secret scan that gates the encrypt boundary.
+
+    Nothing reaches `Cipher.seal` without passing this (``docs/design/01-sync-model.md``,
+    ``AGENTS.md`` §3.4). The implementation lands with #7; until then only tests provide one,
+    and no no-op default exists (decision 3 of the #3 plan).
+    """
+
+    def scan(self, plaintext: bytes, *, subject: str) -> None:
+        """Raise `SecretScanError` when a secret is found; return `None` when clean."""
+        ...
