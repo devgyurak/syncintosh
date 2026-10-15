@@ -109,7 +109,7 @@ exceptions. Collapsing them into one error would tell the user "corrupt" when th
 |---|---|---|---|
 | `version` unknown | `UnsupportedEnvelopeVersion` | this build is older than the object | upgrade |
 | `key_id` not in this machine's ring | `UnknownKeyGeneration` | **"this machine does not hold generation N"** — not unrecoverable | `key import`, or ask another Mac to distribute it |
-| the ring's key for N does not match the published commitment for N | `KeyGenerationMismatch` | two machines created **different keys for the same generation id** | do not merge; discard the local rotation ([05-key-generations.md](05-key-generations.md)) |
+| the ring's key for N does not match the published commitment for N | `KeyGenerationMismatch` | the published commitment for N is not this machine's key for N — **either** two machines built different keys for one generation id, **or** `keys/commitments.json` was edited (it is unauthenticated cleartext) | stop and investigate; do not merge ([05-key-generations.md](05-key-generations.md)) |
 | GCM tag / AAD mismatch | `AuthenticationError` | tampered, truncated, or moved to another slot | do not trust the file; restore from another clone |
 | KDF unwrap fails | `MasterKeyUnwrapError` | wrong passphrase, or a damaged export | retry the passphrase |
 

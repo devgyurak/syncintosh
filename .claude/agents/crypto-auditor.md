@@ -54,7 +54,9 @@ Open `src/syncintosh/crypto/` and confirm the envelope is
 - Confirm **key commitments** exist for every generation and are verified on fetch:
   `HMAC-SHA256(KG_n, b"syncintosh/v1/commit")` in a cleartext, key-free file
   (`keys/commitments.json`). This is the only check that catches an out-of-band rotation,
-  which publishes no wrap. A mismatch must be reported as a key disagreement, not as tampering.
+  which publishes no wrap. Treat the file as **unauthenticated input**: a mismatch may also
+  mean someone edited it, so the error must not assert that two machines built different keys,
+  and a mismatch must never be auto-resolved.
 - Confirm only a **hygiene** rotation publishes the new key wrapped under the previous one
   (`keys/<id>.wrap`, domain `key-wrap`), and that the unwrapped key is verified against its
   commitment before it enters the ring. A rotation after a machine is removed, and a compromise

@@ -146,7 +146,8 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
 - The plaintext working copy lives **outside** the git directory, under
   `~/.local/share/syncintosh/work/`, and is git-ignored.
 - The **apply ledger** (`~/.local/share/syncintosh/applied.json`, content digests only) and the
-  pending-conflict state live there too, never inside the repo.
+  pending-conflict state (`~/.local/share/syncintosh/pending/`) are siblings of `work/` and
+  never live inside the repo.
 - Nothing under that path, and no decrypted object, may be committed. The `guard-secrets`
   hook blocks this; do not work around it.
 

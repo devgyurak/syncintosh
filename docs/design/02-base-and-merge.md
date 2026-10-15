@@ -31,6 +31,12 @@ With `base = ∅` every record is either local-only or remote-only:
 Both sides are presented before anything is written, so the user sees the differences and
 picks. Nothing is applied until the whole merge is conflict-free.
 
+The same choice recurs **per record** later on, whenever a record has no baseline on this
+machine but its file already exists locally — the app was installed after the record was
+synced, so a live file appears under a record this machine has never written. It is resolved
+as adopt-local / adopt-remote, never by overwriting
+([01-sync-model.md](01-sync-model.md)).
+
 ## Path collisions (two IDs for one file)
 
 File IDs are random ([03-manifest.md](03-manifest.md)), so two machines that collected the

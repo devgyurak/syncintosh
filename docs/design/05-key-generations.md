@@ -91,8 +91,15 @@ over a public string, keyed by 256 random bits — so it can live in the repo as
 On every fetch, a machine compares the published commitment for each id it holds:
 
 - equal → the ids name the same key, as they should be;
-- **different** → `KeyGenerationMismatch` ([04-envelope-v1.md](04-envelope-v1.md)). Report it
-  as a key disagreement, not as tampering, and do not merge.
+- **different** → `KeyGenerationMismatch` ([04-envelope-v1.md](04-envelope-v1.md)); stop and
+  investigate, and do not merge.
+
+The message must **not** assert that two machines created different keys. `commitments.json`
+is unauthenticated cleartext, so anyone who can write to the remote can raise this error by
+editing it — a denial of service, not a confidentiality break, and no different from tampering
+with any other file the user does not control. State what was observed ("the published
+commitment for generation N is not this machine's key for N") and leave the cause open; the
+action, stop and look, is the same either way.
 
 This is what covers an **out-of-band** rotation: a removal or a compromise rotation publishes
 no `keys/<n>.wrap`, so a wrap comparison has nothing to look at, while the commitment exists
@@ -141,6 +148,11 @@ The wrap is only as safe as the old key. Any machine that can still read `KG_n` 
 predecessor above — and the same reason a removed device cannot be handed the wrap. After
 unwrapping, verify the result against the published commitment for `n+1`
 ([above](#key-commitments-make-same-id-different-key-detectable)) before adding it to the ring.
+
+**Order matters for out-of-band distribution.** Export and hand over the new generation only
+**after** the rotation commit is pushed. A rotation that may still be discarded must never be
+exported: a third machine would then adopt a generation the repo never accepted, and its
+objects would fail authentication on every other machine.
 
 ## Open
 

@@ -28,22 +28,27 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 11 | **gate** | If a conflict is unresolved: write `~/.local/share/syncintosh/pending/`, leave the local commit in place, and **stop without pushing**. Divergence only. |
 | 12 | **publish** | Push the step-5 commit when `origin` is an ancestor; otherwise re-encrypt only what changed and build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), then push. |
 | 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
-| 14 | **apply** | Write the merged records into the live files — **after** the push, and only after the per-file check below — then record each written digest in the apply ledger. |
+| 14 | **apply** | Write the merged records into the live files — **after** the push and only after the per-file check below — then settle the apply ledger for every record ([below](#change-detection-is-against-the-apply-ledger)). |
 
 **Apply runs after the push, never before.** The remote is the source of truth: if the push
 fails, no live file has been touched and the step-5 commit still holds the collected state.
 
 **Every write is checked (compare-and-swap).** Before overwriting a file, compare its current
-bytes with the bytes collected in step 2. If they differ, the user edited that file while the
-sync was running: abort the write, leave the file alone, and tell the user to re-sync. Without
-this check a file edited between collect and apply is overwritten with the pre-edit version —
-and that version is in no commit, so it cannot be recovered. The ledger is left untouched on
-abort, so the next sync sees the edit as a local change against the pre-merge baseline and
-merges it instead of reverting the remote.
+bytes with that file's baseline: the bytes collected in step 2 when it was collected, or its
+ledger digest when it was not (a pending apply). If they differ, the user edited the file
+while the sync was running: abort the write, leave the file alone, and tell the user to
+re-sync. Without this check a file edited between collect and apply is overwritten with the
+pre-edit version — and that version is in no commit, so it cannot be recovered. The ledger is
+left untouched on abort, so the next sync sees the edit as a local change against the pre-merge
+baseline and merges it instead of reverting the remote.
 
-**`apply` never overwrites a file it does not track.** It creates a file that is absent, and
-overwrites a file whose record is in the ledger. A file that exists but has no record is
-deferred and reported, so a first connect cannot silently clobber a file the user already had.
+**`apply` creates and overwrites conservatively.** It creates a file only when the ledger has
+no entry for the record — this machine has never written it — and nothing is in the way; it
+overwrites a file only when the ledger has an entry. A file that exists with no entry is
+**first sight** and is left alone until the user chooses (step 4 table), and a file the ledger
+knows but that is gone is **locally suppressed** and is not recreated. That is what stops a
+first connect from clobbering a file the user already had, and stops a deliberate removal from
+being undone on every sync.
 
 `apply` also skips records belonging to another machine
 ([02-base-and-merge.md](02-base-and-merge.md)), and defers a record whose app is not
@@ -79,28 +84,44 @@ That window is not exotic. It is reached by **a crash before apply**, by a **com
 abort**, and by a **deferred apply** when the app is not installed — three ordinary outcomes,
 and the last one happens on every Mac that lacks the app.
 
-So the machine keeps its own baseline, **outside git** (§3.3):
+So the machine keeps its own baseline, **outside git** (§3.3), one entry **per file**:
 
 `~/.local/share/syncintosh/applied.json`
 
 ```json
 {
-  "commit": "<the commit whose content this machine last applied>",
-  "files": { "<file_id>": "<sha256 of the bytes this machine last wrote>" }
+  "files": {
+    "<file_id>": {
+      "sha256": "<digest of the live content this machine has accounted for>",
+      "commit": "<the commit in which that content entered history>"
+    }
+  }
 }
 ```
 
-`apply` writes an entry as each file lands, and `init` / `add` seed the ledger by adopting the
-live files as this machine's baseline.
+**Ledger invariant.** After a cycle settles, `files[F]` exists exactly when `F`'s live file
+matches the content of the published `HEAD`, and its `commit` is where that content entered
+history.
+
+- `apply` writes an entry as each file lands.
+- `init` / `add` seed the ledger by adopting the live files as this machine's baseline.
+- **Publishing settles it too.** A file the user changed locally is collected, committed, and
+  pushed, and `apply` then writes nothing — so apply alone would leave the old digest behind.
+  The next local change would then look like a change against a long-stale base, and the user
+  would be handed a conflict over an edit they had already published. So at the end of every
+  successful cycle, every record whose live digest equals the digest in the published commit
+  has its entry (re)written as `{live digest, published commit}`.
 
 Per record, step 4 decides:
 
 | Ledger | Live file | `HEAD` record | Classification |
 |---|---|---|---|
-| absent | — | present | **Not a local change.** This machine has never written the record: it arrived from the remote, or the app is not installed so the apply is deferred. Leave `HEAD`'s object alone and do not collect the live file. |
+| absent | missing | present | **Deferred.** Never applied here and nothing to adopt (typically the app is not installed, so the directory does not exist). Do not collect; report. |
+| absent | present | present | **First sight** — the app was installed after the record was synced, or this is a first connect. Do not overwrite and do not collect: route it to the `base = ∅` choice (adopt-local / adopt-remote, [02-base-and-merge.md](02-base-and-merge.md)). If the live digest already equals the record's, it is simply in sync. |
+| present | missing | any | **Locally suppressed.** The file is gone (the app was uninstalled, or a deliberate removal). Do **not** collect it and do **not** recreate it; report it, and recreate only on an explicit command. Recreating it on every sync is what would make a deliberate removal impossible. |
 | present | equals the ledger | equals the ledger | in sync |
 | present | equals the ledger | differs | **Pending apply** — `HEAD` holds content this machine has not written. Exclude from collect and finish the apply. |
-| present | differs | any | **Local change.** The `base` for its content merge is the object at `ledger.commit`; a stale base is ordinary (§5.7), not an error. |
+| present | differs | any | **Local change.** The `base` for its content merge is the object for `F` at `files[F].commit` — a stale base is ordinary (§5.7), not an error. |
 
 Two consequences:
 
@@ -108,9 +129,10 @@ Two consequences:
   installed, or the user removed it — not "delete the record". The record stays in the
   manifest and the other machines keep their copy. Only an explicit `untrack` removes a record
   ([03-manifest.md](03-manifest.md)).
-- A record this machine has never written is **not evidence of anything**, so it neither
-  creates nor resolves a `PathCollision` beyond its manifest metadata
-  ([02-base-and-merge.md](02-base-and-merge.md)).
+- A record this machine has never written has **no baseline**, so it can never be a
+  *modification* in the record merge, and it neither creates nor resolves a `PathCollision`
+  beyond its manifest metadata. If its file happens to exist, that is a **first-sight** choice
+  for the user, not a merge input ([02-base-and-merge.md](02-base-and-merge.md)).
 
 ## The scan is not a step that can be skipped
 
