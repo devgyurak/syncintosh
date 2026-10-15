@@ -49,10 +49,12 @@ Open `src/syncintosh/crypto/` and confirm the envelope is
   `("ring-export", header)`. Confirm the parameters are not reduced "to speed up tests" —
   cheap parameters are injected in tests, and the production default (`PRODUCTION_SCRYPT`)
   is never weakened.
-- Confirm `unwrap_ring` rejects a blob whose serialized KDF parameters are **outside the
-  allowlist before running the KDF**, so a tampered blob cannot force an expensive derivation
-  (DoS) and a weak export is refused; a wrong passphrase and a damaged blob must both surface
-  as `MasterKeyUnwrapError`.
+- Confirm the passphrase is **NFC-normalized** before the KDF, so one text typed and pasted
+  in different Unicode forms derives the same key.
+- Confirm **both** `wrap_ring` and `unwrap_ring` reject KDF parameters outside the allowlist —
+  `unwrap` **before running the KDF**, so a tampered blob cannot force an expensive derivation
+  (DoS) and a weak export is refused, and `wrap` so a backup that cannot be opened is never
+  written; a wrong passphrase and a damaged blob must both surface as `MasterKeyUnwrapError`.
 - Subkeys are derived per generation and purpose (HKDF: object / manifest / key-wrap). An
   object key must never decrypt a manifest.
 - `key rotate` re-encrypts every object and the manifest under the new generation in one

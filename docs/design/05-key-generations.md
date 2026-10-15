@@ -29,6 +29,10 @@ whether a generation is still needed. #2 declares `generations`/`get`/`put` only
 `UnknownKeyGeneration` say *"import it"* rather than *"unrecoverable"*
 ([04-envelope-v1.md](04-envelope-v1.md)).
 
+An entry that is **present but unreadable** — not valid hex, or not 32 bytes — is a different
+failure: `KeyStoreCorrupt` (a `CryptoError`, in `core` alongside the others). The generation
+exists; it is corrupt; the fix is to re-import it, not to report the ciphertext as tampered.
+
 **`KG_1` is the master key.** `init` creates it, the recovery-key backup protects it, and
 §3.1's "wrapped with a KDF for export/import" applies to it. `key export` wraps the **whole
 ring** — `KG_1` first, then every retained generation — with scrypt
@@ -70,6 +74,11 @@ KDF it will not run **before** spending work on it:
   **scrypt `log2_n = 17, r = 8, p = 1`** (≈128 MiB, §3.1). An import runs the KDF **only**
   when the serialized parameters are in an allowlist, so a tampered blob cannot force an
   expensive derivation (DoS) and a deliberately weak export is refused.
+- The passphrase is **normalized to Unicode NFC** before UTF-8 encoding. One text typed in
+  NFC and pasted from an NFD source (some file names and note apps) must derive one key; the
+  export format is a contract, so this can never be loosened later.
+- An export must use parameters this build would also **unwrap**: `wrap_ring` refuses
+  parameters outside the same allowlist, so a backup that cannot be opened is never written.
 - **Failure is one error.** A wrong passphrase and a damaged blob both surface as
   `MasterKeyUnwrapError` ([04-envelope-v1.md](04-envelope-v1.md)) — the user retries the
   passphrase either way.

@@ -119,9 +119,10 @@ the other four.
 
 ## Test vectors
 
-The envelope test uses fixed vectors as a golden fixture; #2 fills in the values when the
-implementation lands. The nonce is fixed **only inside a vector** — production nonces are
-always random (§3.1), and no counter is ever used.
+The envelope test uses a golden fixture at `tests/fixtures/envelope_vectors.json`. The test
+recomputes its `aad` and `blob` values from raw `cryptography` primitives, so the vector is a
+contract rather than a snapshot of the implementation. The nonce is fixed **only inside a
+vector** — production nonces are always random (§3.1), and no counter is ever used.
 
 ```json
 {
