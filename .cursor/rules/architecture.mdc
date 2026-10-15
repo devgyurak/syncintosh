@@ -42,8 +42,9 @@ src/syncintosh/
 
 ## Security invariants (the most dangerous)
 
-- Ciphertext envelope is `version(1B) | nonce(12B) | ciphertext | tag(16B)`. **Layout fixed.**
-- **AAD = file ID + format version** on both encrypt and decrypt.
+- Ciphertext envelope: the byte layout is fixed in `AGENTS.md` §3.1. `key_id` is a **separate
+  axis** from `version`; the nonce is random per encryption, never a counter; and the AAD binds
+  the domain label, the whole header, and the file ID on both encrypt and decrypt.
 - Nonce is random per encryption; never a counter, never reused.
 - Stable random file ID → `objects/<id>.enc`; the encrypted manifest holds the real path.
   Never encrypt the path into the filename.

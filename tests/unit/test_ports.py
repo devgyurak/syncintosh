@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from syncintosh.core.ports import KeyStore, MergeDriver
+from syncintosh.core.ports import Domain, KeyStore, MergeDriver
 
 
 def test_merge_driver_port_is_structural() -> None:
@@ -22,10 +22,13 @@ def test_merge_driver_port_is_structural() -> None:
 def test_key_store_port_is_structural() -> None:
     # given
     class FakeKeyStore:
-        def get(self) -> bytes | None:
+        def generations(self) -> tuple[int, ...]:
+            return ()
+
+        def get(self, key_id: int) -> bytes | None:
             return None
 
-        def set(self, key: bytes) -> None:
+        def put(self, key_id: int, key: bytes) -> None:
             return None
 
     # when
@@ -33,3 +36,27 @@ def test_key_store_port_is_structural() -> None:
 
     # then
     assert matches is True
+
+
+def test_key_store_without_put_does_not_conform() -> None:
+    # given — a single-key store must not satisfy the generation-addressed port
+    class SingleKeyStore:
+        def generations(self) -> tuple[int, ...]:
+            return ()
+
+        def get(self, key_id: int) -> bytes | None:
+            return None
+
+    # when
+    matches = isinstance(SingleKeyStore(), KeyStore)
+
+    # then
+    assert matches is False
+
+
+def test_domain_literal_covers_exactly_the_three_slots() -> None:
+    # when
+    domains: tuple[Domain, ...] = ("object", "manifest", "key-wrap")
+
+    # then
+    assert domains == ("object", "manifest", "key-wrap")

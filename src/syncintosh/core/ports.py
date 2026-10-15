@@ -8,7 +8,12 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
+
+# What an envelope binds a ciphertext to, and which subkey decrypts it
+# (`docs/design/04-envelope-v1.md`). A value is serialized verbatim in the HKDF `info`, so it
+# is a `Literal`, never an `Enum` (``AGENTS.md`` §4).
+Domain = Literal["object", "manifest", "key-wrap"]
 
 
 @runtime_checkable
@@ -26,12 +31,22 @@ class MergeDriver(Protocol):
 
 @runtime_checkable
 class KeyStore(Protocol):
-    """Where the per-repo master key lives (the platform keychain, in practice)."""
+    """The per-repo key ring: generation id -> 32-byte generation key.
 
-    def get(self) -> bytes | None:
-        """Return the stored master key, or ``None`` when none is set."""
+    Addresses generations by id, not a single master key, because `merge-base` can point at a
+    commit encrypted under an older generation and several generations must resolve at once
+    (`docs/design/05-key-generations.md`). `drop()` is deliberately absent here: prune and the
+    removal of an unpublished rotation land with the rotation slice (#8).
+    """
+
+    def generations(self) -> tuple[int, ...]:
+        """Return the stored generation ids, ascending."""
         ...
 
-    def set(self, key: bytes) -> None:
-        """Store the master key. Raises on failure."""
+    def get(self, key_id: int) -> bytes | None:
+        """Return generation `key_id`, or `None` when this machine does not hold it."""
+        ...
+
+    def put(self, key_id: int, key: bytes) -> None:
+        """Store a generation key. Raises on failure."""
         ...

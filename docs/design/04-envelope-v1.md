@@ -109,15 +109,21 @@ exceptions. Collapsing them into one error would tell the user "corrupt" when th
 |---|---|---|---|
 | `version` unknown | `UnsupportedEnvelopeVersion` | this build is older than the object | upgrade |
 | `key_id` not in this machine's ring | `UnknownKeyGeneration` | **"this machine does not hold generation N"** — not unrecoverable | `key import`, or ask another Mac to distribute it |
+| the store holds generation N but its entry is unreadable | `KeyStoreCorrupt` | the keyring entry (or its index) is not valid hex / not 32 bytes — the generation **exists**, but is corrupt | re-import it; do not treat the ciphertext as tampered ([05-key-generations.md](05-key-generations.md)) |
 | the ring's key for N does not match the published commitment for N | `KeyGenerationMismatch` | the published commitment for N is not this machine's key for N — **either** two machines built different keys for one generation id, **or** `keys/commitments.json` was edited (it is unauthenticated cleartext) | stop and investigate; do not merge ([05-key-generations.md](05-key-generations.md)) |
 | GCM tag / AAD mismatch | `AuthenticationError` | tampered, truncated, or moved to another slot | do not trust the file; restore from another clone |
 | KDF unwrap fails | `MasterKeyUnwrapError` | wrong passphrase, or a damaged export | retry the passphrase |
 
+`KeyGenerationMismatch` lands with the rotation/commitment slice (**#8**), because nothing
+publishes a commitment until then ([05-key-generations.md](05-key-generations.md)). Every
+other error in this table ships with **#2**.
+
 ## Test vectors
 
-The envelope test uses fixed vectors as a golden fixture; #2 fills in the values when the
-implementation lands. The nonce is fixed **only inside a vector** — production nonces are
-always random (§3.1), and no counter is ever used.
+The envelope test uses a golden fixture at `tests/fixtures/envelope_vectors.json`. The test
+recomputes its `aad` and `blob` values from raw `cryptography` primitives, so the vector is a
+contract rather than a snapshot of the implementation. The nonce is fixed **only inside a
+vector** — production nonces are always random (§3.1), and no counter is ever used.
 
 ```json
 {

@@ -13,7 +13,6 @@ class KeyStore(Protocol):
     def generations(self) -> tuple[int, ...]: ...  # stored generations, ascending
     def get(self, key_id: int) -> bytes | None: ...  # None = this machine does not hold it
     def put(self, key_id: int, key: bytes) -> None: ...  # returns None, raises on failure
-    def drop(self, key_id: int) -> None: ...  # explicit prune only
 ```
 
 **This shape is fixed now** even though the port change lands in #2, because it is expensive
@@ -21,19 +20,71 @@ to change once objects are stored: a single-key `get()` cannot resolve a `key_id
 retro-fitting one means rewriting every stored object. (The port that exists today is the
 single-key `get()`/`set()` pair.)
 
+`drop(key_id)` — explicit `key prune`, and the removal of an unpublished generation after a
+discarded rotation — is added in **#8**, together with the reachability walk that decides
+whether a generation is still needed. #2 declares `generations`/`get`/`put` only; nothing in
+#2 may drop a generation.
+
 `get()` returning `None` for a generation this machine does not hold is what makes
 `UnknownKeyGeneration` say *"import it"* rather than *"unrecoverable"*
 ([04-envelope-v1.md](04-envelope-v1.md)).
 
+An entry that is **present but unreadable** — not valid hex, or not 32 bytes — is a different
+failure: `KeyStoreCorrupt` (a `CryptoError`, in `core` alongside the others). The generation
+exists; it is corrupt; the fix is to re-import it, not to report the ciphertext as tampered.
+`put` cannot repair one on its own — it reads the entry first, to detect a second key, so a
+corrupt entry raises there too. Whether an import may **overwrite** a corrupt entry (repair)
+rather than stop is part of the import/rotation slice (#8).
+
 **`KG_1` is the master key.** `init` creates it, the recovery-key backup protects it, and
 §3.1's "wrapped with a KDF for export/import" applies to it. `key export` wraps the **whole
-ring** — `KG_1` first, then every retained generation — with scrypt or Argon2id, so exporting
-and importing the ring is one operation and "lose the master key" and "lose the ring" are the
-same failure. The KDF parameters are never reduced for tests (§3.1).
+ring** — `KG_1` first, then every retained generation — with scrypt
+([Ring export](#ring-export) below), so exporting and importing the ring is one operation and
+"lose the master key" and "lose the ring" are the same failure. The KDF parameters are never
+reduced for tests (§3.1).
 
 Late generations are **independent random keys**, never derived from an earlier generation. If
 `KG_{n+1}` were `HKDF(KG_n, …)`, then anyone holding `KG_n` could derive `KG_{n+1}`, and a
 rotation after a device was removed would protect nothing.
+
+## Ring export
+
+`key export` writes the **whole ring** as one self-describing blob; `key import` reads it back.
+The format is fixed, and it is self-describing so an import can reject an unknown format or a
+KDF it will not run **before** spending work on it:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `magic` — `"SNTR"`, ASCII |
+| 4 | 1 | `format` — `0x01` |
+| 5 | 1 | `kdf` — `0x01` = scrypt |
+| 6 | 1 | `log2_n` — scrypt cost exponent |
+| 7 | 4 | `r` — scrypt block-size factor, big-endian `uint32` |
+| 11 | 4 | `p` — scrypt parallelization, big-endian `uint32` |
+| 15 | 16 | `salt` — scrypt salt |
+| 31 | 12 | `nonce` — AES-256-GCM nonce |
+| 43 | n | `ciphertext` |
+| 43 + n | 16 | `tag` — GCM authentication tag |
+
+`header = bytes 0…30` (`magic || format || kdf || log2_n || r || p || salt`).
+
+- **AAD = length-prefixed `("ring-export", header)`** — the same composition rule as the
+  envelope ([04-envelope-v1.md](04-envelope-v1.md)), with its own domain label so an export
+  blob can never be mistaken for a stored object or a key wrap.
+- **plaintext = `count(be32) || (key_id(be32) || KG(32))*`**, ascending by `key_id`, so `KG_1`
+  is first. `count = 0` is invalid — a ring always holds generation 1.
+- The KDF key is `scrypt(passphrase, salt, N=2^log2_n, r, p, length=32)`. Production is
+  **scrypt `log2_n = 17, r = 8, p = 1`** (≈128 MiB, §3.1). An import runs the KDF **only**
+  when the serialized parameters are in an allowlist, so a tampered blob cannot force an
+  expensive derivation (DoS) and a deliberately weak export is refused.
+- The passphrase is **normalized to Unicode NFC** before UTF-8 encoding. One text typed in
+  NFC and pasted from an NFD source (some file names and note apps) must derive one key; the
+  export format is a contract, so this can never be loosened later.
+- An export must use parameters this build would also **unwrap**: `wrap_ring` refuses
+  parameters outside the same allowlist, so a backup that cannot be opened is never written.
+- **Failure is one error.** A wrong passphrase and a damaged blob both surface as
+  `MasterKeyUnwrapError` ([04-envelope-v1.md](04-envelope-v1.md)) — the user retries the
+  passphrase either way.
 
 ## Retention
 

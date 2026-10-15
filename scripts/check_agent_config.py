@@ -20,6 +20,8 @@ Checks:
   8. `.agents/skills` resolves to `.claude/skills`.
   9. The subagent names appear in both CLAUDE.md and .agents/README.md.
  10. `.pi/settings.json` is valid JSON and the Pi extension + OpenCode plugin exist.
+ 11. The envelope layout in `AGENTS.md` §3.1 matches the `crypto-auditor` body verbatim and
+    any `.cursor/rules/*.mdc` that restates it.
 """
 
 from __future__ import annotations
@@ -35,6 +37,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FAILURES: list[str] = []
 
 HOOK_SCRIPT_RE = re.compile(r"scripts/agent_hooks/([A-Za-z0-9_]+\.py)")
+
+# The envelope layout is stated in `AGENTS.md` §3.1 and repeated in every crypto-auditor
+# body. The two must name the identical byte layout, or the printed audit procedure would
+# describe a different format than the canon (docs/design/04-envelope-v1.md).
+ENVELOPE_LAYOUT_RE = re.compile(r"`(version\(1B\)[^`]*)`")
 
 CANON_FILES = (
     "AGENTS.md",
@@ -255,6 +262,53 @@ def check_names_documented(claude: dict[str, dict[str, str]]) -> None:
                 fail(f"{doc} does not mention subagent {name!r}")
 
 
+def envelope_layout_mismatch(agents_text: str, auditor_body: str) -> str | None:
+    """Return a message when the AGENTS.md §3.1 layout and the auditor body disagree.
+
+    Pure, so the pytest gate can feed a drifted body without touching the real files
+    (``AGENTS.md`` §7: one implementation, the test only calls it).
+    """
+    agents = ENVELOPE_LAYOUT_RE.findall(agents_text)
+    auditor = ENVELOPE_LAYOUT_RE.findall(auditor_body)
+    if len(agents) != 1:
+        return f"AGENTS.md must state the envelope layout exactly once (found {len(agents)})"
+    if agents != auditor:
+        return (
+            "AGENTS.md §3.1 envelope layout differs from the crypto-auditor body: "
+            f"AGENTS.md={agents!r}, auditor={auditor!r}"
+        )
+    return None
+
+
+def cursor_layout_mismatch(agents_text: str, rule_text: str) -> str | None:
+    """Return a message when a `.cursor/rules` highlight states a different envelope layout.
+
+    A rule may stay silent — it is a highlight, and AGENTS.md §3.1 is the canon — but if it
+    restates the layout, the bytes must match, or a Cursor agent would implement the wrong
+    envelope. This is the drift the always-on rule carried before the layout was removed.
+    """
+    canonical = ENVELOPE_LAYOUT_RE.findall(agents_text)
+    stated = ENVELOPE_LAYOUT_RE.findall(rule_text)
+    if stated and stated != canonical:
+        return f"the envelope layout differs from AGENTS.md §3.1: {stated!r}"
+    return None
+
+
+def check_envelope_layout(bodies: dict[str, str]) -> None:
+    agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    body = bodies.get("crypto-auditor")
+    if body is None:
+        fail("crypto-auditor has no body; cannot compare the envelope layout")
+        return
+    message = envelope_layout_mismatch(agents_text, body)
+    if message:
+        fail(message)
+    for rule in sorted((ROOT / ".cursor" / "rules").glob("*.mdc")):
+        rule_message = cursor_layout_mismatch(agents_text, rule.read_text(encoding="utf-8"))
+        if rule_message:
+            fail(f"{rule.relative_to(ROOT).as_posix()}: {rule_message}")
+
+
 def main() -> int:
     check_canon()
     check_skills()
@@ -265,6 +319,7 @@ def main() -> int:
     check_hooks()
     check_skills_symlink()
     check_names_documented(claude)
+    check_envelope_layout(bodies)
 
     if FAILURES:
         print("agent config check FAILED:", file=sys.stderr)
