@@ -33,9 +33,14 @@ picks. Nothing is applied until the whole merge is conflict-free.
 
 The same choice recurs **per record** later on, whenever a record has no baseline on this
 machine but its file already exists locally — the app was installed after the record was
-synced, so a live file appears under a record this machine has never written. It is resolved
-as adopt-local / adopt-remote, never by overwriting
+synced, so a live file appears under a record this machine has never written — or when a
+suppressed file comes back. It is resolved as adopt-local / adopt-remote, never by overwriting
 ([01-sync-model.md](01-sync-model.md)).
+
+**adopt-local reuses the record's existing `file_id` and replaces its content.** Minting a new
+ID would put two IDs on one path and manufacture the very `PathCollision` described above;
+reusing the ID makes the choice an ordinary "local modify" that the record merge already
+handles.
 
 ## Path collisions (two IDs for one file)
 

@@ -44,11 +44,11 @@ baseline and merges it instead of reverting the remote.
 
 **`apply` creates and overwrites conservatively.** It creates a file only when the ledger has
 no entry for the record — this machine has never written it — and nothing is in the way; it
-overwrites a file only when the ledger has an entry. A file that exists with no entry is
-**first sight** and is left alone until the user chooses (step 4 table), and a file the ledger
-knows but that is gone is **locally suppressed** and is not recreated. That is what stops a
-first connect from clobbering a file the user already had, and stops a deliberate removal from
-being undone on every sync.
+overwrites a file only when the ledger holds a normal (not suppressed) baseline. A file that
+exists with no entry, or with a suppressed entry, is **first sight** and is left alone until
+the user chooses (step 4 table), and a removed file is **locally suppressed** and is not
+recreated. That is what stops a first connect from clobbering a file the user already had, and
+stops a deliberate removal from being undone on every sync.
 
 `apply` also skips records belonging to another machine
 ([02-base-and-merge.md](02-base-and-merge.md)), and defers a record whose app is not
@@ -93,18 +93,24 @@ So the machine keeps its own baseline, **outside git** (§3.3), one entry **per 
   "files": {
     "<file_id>": {
       "sha256": "<digest of the live content this machine has accounted for>",
-      "commit": "<the commit in which that content entered history>"
+      "commit": "<the commit in which that content entered history>",
+      "suppressed": false
     }
   }
 }
 ```
 
 **Ledger invariant.** After a cycle settles, `files[F]` exists exactly when this machine has a
-baseline for `F`. Normally that means the live file matches the content of the published
-`HEAD`, and `commit` is where that content entered history. The one exception is a
-**suppressed** file: its baseline is kept, with the digest it had when it disappeared, so the
-record is neither collected nor recreated. Suppression is derived, not stored — the entry
-exists and the live file does not.
+baseline for `F`: either the live file matches the content of the published `HEAD`, or the
+entry is marked `suppressed`. For a normal baseline, `commit` is where that content entered
+history; a suppressed entry keeps the digest it had when the file disappeared, for
+diagnostics.
+
+**Suppression is a stored flag, not an inference from the file's absence.** The file can come
+back — the app is uninstalled and reinstalled, and it writes a fresh default — and an inferred
+flag would disappear at that exact moment, turning the app's new default into a "local change"
+that then outweighs the other machines' settings in the content merge, with no conflict. The
+flag is what prevents that; see the table below.
 
 - `apply` writes an entry as each file lands.
 - `init` / `add` seed the ledger by adopting the live files as this machine's baseline.
@@ -113,7 +119,9 @@ exists and the live file does not.
   The next local change would then look like a change against a long-stale base, and the user
   would be handed a conflict over an edit they had already published. So at the end of every
   successful cycle, every record whose live digest equals the digest in the published commit
-  has its entry (re)written as `{live digest, published commit}`.
+  has its entry (re)written as a **normal baseline** — `{live digest, published commit,
+  suppressed: false}` — which is also what clears a suppression once the file is back in
+  agreement with the repo.
 
 Per record, step 4 decides:
 
@@ -121,10 +129,12 @@ Per record, step 4 decides:
 |---|---|---|---|
 | absent | missing | present | **Deferred.** Never applied here and nothing to adopt (typically the app is not installed, so the directory does not exist). Do not collect; report. |
 | absent | present | present | **First sight** — the app was installed after the record was synced, or this is a first connect. Do not overwrite and do not collect: route it to the `base = ∅` choice (adopt-local / adopt-remote, [02-base-and-merge.md](02-base-and-merge.md)). If the live digest already equals the record's, it is simply in sync. |
-| present | missing | any | **Locally suppressed.** The file is gone (the app was uninstalled, or a deliberate removal). Do **not** collect it and do **not** recreate it; report it, and recreate only on an explicit command. Recreating it on every sync is what would make a deliberate removal impossible. |
-| present | equals the ledger | equals the ledger | in sync |
-| present | equals the ledger | differs | **Pending apply** — `HEAD` holds content this machine has not written. Exclude from collect and finish the apply. |
-| present | differs | any | **Local change.** The `base` for its content merge is the object for `F` at `files[F].commit` — a stale base is ordinary (§5.7), not an error. |
+| present, not suppressed | missing | any | **Locally suppressed.** The file is gone (the app was uninstalled, or a deliberate removal). Set `suppressed = true`; do **not** collect it and do **not** recreate it; report it, and recreate only on an explicit command. Recreating it on every sync is what would make a deliberate removal impossible. |
+| `suppressed: true` | missing | any | Still suppressed. Nothing to collect and nothing to write; report it. |
+| `suppressed: true` | present | any | **First sight — the file came back.** A reinstalled app writes a fresh default, which is not an edit of the old baseline; collecting it would let those defaults win the content merge against the other machines' settings with no conflict. Do not collect: route it to the `base = ∅` choice, and clear the flag only once the live digest equals the published digest. |
+| present, not suppressed | equals the ledger | equals the ledger | in sync |
+| present, not suppressed | equals the ledger | differs | **Pending apply** — `HEAD` holds content this machine has not written. Exclude from collect and finish the apply. |
+| present, not suppressed | differs | any | **Local change.** The `base` for its content merge is the object for `F` at `files[F].commit` — a stale base is ordinary (§5.7), not an error. |
 
 Two consequences:
 
