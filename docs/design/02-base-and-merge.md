@@ -37,10 +37,17 @@ synced, so a live file appears under a record this machine has never written —
 suppressed file comes back. It is resolved as adopt-local / adopt-remote, never by overwriting
 ([01-sync-model.md](01-sync-model.md)).
 
-**adopt-local reuses the record's existing `file_id` and replaces its content.** Minting a new
-ID would put two IDs on one path and manufacture the very `PathCollision` described above;
-reusing the ID makes the choice an ordinary "local modify" that the record merge already
-handles.
+**The choice replaces the whole file and does not go through the content merge.** A first-sight
+record has no usable `base`: with `base = ∅` every key would look changed on both sides and
+conflict, and with a stale baseline the app's fresh defaults would win — the very outcome the
+suppressed rule exists to prevent. So the chosen side *is* the result; no adapter 3-way runs
+for it.
+
+**Both sides keep the record's existing `file_id`.** adopt-remote keeps the record and only
+permits the overwrite, and adopt-local replaces the content in place. Minting a new ID here
+would put two IDs on one path and manufacture the very `PathCollision` described below. The
+ledger then records the resulting content as a normal baseline, so the next cycle sees the file
+as any other in-sync file ([01-sync-model.md](01-sync-model.md)).
 
 ## Path collisions (two IDs for one file)
 
@@ -82,10 +89,10 @@ too old" refusal, because git still knows the true common ancestor.
 
 ## Divergence and retry
 
-Two machines that both pushed leave a genuine merge-base commit, and the cycle's step 9
-merges them. If the push loses a race:
+Two machines that both pushed leave a genuine merge-base commit, and the cycle's merge step
+(step 10) combines them. If the push loses a race:
 
-- **Discard the unpushed merge commit** and redo steps 7–11 against the fresh
+- **Discard the unpushed merge commit** and redo steps 7–12 against the fresh
   `origin/<branch>`. The step-5 collect commit is kept.
 - Never stack a second merge on top of an unpushed merge commit — that is what produces
   criss-cross history (two merge-bases), which sync then refuses

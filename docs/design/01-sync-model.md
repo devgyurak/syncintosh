@@ -199,5 +199,5 @@ with `git commit-tree`, so `git merge` is never in the sync path.
   `--depth` to `clone` or `fetch`.
 - **`fetch` + `commit-tree` + `push` only**; `pull`, `merge`, and `rebase` are never
   invoked.
-- Push failure is classified as non-fast-forward (retry per step 12) versus anything else
+- Push failure is classified as non-fast-forward (retry per step 13) versus anything else
   (report).
