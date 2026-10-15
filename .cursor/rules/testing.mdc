@@ -1,0 +1,84 @@
+---
+description: syncintosh test conventions — unit + integration, no control flow, 90% coverage
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Test conventions
+
+## Unit and integration are both mandatory
+
+- **Unit**: merge engine, adapters, conflict rules, crypto envelope, manifest round-trips —
+  no I/O.
+- **Integration**: the whole flow (collect → encrypt → commit → pull → decrypt → merge →
+  apply) against a **temporary git remote** and a **temp HOME**.
+- A change with no integration coverage of its flow is incomplete.
+
+## No control flow (auto-enforced)
+
+**No `if` / `for` / `while` statements inside a test function.** `tests/test_style.py`
+walks the AST and fails otherwise.
+
+- Multiple cases → `@pytest.mark.parametrize`.
+- Set checks → a comprehension that builds a **violation list**, compared to `[]`.
+
+```python
+# Bad — stops at the first failure, hides which case broke
+def test_ids_unique():
+    for rec in records:
+        assert rec.id not in seen
+
+
+# Good — every violation surfaces at once
+def test_ids_unique():
+    bad = [rec.id for rec in records if rec.id in seen]
+    assert bad == []
+```
+
+Comprehensions are expressions and are allowed; the ban is on statements.
+
+## Given–When–Then (auto-enforced)
+
+- `# when` · `# then` **required**; `# given` only with setup code.
+- When act and assert are one unit (exception checks), use `# when & then`.
+- Order is given → when → then.
+
+```python
+def test_one_sided_change_wins(self) -> None:
+    # given
+    base, local, remote = '{"a": 1}', '{"a": 2}', '{"a": 1}'
+
+    # when
+    merged = merge_json(base, local, remote)
+
+    # then
+    assert merged.value_of("a") == 2
+```
+
+## Coverage floor 90%
+
+`pytest` runs `--cov-fail-under=90`. **Never lower the gate or pass `--no-cov`** — write
+tests.
+
+## No network, no real HOME, no real keychain
+
+Use fakes and `tmp_path`; point HOME at a temp directory. Sample files in `tests/fixtures/`
+use **real key names** — do not invent them.
+
+## Property tests
+
+Use hypothesis for the merge engine: idempotence, one-sided change always wins, both-sides
+key change is the only conflict.
+
+## Boundaries to cover
+
+Missing/empty key, file absent on one machine, app not installed (apply deferred),
+both-sides change on one key, stale base, tampered ciphertext (AAD mismatch must raise),
+master key that fails to unwrap.
+
+## Style
+
+- One concept per test; the name states the **behavior**
+  (`test_missing_key_is_not_a_conflict`).
+- Reason-bearing assertions get a message: `assert applied == [], "an app that is not installed must not be applied"`.
+- Use `pytest.raises`, `pytest.approx`, `monkeypatch`, and fixtures.

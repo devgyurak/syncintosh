@@ -1,0 +1,63 @@
+---
+description: syncintosh layering and security invariants — architecture rules that must not be broken
+alwaysApply: true
+---
+
+# syncintosh architecture
+
+The full canon is in `AGENTS.md`. This rule is the **always-on** part.
+
+## Layers (dependencies point one way, inward)
+
+```
+cli/ ──▶ services/ ──▶ core/                    (core is pure, stdlib only)
+adapters/ · presets/ · crypto/ · vcs/ · system/ · llm/ ──▶ core/   (infrastructure)
+```
+
+```
+src/syncintosh/
+├── cli/          Typer entrypoints + Rich rendering — wiring only, no logic
+├── core/         Pure domain: models, manifest, merge engine, conflicts, ports
+├── services/     Use-cases: collect · diff · merge · apply · sync · resolve · key-rotate
+├── adapters/     Format adapters: jsonc · toml · yaml · xml · plist · text · binary
+├── presets/      Built-in preset catalog (paths, noise, bundle IDs, URLs, casks)
+├── crypto/       AES-256-GCM envelope, HKDF, manifest encryption, key wrapping, keyring
+├── vcs/          git CLI subprocess transport
+├── system/       Collection, app detection, launchd, watchdog, secret scan
+└── llm/          OpenAI-compatible client, masking, validation
+```
+
+## Absolute rules
+
+1. **`core` is pure** — stdlib only, no I/O, no third-party, no `subprocess`, no clock or
+   env reads. Anything external needs a port in `core/ports.py`.
+2. **Ports in `core`, implementations in infrastructure.** `core`/`services` never name a
+   concrete adapter/crypto/vcs class.
+3. **`cli` holds no logic** — parse, call a service, render.
+4. **Collection copies, never symlinks** — IDEs' atomic saves sever symlinks.
+5. **Adapters round-trip** — comments, key order, and formatting preserved.
+6. **No I/O in constructors** — use explicit factories.
+7. **Frozen boundary models** — no `obj.x = ...` after construction.
+8. **State-changing ops return `None`, raise on failure.**
+
+## Security invariants (the most dangerous)
+
+- Ciphertext envelope is `version(1B) | nonce(12B) | ciphertext | tag(16B)`. **Layout fixed.**
+- **AAD = file ID + format version** on both encrypt and decrypt.
+- Nonce is random per encryption; never a counter, never reused.
+- Stable random file ID → `objects/<id>.enc`; the encrypted manifest holds the real path.
+  Never encrypt the path into the filename.
+- Plaintext lives only in `~/.local/share/syncintosh/work/`, outside git, git-ignored.
+- Docker `auths` and TLS certs are **stripped in code**; dangerous paths blocked before collection.
+- LLM: mask secrets/domains, validate output, propose → approve, backup commit before apply.
+- Only URLs hard-coded in built-in presets are trusted.
+
+## Commands
+
+`uv` only (`pip`/bare `python` forbidden):
+
+```bash
+uv run ruff format && uv run ruff check --fix && uv run ty check && uv run pytest
+```
+
+All four must pass.

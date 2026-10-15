@@ -1,0 +1,40 @@
+{
+  "description": "syncintosh hooks. Scripts live in scripts/agent_hooks/ and are shared with Claude Code, Cursor, OpenCode, and Pi. Paths use the git root so the hooks work from a subdirectory.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|exec_command|write_stdin",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_hooks/guard_secrets.py\" --tool codex",
+            "commandWindows": "python \"%CD%\\scripts\\agent_hooks\\guard_secrets.py\" --tool codex",
+            "statusMessage": "Checking for secret / plaintext access...",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_hooks/format_python.py\" --tool codex",
+            "commandWindows": "python \"%CD%\\scripts\\agent_hooks\\format_python.py\" --tool codex",
+            "statusMessage": "Applying ruff...",
+            "timeout": 90
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_hooks/check_layering.py\" --tool codex",
+            "commandWindows": "python \"%CD%\\scripts\\agent_hooks\\check_layering.py\" --tool codex",
+            "statusMessage": "Checking layer dependencies...",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

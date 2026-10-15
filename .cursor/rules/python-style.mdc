@@ -1,0 +1,56 @@
+---
+description: Python, ruff, and ty conventions for syncintosh source code
+globs: src/**/*.py
+alwaysApply: false
+---
+
+# Python conventions (src/)
+
+## Language
+
+- **Minimum 3.12.** `pyproject.toml`'s `requires-python` is the source of truth.
+- **Every module starts with `from __future__ import annotations`.**
+- **Type hints on every public function and method.** `Any` at boundaries only.
+- **Runtime-unneeded imports go in `if TYPE_CHECKING:`.** Heavy deps (`cryptography`,
+  `lxml`, `openai`) are imported **lazily inside the command** for fast CLI startup.
+- **No mutable default arguments.** Collection defaults are `tuple` (`()`).
+- **Never log secrets.** Mask sensitive values in `__repr__`.
+- **Text I/O declares `encoding="utf-8"`** everywhere.
+- **Comments say "why".** Vendor quirks and noise keys get a reason so they are not
+  "tidied" into a regression. **English.**
+
+## Prefer Final + Literal over Enum
+
+When a value is serialized verbatim, a `str`-mixed `Enum` can stringify to `"Kind.NAME"`
+and break the output silently.
+
+```python
+Scope = Literal["common", "machine"]
+
+class Scopes:
+    COMMON: Final = "common"
+    MACHINE: Final = "machine"
+```
+
+## Do not shadow builtins
+
+A class must not define a method named `list`/`dict`/`type`/`id` — it shadows the
+annotation (`-> list[X]`) and breaks `ty`.
+
+## Architecture
+
+`core` is pure (no I/O, stdlib only). `services` uses `core` + ports. Infrastructure
+(`adapters`/`presets`/`crypto`/`vcs`/`system`/`llm`) implements ports. `cli` wires without
+logic. See `.cursor/rules/architecture.mdc` and `AGENTS.md` §2.
+
+## Security
+
+Never weaken the ciphertext envelope, the AAD binding, the nonce policy, manifest ID
+stability, or the secret exclusions. See `AGENTS.md` §3.
+
+## ruff / ty
+
+- Configuration in `pyproject.toml` only. Line length 120; let the formatter decide breaks.
+- Order: `ruff format` → `ruff check --fix` → `ty check`.
+- Do not disable a rule wholesale; use a file-scoped `per-file-ignores` entry.
+- If you write `# noqa`/`# type: ignore`, state **why** on the same line.

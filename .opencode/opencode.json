@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "uv *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git commit*": "ask",
+      "git push*": "ask",
+      "rm -rf*": "deny"
+    }
+  },
+  "agent": {
+    "build": {
+      "description": "Default implementation agent.",
+      "mode": "primary"
+    }
+  }
+}

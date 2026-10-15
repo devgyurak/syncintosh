@@ -1,0 +1,17 @@
+# Codex CLI project settings (layered over your personal ~/.codex/config.toml).
+#
+# Reference: https://learn.chatgpt.com/docs/config-file/config-basic
+#
+# Model choice and approval policy are intentionally left out — those are personal
+# preferences for ~/.codex/config.toml. This file holds only what working in *this*
+# repository needs.
+
+# AGENTS.md is read up to 32 KiB by default. This repository keeps the canon in the single
+# root AGENTS.md, so the default is enough.
+project_doc_max_bytes = 32768
+
+# syncintosh writes plaintext only under ~/.local/share/syncintosh/work/. Keep agent writes
+# inside the working directory so nothing touches that path or a real keychain.
+[sandbox_workspace_write]
+network_access = true
+exclude_tmpdir_env_var = false

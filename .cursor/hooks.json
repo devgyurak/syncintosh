@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [
+      { "command": "python3 scripts/agent_hooks/guard_secrets.py --tool cursor", "failClosed": true }
+    ],
+    "beforeShellExecution": [
+      { "command": "python3 scripts/agent_hooks/guard_secrets.py --tool cursor", "failClosed": true }
+    ],
+    "afterFileEdit": [
+      { "command": "python3 scripts/agent_hooks/format_python.py --tool cursor" }
+    ],
+    "stop": [
+      { "command": "python3 scripts/agent_hooks/check_layering.py --tool cursor --event stop", "failClosed": false }
+    ]
+  }
+}
