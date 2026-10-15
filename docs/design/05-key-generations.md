@@ -32,6 +32,9 @@ whether a generation is still needed. #2 declares `generations`/`get`/`put` only
 An entry that is **present but unreadable** — not valid hex, or not 32 bytes — is a different
 failure: `KeyStoreCorrupt` (a `CryptoError`, in `core` alongside the others). The generation
 exists; it is corrupt; the fix is to re-import it, not to report the ciphertext as tampered.
+`put` cannot repair one on its own — it reads the entry first, to detect a second key, so a
+corrupt entry raises there too. Whether an import may **overwrite** a corrupt entry (repair)
+rather than stop is part of the import/rotation slice (#8).
 
 **`KG_1` is the master key.** `init` creates it, the recovery-key backup protects it, and
 §3.1's "wrapped with a KDF for export/import" applies to it. `key export` wraps the **whole
