@@ -207,6 +207,23 @@ def test_the_key_wrap_domain_is_not_encryptable_until_the_wrap_slice() -> None:
         envelope.encrypt(b"x", file_id="", key=KEY, key_id=KEY_ID, domain="key-wrap")
 
 
+@pytest.mark.parametrize("key_id", [0, -1, 2**32], ids=["zero", "negative", "too_large"])
+def test_an_out_of_range_key_id_is_a_caller_error(key_id) -> None:
+    # when & then — a uint32 overflow must be a clear ValueError, not an OverflowError
+    with pytest.raises(ValueError):
+        envelope.encrypt(b"x", file_id=FILE_ID, key=KEY, key_id=key_id, domain="object")
+
+
+def test_a_bad_file_id_is_a_caller_error_before_the_key_lookup(memory_key_store) -> None:
+    # given — an empty ring, so a lookup-first order would report UnknownKeyGeneration
+    store = memory_key_store({})
+    blob = envelope.encrypt(b"payload", file_id=FILE_ID, key=KEY, key_id=KEY_ID, domain="object")
+
+    # when & then
+    with pytest.raises(ValueError):
+        envelope.decrypt(blob, file_id="not-hex", keys=store, domain="object")
+
+
 def test_nonces_are_unique_across_many_encryptions() -> None:
     # when
     nonces = {envelope.encrypt(b"x", file_id=FILE_ID, key=KEY, key_id=KEY_ID, domain="object")[5:17] for _ in range(64)}

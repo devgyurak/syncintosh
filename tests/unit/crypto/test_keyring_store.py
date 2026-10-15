@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from syncintosh.core.errors import KeyStoreCorrupt
 from syncintosh.core.ports import KeyStore
 from syncintosh.crypto.keyring_store import INDEX_USERNAME, KeyringKeyStore
 
@@ -175,4 +176,42 @@ def test_the_backend_is_resolved_lazily_on_the_first_call(monkeypatch) -> None:
 
     # when & then
     with pytest.raises(RuntimeError):
+        store.generations()
+
+
+def test_a_non_hex_entry_is_a_crypto_error() -> None:
+    # given
+    backend = FakeBackend()
+    backend.set_password(NAMESPACE, "gen-1", "not hex")
+    store = KeyringKeyStore(NAMESPACE, backend)
+
+    # when & then — a CryptoError, so a caller branching on it does not crash
+    with pytest.raises(KeyStoreCorrupt):
+        store.get(1)
+
+
+def test_a_wrong_length_entry_is_a_crypto_error() -> None:
+    # given
+    backend = FakeBackend()
+    backend.set_password(NAMESPACE, "gen-1", bytes(16).hex())
+    store = KeyringKeyStore(NAMESPACE, backend)
+
+    # when & then
+    with pytest.raises(KeyStoreCorrupt):
+        store.get(1)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["12", "5", "[0, -3]", "[1, 2.5]", "[true]"],
+    ids=["string_number", "bare_number", "non_positive", "float", "bool"],
+)
+def test_an_index_that_is_not_a_list_of_ids_is_a_loud_failure(raw) -> None:
+    # given
+    backend = FakeBackend()
+    backend.set_password(NAMESPACE, INDEX_USERNAME, raw)
+    store = KeyringKeyStore(NAMESPACE, backend)
+
+    # when & then
+    with pytest.raises(ValueError):
         store.generations()

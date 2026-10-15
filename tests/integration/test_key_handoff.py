@@ -15,7 +15,7 @@ import pytest
 
 from syncintosh.crypto.envelope import decrypt, encrypt
 from syncintosh.crypto.keyring_store import KeyringKeyStore
-from syncintosh.crypto.ring_export import Ring, unwrap_ring, wrap_ring
+from syncintosh.crypto.ring_export import Ring, RingEntry, unwrap_ring, wrap_ring
 
 pytestmark = pytest.mark.integration
 
@@ -39,13 +39,13 @@ class FakeKeyringBackend:
 
 
 def _dump(store: KeyringKeyStore) -> Ring:
-    """The `(generation, key)` pairs an export carries; a held generation is never absent."""
-    return tuple((gid, key) for gid in store.generations() if (key := store.get(gid)) is not None)
+    """The `(generation, key)` entries an export carries; a held generation is never absent."""
+    return tuple(RingEntry(gid, key) for gid in store.generations() if (key := store.get(gid)) is not None)
 
 
 def _load(store: KeyringKeyStore, ring: Ring) -> None:
-    for key_id, key in ring:
-        store.put(key_id, key)
+    for entry in ring:
+        store.put(entry.key_id, entry.key)
 
 
 def test_a_ring_exported_on_one_machine_decrypts_on_another() -> None:

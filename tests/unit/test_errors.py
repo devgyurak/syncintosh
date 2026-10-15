@@ -6,6 +6,7 @@ from __future__ import annotations
 from syncintosh.core.errors import (
     AuthenticationError,
     CryptoError,
+    KeyStoreCorrupt,
     MasterKeyUnwrapError,
     UnknownKeyGeneration,
     UnsupportedEnvelopeVersion,
@@ -14,13 +15,19 @@ from syncintosh.core.errors import (
 
 def test_every_crypto_error_derives_from_the_base() -> None:
     # given
-    kinds = (AuthenticationError, UnsupportedEnvelopeVersion, UnknownKeyGeneration, MasterKeyUnwrapError)
+    kinds = (
+        AuthenticationError,
+        UnsupportedEnvelopeVersion,
+        UnknownKeyGeneration,
+        MasterKeyUnwrapError,
+        KeyStoreCorrupt,
+    )
 
     # when
     derived = [issubclass(kind, CryptoError) for kind in kinds]
 
     # then
-    assert derived == [True, True, True, True]
+    assert derived == [True, True, True, True, True]
 
 
 def test_unknown_generation_is_distinct_from_authentication_failure() -> None:

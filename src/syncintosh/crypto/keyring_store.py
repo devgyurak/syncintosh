@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
+from syncintosh.core.errors import KeyStoreCorrupt
+
 KEY_SIZE = 32
 INDEX_USERNAME = "generations"
 
@@ -34,6 +36,10 @@ class KeyringKeyStore:
     index entry `<namespace> / generations` is the JSON list the keyring cannot otherwise give
     back. `put` writes the key before the index, so a crash loses an index entry at worst, not
     a key.
+
+    The index is read-modify-write, so `put` is only safe while the caller holds the repo lock
+    (`docs/design/01-sync-model.md`). Constraining that — the key import and rotation path —
+    is the rotation slice's job (#8).
     """
 
     def __init__(self, namespace: str, backend: _Backend | None = None) -> None:
@@ -59,16 +65,32 @@ class KeyringKeyStore:
             values = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(f"the keyring index for {self._namespace!r} is not valid JSON") from exc
-        return tuple(sorted(int(value) for value in values))
+        if not isinstance(values, list) or not all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 1 for value in values
+        ):
+            raise ValueError(f"the keyring index for {self._namespace!r} is not a list of generation ids")
+        return tuple(sorted(values))
 
     def generations(self) -> tuple[int, ...]:
         """Return the stored generation ids, ascending."""
         return self._read_index()
 
     def get(self, key_id: int) -> bytes | None:
-        """Return generation `key_id`, or `None` when this machine does not hold it."""
+        """Return generation `key_id`, or `None` when this machine does not hold it.
+
+        A present-but-unreadable entry raises `KeyStoreCorrupt`, not a bare `ValueError`, so a
+        caller that branches on `CryptoError` sees "re-import it" rather than a crash.
+        """
         raw = self._active_backend().get_password(self._namespace, self._key_username(key_id))
-        return None if raw is None else bytes.fromhex(raw)
+        if raw is None:
+            return None
+        try:
+            key = bytes.fromhex(raw)
+        except ValueError as exc:
+            raise KeyStoreCorrupt(f"the stored generation {key_id} is not valid hex") from exc
+        if len(key) != KEY_SIZE:
+            raise KeyStoreCorrupt(f"the stored generation {key_id} is {len(key)} bytes, expected {KEY_SIZE}")
+        return key
 
     def put(self, key_id: int, key: bytes) -> None:
         """Store generation `key_id`. Raises on failure."""

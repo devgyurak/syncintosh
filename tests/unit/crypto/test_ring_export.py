@@ -9,13 +9,16 @@ and one real round-trip, so they cannot be silently weakened.
 from __future__ import annotations
 
 import inspect
+import unicodedata
 
 import pytest
 
 from syncintosh.core.errors import MasterKeyUnwrapError
+from syncintosh.crypto.primitives import be32
 from syncintosh.crypto.ring_export import (
     MIN_BLOB_SIZE,
     PRODUCTION_SCRYPT,
+    RingEntry,
     ScryptParams,
     _pack_ring,
     _unpack_ring,
@@ -24,16 +27,23 @@ from syncintosh.crypto.ring_export import (
 )
 
 CHEAP = ScryptParams(log2_n=4, r=1, p=1)
-RING = ((1, bytes(range(32))), (2, bytes(range(32, 64))))
+CHEAP_ONLY = frozenset({CHEAP})
+RING = (RingEntry(1, bytes(range(32))), RingEntry(2, bytes(range(32, 64))))
 
 
 def _cheap_blob(ring=RING, passphrase="correct horse") -> bytes:
-    return wrap_ring(ring, passphrase, params=CHEAP)
+    return wrap_ring(ring, passphrase, params=CHEAP, allowed=CHEAP_ONLY)
+
+
+def _raw_ring(*key_ids: int) -> bytes:
+    """Hand-build an export plaintext with the given generation ids, for the parser tests."""
+    entries = b"".join(be32(key_id) + bytes(32) for key_id in key_ids)
+    return len(key_ids).to_bytes(4, "big") + entries
 
 
 def test_pack_is_ascending_with_generation_one_first() -> None:
-    # when
-    packed = _pack_ring(((2, bytes(range(32, 64))), (1, bytes(range(32)))))
+    # when — the input order is not the output order
+    packed = _pack_ring((RingEntry(2, bytes(range(32, 64))), RingEntry(1, bytes(range(32)))))
 
     # then
     assert packed[:4] == (2).to_bytes(4, "big")
@@ -46,7 +56,7 @@ def test_roundtrip_with_cheap_params() -> None:
     blob = _cheap_blob()
 
     # when
-    ring = unwrap_ring(blob, "correct horse", allowed=frozenset({CHEAP}))
+    ring = unwrap_ring(blob, "correct horse", allowed=CHEAP_ONLY)
 
     # then
     assert ring == RING
@@ -58,7 +68,7 @@ def test_a_wrong_passphrase_is_a_unwrap_error() -> None:
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
-        unwrap_ring(blob, "wrong horse", allowed=frozenset({CHEAP}))
+        unwrap_ring(blob, "wrong horse", allowed=CHEAP_ONLY)
 
 
 def test_a_damaged_tag_is_a_unwrap_error() -> None:
@@ -68,7 +78,7 @@ def test_a_damaged_tag_is_a_unwrap_error() -> None:
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
-        unwrap_ring(bytes(damaged), "correct horse", allowed=frozenset({CHEAP}))
+        unwrap_ring(bytes(damaged), "correct horse", allowed=CHEAP_ONLY)
 
 
 def test_parameters_outside_the_allowlist_are_refused_before_the_kdf() -> None:
@@ -78,6 +88,26 @@ def test_parameters_outside_the_allowlist_are_refused_before_the_kdf() -> None:
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
         unwrap_ring(blob, "correct horse")
+
+
+def test_wrap_refuses_parameters_outside_its_allowlist() -> None:
+    # when & then — never write an export this build would refuse to open
+    with pytest.raises(ValueError):
+        wrap_ring(RING, "correct horse", params=CHEAP)
+
+
+def test_a_passphrase_is_normalized_to_nfc() -> None:
+    # given — the same Korean text in composed (NFC) and decomposed (NFD) forms
+    composed = "비밀번호"
+    decomposed = unicodedata.normalize("NFD", composed)
+
+    # when — written decomposed, read composed
+    blob = wrap_ring(RING, decomposed, params=CHEAP, allowed=CHEAP_ONLY)
+    ring = unwrap_ring(blob, composed, allowed=CHEAP_ONLY)
+
+    # then
+    assert composed != decomposed
+    assert ring == RING
 
 
 @pytest.mark.parametrize(
@@ -92,13 +122,13 @@ def test_a_damaged_header_is_a_unwrap_error(index, value) -> None:
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
-        unwrap_ring(bytes(damaged), "correct horse", allowed=frozenset({CHEAP}))
+        unwrap_ring(bytes(damaged), "correct horse", allowed=CHEAP_ONLY)
 
 
 def test_a_blob_shorter_than_the_minimum_is_a_unwrap_error() -> None:
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
-        unwrap_ring(bytes(MIN_BLOB_SIZE - 1), "correct horse", allowed=frozenset({CHEAP}))
+        unwrap_ring(bytes(MIN_BLOB_SIZE - 1), "correct horse", allowed=CHEAP_ONLY)
 
 
 def test_production_params_are_the_documented_work_factor() -> None:
@@ -110,11 +140,13 @@ def test_production_params_are_the_documented_work_factor() -> None:
 def test_the_shipped_defaults_are_the_production_parameters() -> None:
     # when
     params_default = inspect.signature(wrap_ring).parameters["params"].default
-    allowed_default = inspect.signature(unwrap_ring).parameters["allowed"].default
+    wrap_allowed_default = inspect.signature(wrap_ring).parameters["allowed"].default
+    unwrap_allowed_default = inspect.signature(unwrap_ring).parameters["allowed"].default
 
     # then
     assert params_default == PRODUCTION_SCRYPT
-    assert allowed_default == frozenset({PRODUCTION_SCRYPT})
+    assert wrap_allowed_default == frozenset({PRODUCTION_SCRYPT})
+    assert unwrap_allowed_default == frozenset({PRODUCTION_SCRYPT})
 
 
 def test_production_parameters_really_roundtrip() -> None:
@@ -148,9 +180,9 @@ def test_scrypt_params_reject_bad_fields(kwargs, message) -> None:
     ("ring", "message"),
     [
         ((), "generation 1"),
-        (((2, bytes(32)),), "generation 1"),
-        (((1, bytes(32)), (1, bytes(32))), "two keys"),
-        (((1, bytes(16)),), "32 bytes"),
+        ((RingEntry(2, bytes(32)),), "generation 1"),
+        ((RingEntry(1, bytes(32)), RingEntry(1, bytes(32))), "two keys"),
+        ((RingEntry(1, bytes(16)),), "32 bytes"),
     ],
     ids=["empty", "no_generation_one", "duplicate_id", "short_key"],
 )
@@ -162,10 +194,30 @@ def test_an_invalid_ring_is_refused(ring, message) -> None:
 
 @pytest.mark.parametrize(
     "plaintext",
-    [b"", (0).to_bytes(4, "big"), (2).to_bytes(4, "big") + bytes(36)],
-    ids=["empty", "zero_count", "length_mismatch"],
+    [
+        b"",
+        _raw_ring(),
+        (2).to_bytes(4, "big") + bytes(36),
+        _raw_ring(2, 1),
+        _raw_ring(2),
+        _raw_ring(1, 1),
+    ],
+    ids=["empty", "zero_count", "length_mismatch", "unsorted", "not_from_one", "duplicate"],
 )
 def test_a_malformed_plaintext_is_a_unwrap_error(plaintext) -> None:
-    # when & then
+    # when & then — the plaintext is authenticated, so a violation is a bug, not an attack
     with pytest.raises(MasterKeyUnwrapError):
         _unpack_ring(plaintext)
+
+
+def test_ring_entry_repr_masks_the_key() -> None:
+    # given
+    secret = bytes(range(32))
+
+    # when
+    text = repr(RingEntry(1, secret))
+
+    # then
+    assert "key_id=1" in text
+    assert "masked" in text
+    assert secret.hex() not in text

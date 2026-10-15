@@ -7,7 +7,7 @@ import pytest
 
 from syncintosh.core.errors import AuthenticationError
 from syncintosh.crypto.envelope import decrypt, encrypt
-from syncintosh.crypto.hkdf import derive_subkey, hkdf_info, key_id_bytes
+from syncintosh.crypto.hkdf import derive_subkey, hkdf_info
 
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(32, 64))
@@ -21,12 +21,6 @@ def test_hkdf_info_is_domain_specific() -> None:
     # then
     assert len(infos) == 3
     assert hkdf_info("object") == b"syncintosh/v1/object"
-
-
-def test_key_id_bytes_is_big_endian() -> None:
-    # when & then
-    assert key_id_bytes(1) == b"\x00\x00\x00\x01"
-    assert key_id_bytes(0x01020304) == b"\x01\x02\x03\x04"
 
 
 def test_subkeys_differ_per_domain_generation_and_key() -> None:

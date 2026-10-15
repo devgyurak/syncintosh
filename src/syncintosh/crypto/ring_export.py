@@ -9,6 +9,8 @@ spending work on the derivation — a tampered blob must not be able to force a 
 from __future__ import annotations
 
 import os
+import struct
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -17,21 +19,37 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from syncintosh.core.errors import MasterKeyUnwrapError
+from syncintosh.crypto.primitives import KEY_ID_SIZE, KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, length_prefixed
 
 MAGIC = b"SNTR"
 FORMAT_VERSION = 1
 KDF_SCRYPT = 1
 SALT_SIZE = 16
-NONCE_SIZE = 12
-TAG_SIZE = 16
-KEY_SIZE = 32
-KEY_ID_SIZE = 4
-HEADER_SIZE = len(MAGIC) + 3 + 4 + 4 + SALT_SIZE  # magic | format | kdf | log2_n | r | p | salt
-MIN_BLOB_SIZE = HEADER_SIZE + NONCE_SIZE + TAG_SIZE
 AAD_DOMAIN = b"ring-export"
 
-# A single ring entry: a generation id and its 32-byte key.
-RingEntry = tuple[int, bytes]
+# magic | format | kdf | log2_n | r | p | salt. One definition of the header layout for both
+# pack and unpack, so the two can never disagree on an offset.
+_HEADER = struct.Struct(">4sBBBII16s")
+HEADER_SIZE = _HEADER.size
+MIN_BLOB_SIZE = HEADER_SIZE + NONCE_SIZE + TAG_SIZE
+
+
+@dataclass(frozen=True)
+class RingEntry:
+    """One generation in an export: its id and its 32-byte key.
+
+    `repr` masks the key, so an unwrapped ring cannot leak into a log or a traceback
+    (``AGENTS.md`` §4).
+    """
+
+    key_id: int
+    key: bytes
+
+    def __repr__(self) -> str:
+        return f"RingEntry(key_id={self.key_id}, key=<{len(self.key)} bytes masked>)"
+
+
+# The whole ring, ascending by generation id.
 Ring = tuple[RingEntry, ...]
 
 
@@ -68,27 +86,33 @@ PRODUCTION_ALLOWED = frozenset({PRODUCTION_SCRYPT})
 
 
 def _build_aad(header: bytes) -> bytes:
-    """`be32(len) || field` for ("ring-export", header) — its own domain, so it cannot be
+    """Length-prefixed ("ring-export", header) — its own domain, so the blob cannot be
     mistaken for a stored object or a key wrap."""
-    fields = (AAD_DOMAIN, header)
-    return b"".join(len(field).to_bytes(4, "big") + field for field in fields)
+    return length_prefixed(AAD_DOMAIN, header)
 
 
 def _derive_kek(passphrase: str, salt: bytes, params: ScryptParams) -> bytes:
-    return Scrypt(salt=salt, length=KEY_SIZE, n=params.n, r=params.r, p=params.p).derive(passphrase.encode("utf-8"))
+    """The AES-256 key-encryption key for `passphrase`.
+
+    The passphrase is **NFC-normalized** before UTF-8 encoding: the same text typed in NFC and
+    pasted from an NFD source must derive one key, or a valid recovery passphrase could read as
+    "wrong". The export format is a contract, so this can never be loosened later.
+    """
+    normalized = unicodedata.normalize("NFC", passphrase).encode("utf-8")
+    return Scrypt(salt=salt, length=KEY_SIZE, n=params.n, r=params.r, p=params.p).derive(normalized)
 
 
 def _pack_ring(ring: Iterable[RingEntry]) -> bytes:
     """`count(be32) || (key_id(be32) || KG(32))*`, ascending, so `KG_1` comes first."""
-    pairs = sorted(ring)
-    if not pairs or pairs[0][0] != 1:
+    entries = sorted(ring, key=lambda entry: entry.key_id)
+    if not entries or entries[0].key_id != 1:
         raise ValueError("a ring must hold generation 1 and no lower id")
-    if len({key_id for key_id, _ in pairs}) != len(pairs):
+    if len({entry.key_id for entry in entries}) != len(entries):
         raise ValueError("a ring cannot hold two keys for one generation id")
-    if any(len(key) != KEY_SIZE for _, key in pairs):
+    if any(len(entry.key) != KEY_SIZE for entry in entries):
         raise ValueError(f"every generation key must be {KEY_SIZE} bytes")
-    body = b"".join(key_id.to_bytes(KEY_ID_SIZE, "big") + key for key_id, key in pairs)
-    return len(pairs).to_bytes(4, "big") + body
+    body = b"".join(be32(entry.key_id) + entry.key for entry in entries)
+    return len(entries).to_bytes(4, "big") + body
 
 
 def _unpack_ring(plaintext: bytes) -> Ring:
@@ -98,33 +122,44 @@ def _unpack_ring(plaintext: bytes) -> Ring:
     body = plaintext[4:]
     if count == 0 or len(body) != count * (KEY_ID_SIZE + KEY_SIZE):
         raise MasterKeyUnwrapError("ring export plaintext does not match its record count")
-    return tuple(
-        (
+    entries = tuple(
+        RingEntry(
             int.from_bytes(body[start : start + KEY_ID_SIZE], "big"),
             body[start + KEY_ID_SIZE : start + KEY_ID_SIZE + KEY_SIZE],
         )
         for start in range(0, len(body), KEY_ID_SIZE + KEY_SIZE)
     )
+    # The plaintext is authenticated, so a violation is a bug, not an attack — but a partially
+    # loaded ring must not reach the store, so it fails here as one error.
+    if [entry.key_id for entry in entries] != sorted({entry.key_id for entry in entries}) or entries[0].key_id != 1:
+        raise MasterKeyUnwrapError("ring export is not an ascending ring of unique generations starting at 1")
+    return entries
 
 
-def wrap_ring(ring: Iterable[RingEntry], passphrase: str, *, params: ScryptParams = PRODUCTION_SCRYPT) -> bytes:
-    """Wrap the whole ring as one export blob, sealed under `passphrase`."""
+def wrap_ring(
+    ring: Iterable[RingEntry],
+    passphrase: str,
+    *,
+    params: ScryptParams = PRODUCTION_SCRYPT,
+    allowed: frozenset[ScryptParams] = PRODUCTION_ALLOWED,
+) -> bytes:
+    """Wrap the whole ring as one export blob, sealed under `passphrase`.
+
+    `params` must be in `allowed`, the same allowlist `unwrap_ring` enforces, so an export can
+    never be written that this build would refuse to open.
+    """
+    if params not in allowed:
+        raise ValueError("refusing to wrap the ring with KDF parameters this build will not unwrap")
     plaintext = _pack_ring(ring)
     salt = os.urandom(SALT_SIZE)
-    header = (
-        MAGIC
-        + bytes([FORMAT_VERSION, KDF_SCRYPT, params.log2_n])
-        + params.r.to_bytes(4, "big")
-        + params.p.to_bytes(4, "big")
-        + salt
-    )
+    header = _HEADER.pack(MAGIC, FORMAT_VERSION, KDF_SCRYPT, params.log2_n, params.r, params.p, salt)
     nonce = os.urandom(NONCE_SIZE)
     ciphertext = AESGCM(_derive_kek(passphrase, salt, params)).encrypt(nonce, plaintext, _build_aad(header))
     return header + nonce + ciphertext
 
 
 def unwrap_ring(blob: bytes, passphrase: str, *, allowed: frozenset[ScryptParams] = PRODUCTION_ALLOWED) -> Ring:
-    """Unwrap an export blob into `((key_id, key), ...)`, ascending.
+    """Unwrap an export blob into an ascending `Ring`.
 
     The KDF runs **only** when the blob's serialized parameters are in `allowed`; anything
     else is refused first, so a tampered blob cannot force an expensive derivation (DoS) and a
@@ -133,23 +168,19 @@ def unwrap_ring(blob: bytes, passphrase: str, *, allowed: frozenset[ScryptParams
     """
     if len(blob) < MIN_BLOB_SIZE:
         raise MasterKeyUnwrapError(f"ring export is shorter than the {MIN_BLOB_SIZE}-byte minimum")
-    if blob[: len(MAGIC)] != MAGIC:
+    magic, format_version, kdf, log2_n, r, p, salt = _HEADER.unpack_from(blob)
+    if magic != MAGIC:
         raise MasterKeyUnwrapError("ring export does not begin with the SNTR magic")
-    if blob[len(MAGIC)] != FORMAT_VERSION:
-        raise MasterKeyUnwrapError(f"ring export format {blob[len(MAGIC)]} is not supported")
-    if blob[len(MAGIC) + 1] != KDF_SCRYPT:
-        raise MasterKeyUnwrapError(f"ring export KDF {blob[len(MAGIC) + 1]} is not supported")
+    if format_version != FORMAT_VERSION:
+        raise MasterKeyUnwrapError(f"ring export format {format_version} is not supported")
+    if kdf != KDF_SCRYPT:
+        raise MasterKeyUnwrapError(f"ring export KDF {kdf} is not supported")
     try:
-        params = ScryptParams(
-            log2_n=blob[len(MAGIC) + 2],
-            r=int.from_bytes(blob[len(MAGIC) + 3 : len(MAGIC) + 7], "big"),
-            p=int.from_bytes(blob[len(MAGIC) + 7 : len(MAGIC) + 11], "big"),
-        )
+        params = ScryptParams(log2_n=log2_n, r=r, p=p)
     except ValueError as exc:
         raise MasterKeyUnwrapError("ring export carries invalid scrypt parameters") from exc
     if params not in allowed:
         raise MasterKeyUnwrapError("ring export uses KDF parameters this build will not run")
-    salt = blob[len(MAGIC) + 11 : HEADER_SIZE]
     nonce = blob[HEADER_SIZE : HEADER_SIZE + NONCE_SIZE]
     ciphertext = blob[HEADER_SIZE + NONCE_SIZE :]
     try:

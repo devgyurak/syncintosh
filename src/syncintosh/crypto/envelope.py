@@ -16,37 +16,29 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from syncintosh.core.errors import AuthenticationError, UnknownKeyGeneration, UnsupportedEnvelopeVersion
 from syncintosh.core.ports import Domain, KeyStore
-from syncintosh.crypto.hkdf import derive_subkey, key_id_bytes
+from syncintosh.crypto.hkdf import derive_subkey
+from syncintosh.crypto.primitives import KEY_ID_SIZE, NONCE_SIZE, TAG_SIZE, be32, length_prefixed
 
 VERSION = 1
-HEADER_SIZE = 5  # version(1) + key_id(4)
-NONCE_SIZE = 12
-TAG_SIZE = 16
+HEADER_SIZE = 1 + KEY_ID_SIZE  # version(1) + key_id(4)
 # An empty plaintext still costs a header, a nonce, and a tag — anything shorter is not an
 # envelope at all, so it fails as an authentication error rather than a version error.
 MIN_BLOB_SIZE = HEADER_SIZE + NONCE_SIZE + TAG_SIZE
 FILE_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
-def be32(value: int) -> bytes:
-    """A 4-byte big-endian `uint32` — the length prefix, the header id, and the salt."""
-    return value.to_bytes(4, "big")
-
-
 def build_aad(domain: Domain, header: bytes, subject: bytes) -> bytes:
-    """`be32(len(field)) || field` for (domain, header, subject), in that order.
+    """Length-prefixed (domain, header, subject), in that order.
 
-    Length prefixes keep every `(domain, header, subject)` triple mapped to exactly one byte
-    string; plain concatenation would let two different triples collide. `encrypt` and
-    `decrypt` both call this, which is what makes the binding real rather than asserted.
+    `encrypt` and `decrypt` both call this, which is what makes the slot binding real rather
+    than asserted.
     """
-    fields = (domain.encode("ascii"), header, subject)
-    return b"".join(be32(len(field)) + field for field in fields)
+    return length_prefixed(domain.encode("ascii"), header, subject)
 
 
 def pack_header(key_id: int) -> bytes:
     """`version || key_id` — the first five bytes, authenticated as part of the AAD."""
-    return bytes([VERSION]) + key_id_bytes(key_id)
+    return bytes([VERSION]) + be32(key_id)
 
 
 def _resolve_subject(domain: Domain, file_id: str) -> bytes:
@@ -75,17 +67,19 @@ def encrypt(plaintext: bytes, *, file_id: str, key: bytes, key_id: int, domain: 
     """
     subject = _resolve_subject(domain, file_id)
     header = pack_header(key_id)
+    subkey = derive_subkey(key, key_id, domain)
     nonce = _random_nonce()
     aad = build_aad(domain, header, subject)
-    ciphertext = AESGCM(derive_subkey(key, key_id, domain)).encrypt(nonce, plaintext, aad)
+    ciphertext = AESGCM(subkey).encrypt(nonce, plaintext, aad)
     return header + nonce + ciphertext
 
 
 def decrypt(blob: bytes, *, file_id: str, keys: KeyStore, domain: Domain) -> bytes:
     """Open `blob` for `domain`, raising a distinct error per failure mode.
 
-    The order matters: shape, then format, then key availability, then authenticity — so a
-    missing generation reads as "import the key", not "the file is corrupt".
+    The order matters: shape, then format, then the caller's arguments, then key availability,
+    then authenticity. Validating the subject before the key lookup keeps a caller bug (a bad
+    `file_id`) from being masked as `UnknownKeyGeneration`.
     """
     if len(blob) < MIN_BLOB_SIZE:
         raise AuthenticationError(f"envelope is shorter than the {MIN_BLOB_SIZE}-byte minimum")
@@ -95,10 +89,10 @@ def decrypt(blob: bytes, *, file_id: str, keys: KeyStore, domain: Domain) -> byt
     key_id = int.from_bytes(blob[1:HEADER_SIZE], "big")
     if key_id == 0:
         raise AuthenticationError("generation 0 is not a valid key id")
+    subject = _resolve_subject(domain, file_id)
     key = keys.get(key_id)
     if key is None:
         raise UnknownKeyGeneration(key_id)
-    subject = _resolve_subject(domain, file_id)
     header = blob[:HEADER_SIZE]
     nonce = blob[HEADER_SIZE : HEADER_SIZE + NONCE_SIZE]
     ciphertext = blob[HEADER_SIZE + NONCE_SIZE :]

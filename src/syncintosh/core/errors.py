@@ -36,3 +36,11 @@ class UnknownKeyGeneration(CryptoError):
 
 class MasterKeyUnwrapError(CryptoError):
     """The ring export could not be unwrapped: a wrong passphrase, or a damaged blob."""
+
+
+class KeyStoreCorrupt(CryptoError):
+    """A stored generation entry is present but unreadable (not valid hex, or not 32 bytes).
+
+    Deliberately distinct from `UnknownKeyGeneration`: the generation exists, it is corrupt,
+    and the fix is to re-import it — not to report the ciphertext as tampered.
+    """

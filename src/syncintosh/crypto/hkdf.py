@@ -12,14 +12,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from syncintosh.core.ports import Domain
+from syncintosh.crypto.primitives import KEY_SIZE, be32
 
-KEY_SIZE = 32
 INFO_PREFIX = b"syncintosh/v1/"
-
-
-def key_id_bytes(key_id: int) -> bytes:
-    """The 4-byte big-endian generation id — the HKDF salt and the header `key_id`."""
-    return key_id.to_bytes(4, "big")
 
 
 def hkdf_info(domain: Domain) -> bytes:
@@ -31,7 +26,8 @@ def derive_subkey(generation_key: bytes, key_id: int, domain: Domain) -> bytes:
     """Derive the 32-byte AES-256 subkey for `domain` under generation `key_id`.
 
     A wrong-size key or a non-positive id is a caller bug, not a crypto failure, so it raises
-    `ValueError` rather than a `CryptoError`.
+    `ValueError` rather than a `CryptoError`. The salt is `be32(key_id)`, which also rejects an
+    id above `2**32 - 1`.
     """
     if key_id < 1:
         raise ValueError(f"generation id must be >= 1, got {key_id}")
@@ -40,6 +36,6 @@ def derive_subkey(generation_key: bytes, key_id: int, domain: Domain) -> bytes:
     return HKDF(
         algorithm=hashes.SHA256(),
         length=KEY_SIZE,
-        salt=key_id_bytes(key_id),
+        salt=be32(key_id),
         info=hkdf_info(domain),
     ).derive(generation_key)

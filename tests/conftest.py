@@ -26,6 +26,12 @@ class MemoryKeyStore:
         return self._keys.get(key_id)
 
     def put(self, key_id: int, key: bytes) -> None:
+        # Mirror the real store: a second, different key for one generation id is a hard
+        # error (docs/design/05-key-generations.md), so a test cannot rely on silent
+        # overwrite and miss it.
+        existing = self._keys.get(key_id)
+        if existing is not None and existing != key:
+            raise ValueError(f"generation {key_id} already holds a different key")
         self._keys[key_id] = key
 
 
