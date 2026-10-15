@@ -201,6 +201,17 @@ def test_a_wrong_length_entry_is_a_crypto_error() -> None:
         store.get(1)
 
 
+def test_put_on_a_corrupt_entry_surfaces_the_corruption() -> None:
+    # given — repair is the import slice's job (#8), so today put must not silently overwrite
+    backend = FakeBackend()
+    backend.set_password(NAMESPACE, "gen-1", "not hex")
+    store = KeyringKeyStore(NAMESPACE, backend)
+
+    # when & then
+    with pytest.raises(KeyStoreCorrupt):
+        store.put(1, KEY)
+
+
 @pytest.mark.parametrize(
     "raw",
     ["12", "5", "[0, -3]", "[1, 2.5]", "[true]", "[1, 1]", f"[{2**32}]"],
