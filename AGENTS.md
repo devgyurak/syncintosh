@@ -128,8 +128,9 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
   another slot. Never encrypt without it.
 - **The nonce is random per encryption.** At settings-file volume a collision is
   negligible; do not switch to a counter.
-- The **key ring** is wrapped with a KDF (scrypt or Argon2id) for export/import. Do not
-  weaken the KDF parameters to speed up tests — stub the clock/work factor instead.
+- The **key ring** is wrapped with scrypt (`N=2^17, r=8, p=1`, ~128 MiB) for export/import;
+  the blob layout is in `docs/design/05-key-generations.md` ("Ring export"). Do not weaken
+  the KDF parameters to speed up tests — pass cheap parameters explicitly instead.
 - **Key generations are retained by default.** Rotation protects future data only, is
   **fast-forward only**, and is never merged (`docs/design/05-key-generations.md`).
 

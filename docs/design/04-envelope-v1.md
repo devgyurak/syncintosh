@@ -113,6 +113,10 @@ exceptions. Collapsing them into one error would tell the user "corrupt" when th
 | GCM tag / AAD mismatch | `AuthenticationError` | tampered, truncated, or moved to another slot | do not trust the file; restore from another clone |
 | KDF unwrap fails | `MasterKeyUnwrapError` | wrong passphrase, or a damaged export | retry the passphrase |
 
+`KeyGenerationMismatch` lands with the rotation/commitment slice (**#8**), because nothing
+publishes a commitment until then ([05-key-generations.md](05-key-generations.md)). #2 ships
+the other four.
+
 ## Test vectors
 
 The envelope test uses fixed vectors as a golden fixture; #2 fills in the values when the

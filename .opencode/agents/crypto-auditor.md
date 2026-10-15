@@ -43,8 +43,16 @@ Open `src/syncintosh/crypto/` and confirm the envelope is
 - The `KeyStore` port addresses generations by id. Confirm `get(key_id) -> None` maps to
   `UnknownKeyGeneration` ("this machine does not hold it — import it"), not to
   "unrecoverable", and that it is distinct from an authentication failure.
-- Export wraps the whole ring with a KDF (scrypt or Argon2id). Confirm parameters are not
-  reduced "to speed up tests" — the test must stub the clock/work factor instead.
+- Export wraps the **whole ring** with scrypt (`N=2^17, r=8, p=1`, ~128 MiB). The blob is
+  `magic "SNTR" | format(1) | kdf(1)=scrypt | log2_n(1) | r(be32) | p(be32) | salt(16) |
+  nonce(12) | AES-256-GCM ciphertext | tag(16)`, with AAD = length-prefixed
+  `("ring-export", header)`. Confirm the parameters are not reduced "to speed up tests" —
+  cheap parameters are injected in tests, and the production default (`PRODUCTION_SCRYPT`)
+  is never weakened.
+- Confirm `unwrap_ring` rejects a blob whose serialized KDF parameters are **outside the
+  allowlist before running the KDF**, so a tampered blob cannot force an expensive derivation
+  (DoS) and a weak export is refused; a wrong passphrase and a damaged blob must both surface
+  as `MasterKeyUnwrapError`.
 - Subkeys are derived per generation and purpose (HKDF: object / manifest / key-wrap). An
   object key must never decrypt a manifest.
 - `key rotate` re-encrypts every object and the manifest under the new generation in one
