@@ -1,0 +1,69 @@
+name: release
+
+# Cut a release with `git tag vX.Y.Z && git push origin vX.Y.Z` from `main`.
+# The tag is the single source of truth for the version: hatch-vcs derives the package
+# version from it, so there is no version string in pyproject.toml or the source.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: gate before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-extras
+      - run: uv run ruff format --check
+      - run: uv run ruff check
+      - run: uv run ty check
+      - run: uv run pytest
+      - run: uv run python scripts/check_agent_config.py
+      - run: uv run python scripts/agent_hooks/selftest.py
+
+  build:
+    name: build distribution
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # hatch-vcs needs the full history and tags to derive the version.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Tag matches the built version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built="$(basename dist/*.whl | sed -E 's/^syncintosh-([^-]+)-.*/\1/')"
+          echo "tag=$tag built=$built"
+          test "$tag" = "$built"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted Publishing (OIDC) — configure the PyPI project to trust this workflow.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish
+        run: uv publish
+      - name: Note
+        run: echo "Homebrew formula refresh is a follow-up step (tap update on release)."

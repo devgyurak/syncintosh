@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint · types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Format check
+        run: uv run ruff format --check
+      - name: Lint
+        run: uv run ruff check
+      - name: Type check
+        run: uv run ty check
+
+  test:
+    name: test · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is included on purpose: keychain, launchd, and mdfind behavior is macOS-only.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync
+        run: uv sync --all-extras --python ${{ matrix.python }}
+      - name: Unit + integration (coverage gate 90%)
+        run: uv run pytest
+
+  integration:
+    name: integration presence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      # Presence check for the integration suite. Only the coverage floor is relaxed
+      # (--cov-fail-under=0); every other addopt stays on, so --disable-socket (the
+      # no-network rule) and --strict-markers keep applying. Missing integration tests make
+      # pytest exit 5, so this fails. The real coverage gate is the `test` job above and is
+      # never disabled.
+      - run: uv sync --all-extras
+      - name: Integration tests must exist and pass
+        run: uv run pytest -m integration --cov-fail-under=0 -q

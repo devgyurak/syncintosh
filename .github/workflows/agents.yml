@@ -1,0 +1,36 @@
+name: agents
+
+# Guards the agent configuration itself: broken pointers, schema drift, or a hook whose
+# script went missing fail here (and in PR) instead of on a user's machine.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agents-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  config:
+    name: agent config integrity + hook selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Check agent config
+        run: uv run python scripts/check_agent_config.py
+
+      - name: Hook selftest
+        run: uv run python scripts/agent_hooks/selftest.py
