@@ -1,0 +1,57 @@
+# syncintosh — design notes
+
+These notes are the **decision record** for the parts of syncintosh that are expensive to
+change once ciphertext is in a user's repo: how git is used, the manifest, the ciphertext
+envelope, and key generations. They are also the **"plan"** that the rest of the repo refers
+to — `AGENTS.md`, `scripts/agent_hooks/guard_secrets.py`, and the skills point here instead
+of at an unversioned document.
+
+| Note | Decides | Status |
+|---|---|---|
+| [01-sync-model.md](01-sync-model.md) | How git is used, and the sync cycle | Accepted |
+| [02-base-and-merge.md](02-base-and-merge.md) | What `base` is, and the first-connect flow | Accepted |
+| [03-manifest.md](03-manifest.md) | File IDs, records, canonical serialization | Accepted |
+| [04-envelope-v1.md](04-envelope-v1.md) | Envelope layout, AAD, decrypt errors | Accepted |
+| [05-key-generations.md](05-key-generations.md) | The key ring, rotation, distribution | Accepted |
+| [presets.md](presets.md) | Built-in preset reference table | Living table |
+
+`Accepted` means implemented or about to be implemented; changing one follows the revision
+procedure below. `Living table` means it is filled in incrementally as presets are verified
+on a real Mac.
+
+## Revision procedure
+
+The envelope layout, the AAD composition, and key-generation semantics are
+**security-critical**. Changing one means updating, in **one commit**:
+
+1. the note,
+2. `AGENTS.md` §3.1, and
+3. the three `crypto-auditor` copies (`.claude/agents` is the source; `.opencode/agents` and
+   `.codex/agents` are verbatim copies).
+
+Then run `uv run python scripts/check_agent_config.py`, which fails when the three auditor
+bodies drift apart. Everything else is just "update the note, then the code".
+
+A decision that is still open is marked **Open** in its note rather than silently omitted.
+
+## Runtime & layout
+
+Machine-local state, and where it lives. This replaces the layout section of the old plan;
+`scripts/agent_hooks/guard_secrets.py` and the `add-preset` skill link here.
+
+| Path | Holds | Inside git? |
+|---|---|---|
+| `~/.config/syncintosh/config.json` | **Non-secret** values only: remote URL, model name, this machine's ID | no |
+| `~/.local/share/syncintosh/repo/` | the clone: `objects/`, `manifest.enc`, `keys/`, `.gitattributes` | it *is* the repo |
+| `~/.local/share/syncintosh/work/` | the plaintext mirror (§3.3) | no — outside the repo |
+| `~/.local/share/syncintosh/pending/` | unresolved merge state, plaintext (§3.3) | no — outside the repo |
+| `~/.local/share/syncintosh/sync.lock` | the advisory lock the CLI and the daemon share | no |
+
+`~/.config/syncintosh/` deliberately holds nothing secret, which is why the agent guard does
+not block it.
+
+### launchd
+
+The daemon plist embeds the **absolute path** of the installed entry point. If Python or the
+install method changes, that path breaks silently. `syncintosh daemon install` must rewrite
+the plist with the current path every time, and `syncintosh doctor` must verify it.

@@ -9,26 +9,45 @@ You are syncintosh's crypto and secrets auditor. This project stores the user's
 credentials-adjacent configuration and an **unrecoverable master key**. A regression here
 is **silent**: tests pass, and the user's secrets leak or their data becomes unrecoverable.
 
-Read the "3. Security invariants" section of `AGENTS.md` first. Report in English.
+Read the "3. Security invariants" section of `AGENTS.md` first, then
+`docs/design/04-envelope-v1.md` and `docs/design/05-key-generations.md` — the normative
+envelope layout and key-generation rules. Report in English.
 
 ## Procedure
 
 ### 1. Ciphertext envelope
 Open `src/syncintosh/crypto/` and confirm the envelope is
-`version(1B) | nonce(12B) | ciphertext | tag(16B)`:
+`version(1B) | key_id(4B, big-endian) | nonce(12B) | ciphertext | tag(16B)`:
 - 1 version byte written, and rejected on decrypt if unrecognized.
+- A 4-byte big-endian `key_id` in the header, **separate from `version`** (the format axis
+  and the key axis move independently). Confirm it is not folded into the version byte.
 - 12-byte random nonce, generated per encryption. No counter, no reuse across calls.
 - 16-byte GCM tag present.
-- **AAD = file ID + format version.** Confirm the same AAD is passed on encrypt and
-  decrypt, so a ciphertext moved to another object's slot fails. If AAD is missing or
-  constant, that is critical.
+- **AAD = length-prefixed (domain label, header, file ID)**, with `header = version | key_id`.
+  Confirm the whole header is authenticated, the same AAD is rebuilt on decrypt, and the
+  domain label (`object` / `manifest` / `key-wrap`) differs per slot, so a ciphertext moved
+  into another object's slot — or a manifest moved into an object slot — fails. Plain
+  concatenation instead of length prefixes is critical: ambiguous boundaries allow collisions.
+- Confirm `decrypt(blob, file_id)` takes the file ID explicitly, so the AAD can be rebuilt.
 
 ### 2. Key handling
-- One 256-bit master key per repo, held in the keychain (not in the repo, not in config).
-- Export wraps the master key with a KDF (scrypt or Argon2id). Confirm parameters are not
+- One key ring per repo. `KG_1` is the master key; later generations are independent random
+  values, never derived from an earlier generation — a derivation would be recoverable from
+  the very key that was just rotated away.
+- The `KeyStore` port addresses generations by id. Confirm `get(key_id) -> None` maps to
+  `UnknownKeyGeneration` ("this machine does not hold it — import it"), not to
+  "unrecoverable", and that it is distinct from an authentication failure.
+- Export wraps the whole ring with a KDF (scrypt or Argon2id). Confirm parameters are not
   reduced "to speed up tests" — the test must stub the clock/work factor instead.
-- `key rotate` re-encrypts every object after a device is removed. Confirm no object is
-  left under the old key.
+- Subkeys are derived per generation and purpose (HKDF: object / manifest / key-wrap). An
+  object key must never decrypt a manifest.
+- `key rotate` re-encrypts every object and the manifest under the new generation in one
+  commit, so **HEAD carries only the new generation**. Confirm the previous generation stays
+  in the ring: history and a merge-base that predates the rotation still need it. Rotation
+  protects future data only, so "leave no object under the old key" is wrong as a goal — flag
+  any code that drops a generation outside an explicit prune.
+- Confirm a routine rotation publishes the new key wrapped under the previous generation
+  (`keys/<id>.wrap`, domain `key-wrap`), and that a compromise rotation never does.
 
 ### 3. Manifest and identifiers
 - Each tracked file has a stable random ID; the repo holds `objects/<id>.enc` only.

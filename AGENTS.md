@@ -105,7 +105,7 @@ src/syncintosh/
 **launchd.** The daemon plist embeds the absolute path of the installed entry point. If
 Python or the install method changes, that path breaks silently. `syncintosh daemon install`
 must rewrite the plist with the current path every time, and `syncintosh doctor` must verify
-it (plan §5.5).
+it (`docs/design/README.md`, Runtime & layout).
 
 ---
 
@@ -117,15 +117,21 @@ secrets leak or their data becomes unrecoverable.
 
 ### 3.1 Ciphertext envelope (do not "fix" it)
 
-Every stored object is `version(1B) | nonce(12B) | ciphertext | tag(16B)`.
+Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciphertext | tag(16B)`.
 
-- The **layout is fixed**. Do not reorder fields or drop the version byte.
-- **AAD = file ID + format version.** The AAD binding is what stops an attacker from
-  moving one ciphertext into another object's slot. Never encrypt without it.
+- The **layout is fixed**. Do not reorder fields, drop the version byte, or fold `key_id`
+  into `version` — the format axis and the key axis are separate
+  (`docs/design/04-envelope-v1.md`).
+- **AAD = length-prefixed (domain label, header, file ID)**, where `header = version | key_id`.
+  Authenticating the whole header leaves no unauthenticated cleartext field, and the domain
+  label (`object` / `manifest` / `key-wrap`) is what stops one ciphertext from being moved into
+  another slot. Never encrypt without it.
 - **The nonce is random per encryption.** At settings-file volume a collision is
   negligible; do not switch to a counter.
-- The master key is wrapped with a KDF (scrypt or Argon2id) for export/import. Do not
+- A generation's key is wrapped with a KDF (scrypt or Argon2id) for export/import. Do not
   weaken the KDF parameters to speed up tests — stub the clock/work factor instead.
+- **Key generations are retained by default**, and rotation protects future data only
+  (`docs/design/05-key-generations.md`).
 
 ### 3.2 Manifest and identifiers (do not leak paths)
 
@@ -157,7 +163,9 @@ Every stored object is `version(1B) | nonce(12B) | ciphertext | tag(16B)`.
   leaves the network.
 - **Validate the suggestion before applying:** JSON/XML parses, `zsh -n` passes.
 - Default to **propose → one-click approve**. Auto-apply is per-category opt-in.
-- **A backup commit is mandatory before applying.** No exceptions.
+- **A backup commit is mandatory before applying.** No exceptions. The backup is **the HEAD
+  before apply** — the collect commit (`docs/design/01-sync-model.md`) — not a fresh empty
+  commit on every sync.
 
 ### 3.6 Never trust a download URL you did not ship
 
@@ -170,7 +178,7 @@ Every stored object is `version(1B) | nonce(12B) | ciphertext | tag(16B)`.
 
 ## 4. Python conventions
 
-- **Minimum Python 3.12** (per the plan). `pyproject.toml`'s `requires-python` is the
+- **Minimum Python 3.12**. `pyproject.toml`'s `requires-python` is the
   source of truth.
 - **Every module starts with `from __future__ import annotations`.**
 - **Precede it with the SPDX header** on line 1: `# SPDX-License-Identifier: AGPL-3.0-or-later`.
