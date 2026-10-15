@@ -1,0 +1,146 @@
+[project]
+name = "syncintosh"
+description = "Keep developer-environment settings in step across Macs over an E2E-encrypted git repository"
+readme = "README.md"
+requires-python = ">=3.12"
+# Version comes from the git tag (hatch-vcs). Never hardcode it — a tag is the release.
+dynamic = ["version"]
+license = "AGPL-3.0-or-later"
+authors = [{ name = "syncintosh contributors" }]
+keywords = ["dotfiles", "macos", "e2e-encryption", "git", "merge", "sync"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "pydantic-settings>=2.2.0",
+    "tomlkit>=0.12.0",
+    "ruamel.yaml>=0.18.0",
+    "lxml>=5.2.0",
+    "cryptography>=42.0.0",
+    "keyring>=25.0.0",
+    "watchdog>=4.0.0",
+    "merge3>=0.0.8",
+    # OpenAI-compatible client. Point base_url at a home-server model to keep data local.
+    "openai>=1.30.0",
+]
+
+[project.optional-dependencies]
+# curl/httpx-based transport fallback for environments where openai is unsuitable.
+llm-httpx = ["httpx>=0.27.0"]
+
+[project.urls]
+# TODO: confirm the owning org/account before the first public release.
+Homepage = "https://github.com/devgyurak/syncintosh"
+Repository = "https://github.com/devgyurak/syncintosh"
+Issues = "https://github.com/devgyurak/syncintosh/issues"
+
+[project.scripts]
+syncintosh = "syncintosh.cli.main:main"
+snt = "syncintosh.cli.main:main"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+# Keep builds alive in a tagless checkout (source tarball, shallow clone).
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/syncintosh"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/syncintosh", "tests", "README.md", "AGENTS.md", "LICENSE"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    # Property tests for the merge engine (idempotence, one-sided change wins).
+    "hypothesis>=6.100.0",
+    # Blocks network access in tests at the plugin level, not by convention.
+    "pytest-socket>=0.7.0",
+    "ruff>=0.6.0",
+    "ty>=0.0.1a10",
+]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RET",  # flake8-return
+    "PTH",  # flake8-use-pathlib
+    "TID",  # flake8-tidy-imports (TID252 bans relative imports)
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "RUF001",  # docstrings may use full-width characters
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test classes hold shared fixture data; ClassVar notation is noise there.
+"tests/*" = ["RUF012"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------- ty
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.ty.rules]
+# Some optional deps ship no stubs; report a warning, not an error.
+unresolved-import = "warn"
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The coverage gate runs locally too — 90% is a floor, not a CI-only target.
+# --disable-socket makes the no-network rule structural, not a convention.
+addopts = "-q --cov=syncintosh --cov-branch --cov-report=term-missing --cov-fail-under=90 --strict-markers --disable-socket"
+markers = [
+    "integration: end-to-end flow across a temp HOME and a temp git remote",
+]
+
+[tool.coverage.run]
+source = ["src/syncintosh"]
+branch = true
+
+[tool.coverage.report]
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "\\.\\.\\.$",
+    "if __name__ == .__main__.:",
+]

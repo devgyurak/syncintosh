@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Application use-cases.
+
+`services` coordinates `core` over the ports it declares. It never imports a concrete
+infrastructure class — `cli` injects the implementation (``AGENTS.md`` §2.2).
+"""
+
+from __future__ import annotations
+
+from syncintosh.services.merge_service import merge_documents
+
+__all__ = ["merge_documents"]
