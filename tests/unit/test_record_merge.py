@@ -73,9 +73,9 @@ def test_one_side_deleted_with_the_other_unchanged_deletes() -> None:
     both_deleted = merge_records({ID1: BASE}, {}, {})
 
     # then
-    assert local_deleted.deletions == (ID1,)
-    assert remote_deleted.deletions == (ID1,)
-    assert both_deleted.deletions == (ID1,)
+    assert local_deleted.deleted == (ID1,)
+    assert remote_deleted.deleted == (ID1,)
+    assert both_deleted.deleted == (ID1,)
     assert local_deleted.merged == remote_deleted.merged == both_deleted.merged == {}
 
 
@@ -87,7 +87,7 @@ def test_delete_against_a_modify_conflicts() -> None:
     # then
     assert [conflict.kind for conflict in local_deleted.conflicts] == ["delete/modify"]
     assert [conflict.kind for conflict in remote_deleted.conflicts] == ["delete/modify"]
-    assert local_deleted.deletions == remote_deleted.deletions == ()
+    assert local_deleted.deleted == remote_deleted.deleted == ()
 
 
 def test_unchanged_and_one_sided_changes_apply() -> None:
@@ -195,7 +195,7 @@ def test_identical_content_dedups_to_the_smaller_id() -> None:
 
     # then — ID2 is lexicographically smaller, so it survives and ID1's object is dropped
     assert list(result.merged) == [ID2]
-    assert result.deletions == (ID1,)
+    assert result.deduplicated == (ID1,)
     assert result.collisions == ()
 
 
@@ -227,6 +227,38 @@ def test_machine_scope_records_on_different_machines_do_not_collide() -> None:
     assert sorted(result.merged) == sorted([ID1, ID2])
 
 
+def test_a_pending_content_merge_still_collides_by_path() -> None:
+    # given — ID1 is a content merge (both sides changed its digest) and ID2 is a new record for
+    # the same path, so a task-only sweep would miss the second record for one path
+    local = {ID1: _rec(sha=SHA2), ID2: _rec(file_id=ID2, sha=SHA3, path=".zshrc")}
+    remote = {ID1: _rec(sha=SHA3)}
+
+    # when
+    result = merge_records({ID1: _rec(sha=SHA1)}, local, remote)
+
+    # then
+    assert [task.file_id for task in result.content_merges] == [ID1]
+    assert len(result.collisions) == 1
+    assert result.collisions[0].file_ids == (ID2, ID1)
+
+
+def test_a_conflict_still_collides_by_path() -> None:
+    # given — ID1 conflicts because both sides changed its path, and ID2 is a new record whose
+    # path matches one side of that conflict
+    base = {ID1: _rec(path=".zshrc")}
+    local = {ID1: _rec(path=".zshenv"), ID2: _rec(file_id=ID2, sha=SHA2, path=".zshenv")}
+    remote = {ID1: _rec(path=".zprofile")}
+
+    # when
+    result = merge_records(base, local, remote)
+
+    # then
+    assert [conflict.kind for conflict in result.conflicts] == ["modify/modify"]
+    assert len(result.collisions) == 1
+    assert result.collisions[0].path == ".zshenv"
+    assert result.collisions[0].file_ids == (ID2, ID1)
+
+
 @st.composite
 def _record_maps(draw):
     """A record map keyed by unique ids, with a unique path per id so nothing collides."""
@@ -244,7 +276,8 @@ def test_identical_inputs_are_a_noop(local) -> None:
     assert result.merged == local
     assert result.conflicts == ()
     assert result.content_merges == ()
-    assert result.deletions == ()
+    assert result.deleted == ()
+    assert result.deduplicated == ()
 
 
 @given(local=_record_maps())
@@ -279,7 +312,11 @@ def test_merge_is_symmetric_in_local_and_remote(base, local, remote) -> None:
     assert sorted(conflict.file_id for conflict in forward.conflicts) == sorted(
         conflict.file_id for conflict in backward.conflicts
     )
-    assert sorted(forward.deletions) == sorted(backward.deletions)
+    assert sorted(forward.deleted) == sorted(backward.deleted)
+    assert sorted(forward.deduplicated) == sorted(backward.deduplicated)
+    assert sorted(collision.file_ids for collision in forward.collisions) == sorted(
+        collision.file_ids for collision in backward.collisions
+    )
     assert sorted(task.file_id for task in forward.content_merges) == sorted(
         task.file_id for task in backward.content_merges
     )

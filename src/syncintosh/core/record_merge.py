@@ -95,7 +95,10 @@ class RecordMergeResult:
     conflicts: tuple[RecordConflict, ...]
     collisions: tuple[PathCollision, ...]
     content_merges: tuple[ContentMergeTask, ...]
-    deletions: tuple[str, ...]
+    # An explicit `untrack` (a record gone from the base), distinct from a dedup loser.
+    deleted: tuple[str, ...]
+    # A duplicate ID dropped because an identical-content record for the same path survived.
+    deduplicated: tuple[str, ...]
 
     @property
     def has_conflicts(self) -> bool:
@@ -133,7 +136,7 @@ def merge_records(
     merged: dict[str, ManifestRecord] = {}
     conflicts: list[RecordConflict] = []
     content_merges: list[ContentMergeTask] = []
-    deletions: list[str] = []
+    deleted: list[str] = []
 
     for file_id in sorted({*base_records, *local, *remote}):
         base_record = base_records.get(file_id)
@@ -145,7 +148,7 @@ def merge_records(
             _merge_addition(file_id, present, merged, conflicts)
             continue
         if local_record is None or remote_record is None:
-            _merge_deletion(file_id, base_record, local_record, remote_record, merged, conflicts, deletions)
+            _merge_deletion(file_id, base_record, local_record, remote_record, merged, conflicts, deleted)
             continue
         if local_record == remote_record:
             merged[file_id] = local_record
@@ -156,13 +159,15 @@ def merge_records(
         else:
             _merge_both_changed(file_id, base_record, local_record, remote_record, merged, conflicts, content_merges)
 
-    collisions = _resolve_collisions(merged, deletions)
+    deduplicated: list[str] = []
+    collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
     return RecordMergeResult(
         merged=MappingProxyType(merged),
         conflicts=tuple(conflicts),
         collisions=collisions,
         content_merges=tuple(content_merges),
-        deletions=tuple(sorted(deletions)),
+        deleted=tuple(sorted(deleted)),
+        deduplicated=tuple(sorted(deduplicated)),
     )
 
 
@@ -206,22 +211,22 @@ def _merge_deletion(
     remote: ManifestRecord | None,
     merged: dict[str, ManifestRecord],
     conflicts: list[RecordConflict],
-    deletions: list[str],
+    deleted: list[str],
 ) -> None:
     """At least one side is absent: delete, or flag a delete/modify conflict."""
     if local is None and remote is None:
-        deletions.append(file_id)
+        deleted.append(file_id)
         return
     if local is None:
         if remote == base:
-            deletions.append(file_id)
+            deleted.append(file_id)
         else:
             conflicts.append(
                 RecordConflict(kind="delete/modify", file_id=file_id, base=base, local=None, remote=remote)
             )
         return
     if local == base:
-        deletions.append(file_id)
+        deleted.append(file_id)
     else:
         conflicts.append(RecordConflict(kind="delete/modify", file_id=file_id, base=base, local=local, remote=None))
 
@@ -275,36 +280,57 @@ def _merge_both_changed(
     )
 
 
-def _resolve_collisions(merged: dict[str, ManifestRecord], deletions: list[str]) -> tuple[PathCollision, ...]:
-    """Apply the secondary key `(scope, machine, path)` over the merged records.
+def _secondary_key(record: ManifestRecord) -> tuple[Scope, str | None, str]:
+    return (record.scope, record.machine, record.path)
 
-    Identical content is deduplicated silently, keeping the lexicographically smallest ID and
-    dropping the rest; differing content is a `PathCollision`. Machine-scope records on
-    different machines carry different keys, so they never collide.
+
+def _resolve_collisions(
+    merged: dict[str, ManifestRecord],
+    conflicts: list[RecordConflict],
+    content_merges: list[ContentMergeTask],
+    deduplicated: list[str],
+) -> tuple[PathCollision, ...]:
+    """Apply the secondary key `(scope, machine, path)` over every candidate survivor.
+
+    Candidates are the merged records **plus** the records still pending a content merge or a
+    conflict resolution. Leaving the latter out would let one path end up with two records once
+    the task completes — exactly what the secondary key exists to stop
+    (``docs/design/02-base-and-merge.md``). A conflict contributes **both** sides, so the
+    grouping stays symmetric in local and remote and both machines converge. Identical content
+    among resolved records is deduplicated silently (smallest ID wins); anything else is a
+    `PathCollision`. Machine-scope records on different machines carry different keys.
     """
-    groups: dict[tuple[Scope, str | None, str], list[str]] = {}
+    groups: dict[tuple[Scope, str | None, str], list[tuple[str, ManifestRecord | None, bool]]] = {}
     for file_id, record in merged.items():
-        groups.setdefault((record.scope, record.machine, record.path), []).append(file_id)
+        groups.setdefault(_secondary_key(record), []).append((file_id, record, True))
+    for task in content_merges:
+        groups.setdefault((task.scope, task.machine, task.path), []).append((task.file_id, None, False))
+    for conflict in conflicts:
+        for record in (conflict.local, conflict.remote, conflict.base):
+            if record is not None:
+                groups.setdefault(_secondary_key(record), []).append((record.file_id, record, False))
 
     collisions: list[PathCollision] = []
     for key in sorted(groups, key=lambda item: (item[0], item[1] or "", item[2])):
-        file_ids = sorted(groups[key])
+        entries = groups[key]
+        file_ids = sorted({file_id for file_id, _, _ in entries})
         if len(file_ids) < 2:
             continue
-        if _all_identical(merged, file_ids):
-            deletions.extend(file_ids[1:])
+        resolved_records = [record for _, record, resolved in entries if resolved and record is not None]
+        if all(resolved for _, _, resolved in entries) and _all_identical(resolved_records):
             for loser in file_ids[1:]:
-                del merged[loser]
-        else:
-            scope, machine, path = key
-            collisions.append(PathCollision(scope=scope, machine=machine, path=path, file_ids=tuple(file_ids)))
+                merged.pop(loser, None)
+                deduplicated.append(loser)
+            continue
+        scope, machine, path = key
+        collisions.append(PathCollision(scope=scope, machine=machine, path=path, file_ids=tuple(file_ids)))
     return tuple(collisions)
 
 
-def _all_identical(merged: Mapping[str, ManifestRecord], file_ids: list[str]) -> bool:
+def _all_identical(records: list[ManifestRecord]) -> bool:
     """True when every record matches the first in all fields but the ID (content + provenance)."""
-    first = _content_identity(merged[file_ids[0]])
-    return all(_content_identity(merged[file_id]) == first for file_id in file_ids[1:])
+    first = _content_identity(records[0])
+    return all(_content_identity(record) == first for record in records[1:])
 
 
 def _content_identity(record: ManifestRecord) -> tuple[str, str, Scope, str | None, FileFormat, str]:
