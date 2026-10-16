@@ -40,9 +40,11 @@ def init_new_repo(
     `recovery_path` is where the wrapped ring is written for the user to keep. Nothing is written
     until both a free keyring slot and a free export path are confirmed: a re-run must never
     overwrite a good export with a key the keyring then refuses, which would leave the user with
-    a backup they cannot use and a master key that exists nowhere else. The export is read back
-    and unwrapped before the ring is stored, so `init` also never leaves a key stored without a
-    backup, and a failure is retryable.
+    a backup they cannot use and a master key that exists nowhere else.
+
+    The export is read back and unwrapped before the ring is stored, and a failure **before the
+    key is stored** discards it, so the check above does not turn a failed run into one that can
+    never be retried (``AGENTS.md`` §6 — the master key is unrecoverable if lost).
     """
     if store.get(1) is not None:
         raise InitRefused("this machine already holds a key for generation 1")
@@ -53,16 +55,32 @@ def init_new_repo(
     ring: Ring = ((1, generation_key),)
     blob = codec.wrap(ring, passphrase)
     live.write(recovery_path, blob)
-    written = live.read(recovery_path)
-    if written is None:
-        raise MasterKeyUnwrapError("the recovery export was not written; init is not complete")
-    if codec.unwrap(written, passphrase) != ring:
-        raise MasterKeyUnwrapError("the recovery export did not verify; init is not complete")
+    try:
+        written = live.read(recovery_path)
+        if written is None:
+            raise MasterKeyUnwrapError("the recovery export was not written; init is not complete")
+        if codec.unwrap(written, passphrase) != ring:
+            raise MasterKeyUnwrapError("the recovery export did not verify; init is not complete")
+    except BaseException:
+        # The export names a key the ring does not hold yet, so it is worth nothing to the user
+        # and would only make the next attempt fail as "already exists". Remove it and let the
+        # failure surface.
+        _discard_export(live, recovery_path)
+        raise
 
-    # Only now touch the store: a store mutation before the export verifies would wedge a retry,
-    # because the next attempt mints a fresh key for generation 1 and `put` refuses a second key.
+    # Only now touch the store: a store mutation before the export verifies would leave a key
+    # stored without a backup, because the next attempt mints a fresh generation 1 and `put`
+    # refuses a second key.
     store.put(1, generation_key)
     files.write(COMMITMENTS_PATH, dumps_commitments({1: codec.commitment(generation_key)}))
+
+
+def _discard_export(live: LiveFiles, recovery_path: str) -> None:
+    """Remove a failed init's export, without masking the failure that led here."""
+    try:
+        live.remove(recovery_path)
+    except OSError:
+        return
 
 
 def import_ring(

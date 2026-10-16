@@ -97,6 +97,13 @@ class FailingLive(InMemoryLive):
         raise OSError("disk full")
 
 
+class UndeletableLive(VanishingLive):
+    """A live store that fails verification *and* refuses to remove the failed export."""
+
+    def remove(self, path: str) -> None:
+        raise OSError("read-only filesystem")
+
+
 def _codec() -> KeyMaterial:
     return KeyMaterial(params=CHEAP, allowed=ALLOWED)
 
@@ -143,6 +150,7 @@ def test_init_aborts_when_the_export_cannot_be_written(memory_key_store) -> None
 def test_init_aborts_when_the_export_cannot_be_read_back(memory_key_store) -> None:
     # given
     files = InMemoryRepoFiles()
+    live = VanishingLive()
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
@@ -150,16 +158,18 @@ def test_init_aborts_when_the_export_cannot_be_read_back(memory_key_store) -> No
             store=memory_key_store(),
             codec=_codec(),
             files=files,
-            live=VanishingLive(),
+            live=live,
             recovery_path=RECOVERY_PATH,
             passphrase=PASSPHRASE,
         )
     assert files.files == {}
+    assert RECOVERY_PATH not in live.files
 
 
 def test_init_aborts_when_the_export_does_not_verify(memory_key_store) -> None:
     # given
     files = InMemoryRepoFiles()
+    live = CorruptingLive()
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
@@ -167,11 +177,13 @@ def test_init_aborts_when_the_export_does_not_verify(memory_key_store) -> None:
             store=memory_key_store(),
             codec=_codec(),
             files=files,
-            live=CorruptingLive(),
+            live=live,
             recovery_path=RECOVERY_PATH,
             passphrase=PASSPHRASE,
         )
     assert files.files == {}
+    # the unusable export is discarded, so a retry is not refused as "already exists"
+    assert RECOVERY_PATH not in live.files
 
 
 def test_init_aborts_when_the_export_holds_a_different_ring(memory_key_store) -> None:
@@ -242,6 +254,7 @@ def test_init_refuses_when_the_recovery_path_is_already_taken(memory_key_store) 
 def test_init_leaves_the_ring_untouched_when_the_export_fails(memory_key_store) -> None:
     # given — a store that must stay empty so a retry can mint generation 1 cleanly
     store = memory_key_store()
+    live = VanishingLive()
 
     # when & then
     with pytest.raises(MasterKeyUnwrapError):
@@ -249,11 +262,13 @@ def test_init_leaves_the_ring_untouched_when_the_export_fails(memory_key_store) 
             store=store,
             codec=_codec(),
             files=InMemoryRepoFiles(),
-            live=VanishingLive(),
+            live=live,
             recovery_path=RECOVERY_PATH,
             passphrase=PASSPHRASE,
         )
     assert store.generations() == ()
+    # the failed export is gone, so the retry below is not refused as "already exists"
+    assert RECOVERY_PATH not in live.files
 
     # and a retry with a working store succeeds
     init_new_repo(
@@ -265,6 +280,20 @@ def test_init_leaves_the_ring_untouched_when_the_export_fails(memory_key_store) 
         passphrase=PASSPHRASE,
     )
     assert store.generations() == (1,)
+
+
+def test_a_failed_export_removal_does_not_mask_the_original_failure(memory_key_store) -> None:
+    # given — the read-back fails, and the cleanup cannot remove the file either
+    # when & then — the verification failure is what surfaces
+    with pytest.raises(MasterKeyUnwrapError):
+        init_new_repo(
+            store=memory_key_store(),
+            codec=_codec(),
+            files=InMemoryRepoFiles(),
+            live=UndeletableLive(),
+            recovery_path=RECOVERY_PATH,
+            passphrase=PASSPHRASE,
+        )
 
 
 def test_import_adds_the_generations_after_checking_them(memory_key_store) -> None:
