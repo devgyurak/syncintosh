@@ -10,15 +10,21 @@ differ, so an unchanged sync touches nothing (``docs/design/01-sync-model.md``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from syncintosh.core.ids import FILE_ID_PATTERN
 from syncintosh.core.manifest import Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import dumps_manifest
 
 MANIFEST_PATH = "manifest.enc"
 OBJECTS_DIR = "objects"
 GITATTRIBUTES_PATH = ".gitattributes"
+
+# A stored object's slot: `objects/<32 lowercase hex>.enc`. Full match, so a nested or unrelated
+# path never parses as an object. The ID width comes from `core.ids`, its single owner.
+_OBJECT_PATH_RE = re.compile(rf"{OBJECTS_DIR}/({FILE_ID_PATTERN})\.enc")
 
 # Defense in depth: mark the stored ciphertext binary so a hand-run `git merge` cannot mangle
 # it. Sync never calls `git merge` — it builds the tree with `git commit-tree`
@@ -34,6 +40,17 @@ keys/commitments.json binary -diff -merge
 def object_path(file_id: str) -> str:
     """The repo-relative path of `file_id`'s ciphertext."""
     return f"{OBJECTS_DIR}/{file_id}.enc"
+
+
+def object_file_id(relpath: str) -> str | None:
+    """The `file_id` a stored-object path names, or `None` for anything else.
+
+    The orphan sweep uses this to recognise a leftover `objects/<id>.enc` without guessing at
+    the directory's contents (a record without its object, or an object without a record, is a
+    corrupt repo — ``docs/design/03-manifest.md``).
+    """
+    match = _OBJECT_PATH_RE.fullmatch(relpath)
+    return None if match is None else match.group(1)
 
 
 @dataclass(frozen=True)

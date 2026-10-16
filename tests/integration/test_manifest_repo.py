@@ -9,6 +9,7 @@ removes its object in the same operation.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -27,11 +28,11 @@ pytestmark = pytest.mark.integration
 KEY = bytes(range(32))
 ID_A = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID_B = "00112233445566778899aabbccddeeff"
-SHA_A = "a" * 64
-SHA_B = "b" * 64
 ZSH_PATH = ".zshrc"
 VSCODE_PATH = "Library/Application Support/Code/User/settings.json"
 CONTENTS = {ID_A: b"export EDITOR=vim\n", ID_B: b'{"editor.fontSize":14}'}
+SHA_A = hashlib.sha256(CONTENTS[ID_A]).hexdigest()
+SHA_B = hashlib.sha256(CONTENTS[ID_B]).hexdigest()
 
 ALLOWED = re.compile(r"objects/[0-9a-f]{32}\.enc")
 

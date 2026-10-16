@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
-from syncintosh.core.repo import GITATTRIBUTES_CONTENT, MANIFEST_PATH, object_path, plan_writes
+from syncintosh.core.repo import GITATTRIBUTES_CONTENT, MANIFEST_PATH, object_file_id, object_path, plan_writes
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -26,6 +28,25 @@ def test_object_path_is_a_fixed_width_slot() -> None:
 
     # then
     assert path == f"objects/{ID1}.enc"
+
+
+@pytest.mark.parametrize(
+    ("relpath", "expected"),
+    [
+        (f"objects/{ID1}.enc", ID1),
+        ("objects/0f3c4b5a69788796a5b4c3d2e1f0abc.enc", None),
+        ("objects/not-hex.enc", None),
+        (f"objects/sub/{ID1}.enc", None),
+        ("manifest.enc", None),
+        (f"objects/{ID1}.enc.bak", None),
+    ],
+)
+def test_object_file_id_recognises_only_a_slot(relpath, expected) -> None:
+    # when
+    parsed = object_file_id(relpath)
+
+    # then
+    assert parsed == expected
 
 
 def test_manifest_path_and_gitattributes_content_are_fixed() -> None:

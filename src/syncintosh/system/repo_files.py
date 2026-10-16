@@ -8,6 +8,8 @@ Paths are repo-relative and are only ever built by ``core.repo`` (``objects/<id>
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -28,10 +30,26 @@ class FileRepo:
             return None
 
     def write(self, relpath: str, data: bytes) -> None:
-        """Write `data`, creating parent directories. Raises on failure."""
+        """Write `data` atomically: a temp file in the same directory, fsync, then replace.
+
+        A plain write truncates first, so a crash or a full disk leaves a truncated
+        ``manifest.enc`` whose every later open fails authentication
+        (``docs/design/04-envelope-v1.md``). Writing a sibling temp file and replacing it is
+        atomic within a filesystem.
+        """
         path = self._resolve(relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        descriptor, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            Path(tmp_name).replace(path)
+        except BaseException:
+            # Leave no partial temp file behind, whoever aborted the write.
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
 
     def delete(self, relpath: str) -> None:
         """Remove the file if present. A missing file is not a failure of intent."""

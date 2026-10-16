@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from syncintosh.system.repo_files import FileRepo
 
 
@@ -52,3 +56,20 @@ def test_list_paths_is_sorted_and_empty_for_a_missing_prefix(tmp_path) -> None:
     # then
     assert objects == ("objects/a.enc", "objects/b.enc")
     assert keys == ()
+
+
+def test_a_failed_write_keeps_the_previous_file_and_leaves_no_temp(tmp_path, monkeypatch) -> None:
+    # given — the atomic write fails after the temp file is created
+    repo = FileRepo(tmp_path)
+    repo.write("manifest.enc", b"original")
+
+    def _fail(descriptor: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", _fail)
+
+    # when & then
+    with pytest.raises(OSError):
+        repo.write("manifest.enc", b"new")
+    assert repo.read("manifest.enc") == b"original"
+    assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []

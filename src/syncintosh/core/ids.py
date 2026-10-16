@@ -13,8 +13,12 @@ import re
 
 FILE_ID_HEX_LENGTH = 32
 
+# The 32-lowercase-hex pattern, defined once. `core/repo.py` composes it into the object slot
+# path so the width cannot drift between the two.
+FILE_ID_PATTERN = r"[0-9a-f]{32}"
+
 # Exactly 32 lowercase hex characters; `fullmatch` keeps a trailing prefix from matching.
-FILE_ID_RE = re.compile(r"[0-9a-f]{32}")
+FILE_ID_RE = re.compile(FILE_ID_PATTERN)
 
 
 def is_file_id(value: str) -> bool:

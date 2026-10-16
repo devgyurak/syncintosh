@@ -96,3 +96,18 @@ class SecretScanError(DomainError):
     Carries no secret value: a scanner is expected to name the location, never the matched
     bytes (``AGENTS.md`` §3.4, §4 "Never log secrets").
     """
+
+
+class ContentDigestMismatch(DomainError):
+    """A plaintext handed to the encrypt boundary does not match its record digest.
+
+    The digest is the mix-and-match detector (``docs/design/03-manifest.md``): sealing a
+    plaintext whose digest disagrees with its record would commit an object and a manifest
+    that can never agree, and the no-rewrite rule would never revisit it.
+    """
+
+    def __init__(self, file_id: str, expected: str, actual: str) -> None:
+        self.file_id = file_id
+        self.expected = expected
+        self.actual = actual
+        super().__init__(f"content for {file_id} has sha256 {actual}, expected {expected}")
