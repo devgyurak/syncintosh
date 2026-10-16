@@ -13,9 +13,23 @@ structure** are all encrypted, and the repository can live on any git remote you
 
 ## Status
 
-Early skeleton. The current slice is the pure, key-level merge engine that the conflict
-resolver is built on. See `AGENTS.md` for the architecture and `CLAUDE.md` for
-agent-specific notes.
+Early skeleton. The current slice is **end-to-end sync for a single text file**: collect →
+encrypt → commit → fetch → plaintext 3-way merge → apply, across two Macs through an encrypted
+git repository. The preset catalog, the other format adapters, LLM assistance, and conflict
+resolution are still to come.
+
+## Limitations
+
+- **Conflict resolution is not implemented yet.** A merge conflict stops the sync and records
+  the unresolved sides under `~/.local/share/syncintosh/pending/`; every later `sync` refuses
+  until the pending state is cleared. Until `resolve` lands, leave the pending state alone and
+  report what happened.
+- **A tracked file that is a symlink is reported, not synced.** If `~/.zshrc` is a link into a
+  dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
+  links) — it lists the path and leaves it alone. Point the tracked path at the real file, or
+  track the dotfiles file directly.
+- The tracked set is whatever `~/.config/syncintosh/config.json` names; the built-in preset
+  catalog is not there yet.
 
 ## Development
 

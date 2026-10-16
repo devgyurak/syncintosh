@@ -61,4 +61,24 @@ def is_denied(path: Path, home: Path) -> bool:
     )
 
 
-__all__ = ["DENIED_PATHS", "is_denied"]
+__all__ = ["DENIED_PATHS", "SystemDenyList", "is_denied"]
+
+
+class SystemDenyList:
+    """The `DenyList` port over `is_denied` and a home-escape check."""
+
+    def is_denied(self, home: str, relpath: str) -> bool:
+        """True when `home/relpath` is a dangerous path that must never be collected."""
+        home_path = Path(home)
+        return is_denied(home_path / relpath, home_path)
+
+    def escapes(self, home: str, relpath: str) -> bool:
+        """True when the record's target leaves `$HOME` once symlinks are resolved.
+
+        The **parent directory** is resolved first, so a symlinked directory cannot be used to
+        write outside the home tree; the final element is `apply`'s own symlink check
+        (``docs/design/03-manifest.md``).
+        """
+        real_home = Path(os.path.realpath(home))
+        parent = Path(os.path.realpath(Path(home) / relpath)).parent
+        return parent != real_home and real_home not in parent.parents

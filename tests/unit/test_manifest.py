@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
-from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, track
+from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, mint_file_id, track, tracking_key
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -155,6 +155,29 @@ def test_record_is_frozen() -> None:
         record.path = "/tmp/other"  # ty: ignore[invalid-assignment]  # frozen dataclass
 
 
+def test_tracking_key_folds_two_spellings_of_one_path() -> None:
+    # when & then — `.Zshrc` and `.zshrc` are one tracked file, but a different scope is not
+    assert tracking_key("common", None, ".Zshrc") == tracking_key("common", None, ".zshrc")
+    assert tracking_key("common", "mac", ".zshrc") != tracking_key("machine", "mac", ".zshrc")
+
+
+def test_mint_file_id_returns_a_fresh_id() -> None:
+    # when & then
+    assert mint_file_id({}, StubIdSource(ID2)) == ID2
+
+
+def test_mint_file_id_rejects_a_malformed_id() -> None:
+    # when & then
+    with pytest.raises(ValueError):
+        mint_file_id({}, StubIdSource("not-hex"))
+
+
+def test_mint_file_id_rejects_an_id_already_in_use() -> None:
+    # when & then
+    with pytest.raises(ValueError):
+        mint_file_id({ID1: _record()}, StubIdSource(ID1))
+
+
 def test_track_mints_and_reuses_one_id_for_a_path() -> None:
     # given
     source = StubIdSource(ID2)
@@ -168,6 +191,22 @@ def test_track_mints_and_reuses_one_id_for_a_path() -> None:
     # then — one minted id, reused on the second call, with the refreshed digest
     assert list(first.records) == [ID2]
     assert list(second.records) == [ID2]
+    assert second.records[ID2].sha256 == SHA2
+
+
+def test_track_folds_the_path_so_two_spellings_share_one_id() -> None:
+    # given — macOS's filesystem is case-insensitive, so `.Zshrc` and `.zshrc` are one file
+    source = StubIdSource(ID2)
+    first = track(
+        Manifest.empty(1), path=".zshrc", preset="zsh", scope="common", format="text", sha256=SHA1, source=source
+    )
+
+    # when
+    second = track(first, path=".Zshrc", preset="zsh", scope="common", format="text", sha256=SHA2, source=source)
+
+    # then — no second id was minted; the existing record was refreshed
+    assert list(second.records) == [ID2]
+    assert second.records[ID2].path == ".Zshrc"
     assert second.records[ID2].sha256 == SHA2
 
 

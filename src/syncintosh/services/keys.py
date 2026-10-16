@@ -20,10 +20,31 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from syncintosh.core.commitments import dumps_commitments
+from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
-from syncintosh.core.ports import GENERATION_KEY_SIZE, KeyStore, LiveFiles, RepoFiles, Ring, RingCodec
+from syncintosh.core.ports import (
+    GENERATION_KEY_SIZE,
+    GitTransport,
+    KeyStore,
+    LiveFiles,
+    RepoFiles,
+    Ring,
+    RingCodec,
+)
 from syncintosh.core.repo import COMMITMENTS_PATH
+
+
+def published_commitments(transport: GitTransport) -> Mapping[int, str]:
+    """The repo's published commitment map at HEAD, or an empty map when there is no HEAD yet.
+
+    A `use-case`-shaped read that lives here, not in `cli/`: the command only wires and renders
+    (``AGENTS.md`` §2.3).
+    """
+    head = transport.head()
+    if head is None:
+        return {}
+    blob = transport.read_blob(head, COMMITMENTS_PATH)
+    return {} if blob is None else loads_commitments(blob)
 
 
 def init_new_repo(
@@ -111,4 +132,4 @@ def import_ring(
         store.put(key_id, generation_key)
 
 
-__all__ = ["import_ring", "init_new_repo"]
+__all__ = ["import_ring", "init_new_repo", "published_commitments"]

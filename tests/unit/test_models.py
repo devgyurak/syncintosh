@@ -63,3 +63,34 @@ def test_ledger_entry_is_frozen_and_suppression_is_explicit() -> None:
 
     # then — the suppression flag is stored, never inferred from the file's absence
     assert entry.suppressed is True
+
+
+def test_pending_state_create_requires_both_commits() -> None:
+    # given
+    conflict = PendingConflict(file_id="a" * 32, path=".zshrc", detail="both sides changed")
+
+    # when & then
+    with pytest.raises(ValueError):
+        PendingState.create(local_commit="", remote_commit="2" * 40, base_commit=None, conflicts=(conflict,))
+    with pytest.raises(ValueError):
+        PendingState.create(local_commit="1" * 40, remote_commit="", base_commit=None, conflicts=(conflict,))
+
+
+def test_pending_state_create_requires_a_conflict() -> None:
+    # when & then
+    with pytest.raises(ValueError):
+        PendingState.create(local_commit="1" * 40, remote_commit="2" * 40, base_commit=None, conflicts=())
+
+
+def test_pending_state_create_builds_a_valid_state() -> None:
+    # given
+    conflict = PendingConflict(file_id="a" * 32, path=".zshrc", detail="both sides changed")
+
+    # when
+    state = PendingState.create(
+        local_commit="1" * 40, remote_commit="2" * 40, base_commit="3" * 40, conflicts=(conflict,)
+    )
+
+    # then
+    assert state.has_conflicts is True
+    assert state.base_commit == "3" * 40

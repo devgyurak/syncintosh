@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from syncintosh.system.deny_list import DENIED_PATHS, is_denied
+from syncintosh.system.deny_list import DENIED_PATHS, SystemDenyList, is_denied
 
 
 @pytest.mark.parametrize("denied", DENIED_PATHS)
@@ -71,3 +71,43 @@ def test_a_path_outside_home_is_not_denied_by_this_check(tmp_path) -> None:
 
     # when & then
     assert is_denied(tmp_path / "outside" / ".ssh" / "id_rsa", home) is False
+
+
+def test_the_port_adapter_judges_a_home_relative_path(tmp_path) -> None:
+    # given
+    home = tmp_path / "home"
+    adapter = SystemDenyList()
+
+    # when & then
+    assert adapter.is_denied(str(home), ".ssh/id_rsa") is True
+    assert adapter.is_denied(str(home), ".zshrc") is False
+
+
+def test_a_path_under_home_does_not_escape(tmp_path) -> None:
+    # given
+    home = tmp_path / "user"
+    home.mkdir(parents=True)
+
+    # when & then
+    assert SystemDenyList().escapes(str(home), "Library/Preferences/x.plist") is False
+
+
+def test_a_symlinked_parent_that_points_outside_home_escapes(tmp_path) -> None:
+    # given — `~/redirect` is a symlink to a directory outside the home tree
+    home = tmp_path / "user"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    (home / "redirect").symlink_to(outside)
+
+    # when & then
+    assert SystemDenyList().escapes(str(home), "redirect/evil.plist") is True
+
+
+def test_a_relative_path_with_a_dotdot_component_escapes(tmp_path) -> None:
+    # given
+    home = tmp_path / "user"
+    home.mkdir()
+
+    # when & then — the manifest validator also refuses these, but the guard must not rely on it
+    assert SystemDenyList().escapes(str(home), "../evil") is True

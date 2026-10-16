@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -86,3 +88,34 @@ def test_main_dispatches_to_the_app(monkeypatch) -> None:
 
     # then
     assert calls == {"count": 0}
+
+
+def test_sync_rejects_an_unknown_adopt_choice() -> None:
+    # when
+    result = runner.invoke(main_module.app, ["sync", "--adopt", "both"])
+
+    # then
+    assert result.exit_code == 2
+
+
+def test_sync_without_a_configuration_reports_an_error() -> None:
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then
+    assert result.exit_code == 1
+    assert "error:" in _combined(result)
+
+
+def test_importing_the_cli_does_not_import_a_heavy_dependency() -> None:
+    # given — a fresh interpreter, so the modules other tests imported are absent
+    code = (
+        "import sys, syncintosh.cli.main; "
+        "print(','.join(m for m in ('cryptography', 'lxml', 'openai') if m in sys.modules))"
+    )
+
+    # when
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+
+    # then — CLI startup stays fast (AGENTS.md §4)
+    assert result.stdout.strip() == ""

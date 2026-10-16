@@ -15,11 +15,14 @@ from pathlib import Path
 import pytest
 
 from syncintosh.core.errors import GitError
-from syncintosh.vcs.git import GitCLITransport, remote_ref
+from syncintosh.core.ports import remote_ref
+from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
 
 GIT_IDENTITY = ("-c", "user.name=test", "-c", "user.email=test@example.com")
+# These transports stage a throwaway repo, so the whole tree is the pathspec.
+ALL_PATHS: tuple[str, ...] = (".",)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -42,7 +45,7 @@ def _write(cwd: Path, relpath: str, data: bytes) -> None:
 def _settle(transport: GitCLITransport, workdir: Path, relpath: str, data: bytes, parents: tuple[str, ...]) -> str:
     """Write a file, commit it, and move `main` to the new commit."""
     _write(workdir, relpath, data)
-    commit = transport.commit(parents, "commit")
+    commit = transport.commit(parents, "commit", ALL_PATHS)
     transport.update_ref("main", commit)
     return commit
 
@@ -55,7 +58,7 @@ def test_a_root_commit_and_a_read_back(tmp_path) -> None:
     _write(workdir, "a.txt", b"hello")
 
     # when
-    commit = transport.commit((), "root")
+    commit = transport.commit((), "root", ALL_PATHS)
     transport.update_ref("main", commit)
 
     # then
@@ -143,9 +146,9 @@ def test_an_unrelated_history_has_no_merge_base(tmp_path) -> None:
     workdir = tmp_path / "work"
     transport = GitCLITransport(workdir)
     transport.init()
-    left = transport.commit((), "root left")
+    left = transport.commit((), "root left", ALL_PATHS)
     _write(workdir, "b.txt", b"changed")
-    right = transport.commit((), "root right")
+    right = transport.commit((), "root right", ALL_PATHS)
 
     # when
     bases = transport.merge_bases(left, right)
@@ -175,6 +178,124 @@ def test_a_criss_cross_history_has_two_merge_bases(tmp_path) -> None:
     assert bases == tuple(sorted((first, second)))
 
 
+def test_materialize_resets_the_working_tree_to_a_commit(tmp_path) -> None:
+    # given — a repo whose second commit added a file
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"one", ())
+    _settle(transport, workdir, "b.txt", b"two", (first,))
+
+    # when — the branch moves back to the first commit
+    transport.materialize(first)
+    transport.update_ref("main", first)
+
+    # then — the working tree matches, and git reports a clean state
+    assert (workdir / "a.txt").read_bytes() == b"one"
+    assert (workdir / "b.txt").exists() is False
+    assert _git(workdir, "status", "--porcelain") == ""
+
+
+def test_a_revision_that_does_not_exist_resolves_to_none(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+
+    # when & then
+    assert transport.resolve("HEAD") is None
+
+
+def test_branch_is_none_when_head_is_detached(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    commit = _settle(transport, workdir, "a.txt", b"x", ())
+    _git(workdir, "checkout", "--detach", commit)
+
+    # when & then
+    assert transport.branch() is None
+
+
+def test_commit_stages_only_the_given_paths(tmp_path) -> None:
+    # given — a stray file that is not part of the repo layout
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    _write(workdir, "tracked.txt", b"one")
+    _write(workdir, "stray.bin", b"junk")
+
+    # when
+    commit = transport.commit((), "root", ("tracked.txt",))
+    transport.update_ref("main", commit)
+
+    # then — the stray file never reaches the commit
+    tracked = _git(workdir, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert tracked == ["tracked.txt"]
+
+
+def test_commit_stages_a_deletion_inside_the_pathspec(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    _write(workdir, "a.txt", b"a")
+    _write(workdir, "b.txt", b"b")
+    first = transport.commit((), "root", ("a.txt", "b.txt"))
+    transport.update_ref("main", first)
+
+    # when — b.txt is gone from the working tree
+    (workdir / "b.txt").unlink()
+    second = transport.commit((first,), "drop b", ("a.txt", "b.txt"))
+    transport.update_ref("main", second)
+
+    # then — the deletion inside the pathspec is staged
+    assert transport.read_blob(second, "b.txt") is None
+    assert transport.read_blob(second, "a.txt") == b"a"
+
+
+def test_clone_refuses_an_ambiguous_remote_head(tmp_path) -> None:
+    # given — a bare remote whose HEAD names a missing branch, holding two branches
+    workdir = tmp_path / "work"
+    remote = tmp_path / "legacy.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"one", ())
+    transport.push(str(remote), "main", first)
+    other_dir = tmp_path / "other"
+    other = GitCLITransport(other_dir)
+    other.init()
+    second = _settle(other, other_dir, "b.txt", b"two", ())
+    other.push(str(remote), "other", second)
+
+    # when & then — no branch is unambiguously the default, so the clone is refused rather than
+    # left on an unborn HEAD that would silently discard every commit
+    with pytest.raises(GitError):
+        GitCLITransport(tmp_path / "third").clone(str(remote))
+
+
+def test_clone_adopts_the_branch_the_remote_actually_has(tmp_path) -> None:
+    # given — a bare remote whose HEAD names `master`, with only a `main` branch pushed to it
+    workdir = tmp_path / "work"
+    remote = tmp_path / "legacy.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"one", ())
+    assert transport.push(str(remote), "main", first) == "ok"
+
+    # when
+    second_dir = tmp_path / "second"
+    second = GitCLITransport(second_dir)
+    second.clone(str(remote))
+
+    # then — HEAD is put on the branch that exists, not left unborn on `master`
+    assert second.branch() == "main"
+    assert second.head() == first
+
+
 def test_a_bad_parent_raises_a_git_error(tmp_path) -> None:
     # given
     workdir = tmp_path / "work"
@@ -184,7 +305,7 @@ def test_a_bad_parent_raises_a_git_error(tmp_path) -> None:
 
     # when & then
     with pytest.raises(GitError):
-        transport.commit(("0" * 40,), "bad parent")
+        transport.commit(("0" * 40,), "bad parent", ALL_PATHS)
 
 
 def test_a_bad_revision_raises_a_git_error(tmp_path) -> None:

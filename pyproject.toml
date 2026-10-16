@@ -109,6 +109,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Test classes hold shared fixture data; ClassVar notation is noise there.
 "tests/*" = ["RUF012"]
+# Typer's API is `typer.Option(...)` in a parameter default; the call is how a CLI option is
+# declared, not a mutable-default bug.
+"src/syncintosh/cli/main.py" = ["B008"]
 # The crypto error names are fixed by docs/design/04-envelope-v1.md (UnknownKeyGeneration,
 # UnsupportedEnvelopeVersion, KeyGenerationMismatch). Renaming them to satisfy N818 would
 # drift the code from the canon the auditor reads.

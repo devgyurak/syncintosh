@@ -31,6 +31,16 @@ GENERATION_KEY_SIZE = 32
 # services pass across the `RingCodec` port without naming a crypto type (``AGENTS.md`` §2.2).
 Ring = tuple[tuple[int, bytes], ...]
 
+# The local tracking ref a fetch writes. The remote is a URL from config, not a configured
+# `origin`, so the ref is named explicitly rather than inferred. It lives here so `services` can
+# resolve it without importing the `vcs` layer (``AGENTS.md`` §2.2).
+REMOTE_REF_PREFIX = "refs/remotes/syncintosh/"
+
+
+def remote_ref(branch: str) -> str:
+    """The local tracking ref a fetch of `branch` writes (``syncintosh/<branch>``)."""
+    return f"{REMOTE_REF_PREFIX}{branch}"
+
 
 @runtime_checkable
 class MergeDriver(Protocol):
@@ -137,6 +147,26 @@ class SecretScanner(Protocol):
 
 
 @runtime_checkable
+class DenyList(Protocol):
+    """The dangerous paths refused before collection, and the escape check before apply.
+
+    A private key or a cloud credential must never enter a repo, however the user configured
+    their items (``AGENTS.md`` §3.4). Judgement is by real path, so a symlink whose target is
+    `~/.ssh` is still refused. `escapes` is the apply-side trust-boundary check: a record's path
+    arrives from the repo, so it must be proven to stay under `$HOME` before it is written
+    (``docs/design/03-manifest.md``). `system` implements this; `services` only asks.
+    """
+
+    def is_denied(self, home: str, relpath: str) -> bool:
+        """True when the live path `home/relpath` must never be collected."""
+        ...
+
+    def escapes(self, home: str, relpath: str) -> bool:
+        """True when resolving `home/relpath` (parent first) leaves `home`."""
+        ...
+
+
+@runtime_checkable
 class GitTransport(Protocol):
     """The git plumbing the sync cycle uses, bound to one working tree.
 
@@ -162,6 +192,14 @@ class GitTransport(Protocol):
         """Return the current commit id, or `None` on an unborn branch."""
         ...
 
+    def branch(self) -> str | None:
+        """Return the branch HEAD points at, or `None` when it is detached.
+
+        The name is returned even for an **unborn** branch, so a repo cloned from a remote whose
+        HEAD names a branch it does not have can be put on the branch the remote actually uses.
+        """
+        ...
+
     def resolve(self, rev: str) -> str | None:
         """Return the commit id `rev` names, or `None` when it does not exist."""
         ...
@@ -178,17 +216,26 @@ class GitTransport(Protocol):
         """Return the blob at `relpath` in `commit`, or `None` when it is absent."""
         ...
 
-    def commit(self, parents: tuple[str, ...], message: str) -> str:
-        """Stage the working tree and create a commit with `parents`; return its id.
+    def commit(self, parents: tuple[str, ...], message: str, paths: tuple[str, ...]) -> str:
+        """Stage `paths` and create a commit with `parents`; return its id.
 
         One parent is the collect commit, two are the merge commit
-        (``docs/design/01-sync-model.md`` step 5 and 12). The working tree is staged as-is, so
-        the caller has already written exactly the desired repo state.
+        (``docs/design/01-sync-model.md`` step 5 and 12). The pathspec is explicit, never
+        `add -A` of the whole tree: the working tree is the staging area, and a file that is not
+        part of the repo layout must never be swept into a commit.
         """
         ...
 
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
+        ...
+
+    def materialize(self, commit: str) -> None:
+        """Reset the index and working tree to `commit`'s tree.
+
+        Used after a fast-forward moves the branch forward, so the working tree a later `commit`
+        stages matches the new HEAD. It is a tree checkout, never a merge: `read-tree --reset`.
+        """
         ...
 
     def push(self, remote: str, branch: str, commit: str) -> PushOutcome:

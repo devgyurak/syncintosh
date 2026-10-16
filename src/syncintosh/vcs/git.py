@@ -20,26 +20,29 @@ Two deliberate choices:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 from syncintosh.core.errors import GitError
-from syncintosh.core.ports import PushOutcome
+from syncintosh.core.ports import REMOTE_REF_PREFIX, PushOutcome
 
 # The commits syncintosh writes are machine-generated and deterministic; a fixed identity keeps
 # them reproducible and keeps a test off the developer's real git config.
 COMMIT_NAME = "syncintosh"
 COMMIT_EMAIL = "syncintosh@localhost"
 
-# A single namespace for the fetched remote branch. The remote is a URL from config, not a
-# configured `origin`, so the tracking ref is named explicitly rather than inferred.
-REMOTE_REF_PREFIX = "refs/remotes/syncintosh/"
+# git echoes the remote URL in its errors, and that URL can carry a credential
+# (`https://user:token@host`). Redact the userinfo before a message can reach a log
+# (``AGENTS.md`` §4).
+_CREDENTIALS_RE = re.compile(r"://[^/@\s]*@")
+_MAX_DETAIL = 400
 
 
-def remote_ref(branch: str) -> str:
-    """The local tracking ref a fetch of `branch` writes (``syncintosh/<branch>``)."""
-    return f"{REMOTE_REF_PREFIX}{branch}"
+def _redact(text: str) -> str:
+    """Strip URL credentials and bound the length of a git error detail."""
+    return _CREDENTIALS_RE.sub("://<redacted>@", text.strip())[:_MAX_DETAIL]
 
 
 class GitCLITransport:
@@ -71,8 +74,9 @@ class GitCLITransport:
     def _checked(self, args: Sequence[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
         result = self._run(args, cwd=self._workdir if cwd is None else cwd)
         if result.returncode != 0:
-            # Only the subcommand, never the arguments: a remote URL can carry a token.
-            detail = result.stderr.decode("utf-8", "replace").strip()
+            # The subcommand plus a redacted detail. A remote URL can carry a credential, and
+            # git echoes the URL, so the userinfo is stripped (``AGENTS.md`` §4).
+            detail = _redact(result.stderr.decode("utf-8", "replace"))
             raise GitError(f"`git {args[0]}` failed (exit {result.returncode}): {detail}")
         return result
 
@@ -84,17 +88,52 @@ class GitCLITransport:
         self._checked(["init", "-b", "main"])
 
     def clone(self, remote: str) -> None:
-        """Clone `remote` with full history (never `--depth`)."""
+        """Clone `remote` with full history (never `--depth`), on a branch that exists."""
         self._workdir.parent.mkdir(parents=True, exist_ok=True)
         self._checked(["clone", "--quiet", remote, str(self._workdir)], cwd=self._workdir.parent)
+        self._adopt_default_branch()
+
+    def _adopt_default_branch(self) -> None:
+        """Point HEAD at a real branch when the remote's HEAD named one it does not have.
+
+        A bare remote made by a plain `git init --bare` points HEAD at `master` while the first
+        publisher may have pushed `main`; `git clone` then leaves HEAD unborn, so nothing
+        resolves, and every sync would commit to a branch no other machine reads. With exactly
+        one branch the choice is unambiguous; anything else is refused rather than left unborn,
+        because an unborn HEAD silently discards the cycle's commits.
+        """
+        if self.head() is not None:
+            return
+        result = self._checked(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"])
+        names = result.stdout.decode("ascii").split()
+        if len(names) != 1:
+            raise GitError(
+                f"the remote's HEAD names a branch it does not have, and origin has {names}; "
+                "set the remote's default branch"
+            )
+        branch = names[0].removeprefix("origin/")
+        self._checked(["symbolic-ref", "HEAD", f"refs/heads/{branch}"])
+        self._checked(["update-ref", f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"])
+        self._checked(["read-tree", "--reset", "-u", f"refs/heads/{branch}"])
 
     def fetch(self, remote: str, branch: str) -> None:
-        """Fetch `branch` into the local tracking ref for `branch`."""
-        self._checked(["fetch", "--quiet", remote, f"+refs/heads/{branch}:{remote_ref(branch)}"])
+        """Fetch every branch from `remote` into the local tracking namespace.
+
+        A wildcard refspec, not `refs/heads/<branch>` alone: fetching one branch fails on a repo
+        with no commits yet, and the first push is into exactly such a repo.
+        """
+        self._checked(["fetch", "--quiet", remote, f"+refs/heads/*:{REMOTE_REF_PREFIX}*"])
 
     def head(self) -> str | None:
         """The current commit id, or `None` on an unborn branch."""
         return self._rev_parse("HEAD")
+
+    def branch(self) -> str | None:
+        """The branch HEAD points at, or `None` when it is detached."""
+        result = self._run(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=self._workdir)
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode("ascii").strip()
 
     def resolve(self, rev: str) -> str | None:
         """The commit id `rev` names, or `None` when it does not exist."""
@@ -129,16 +168,40 @@ class GitCLITransport:
             return None
         return result.stdout
 
-    def commit(self, parents: tuple[str, ...], message: str) -> str:
-        """Stage the working tree as-is and create a commit with `parents`."""
-        self._checked(["add", "-A"])
+    def commit(self, parents: tuple[str, ...], message: str, paths: tuple[str, ...]) -> str:
+        """Stage `paths` (additions, changes, and deletions) and create a commit with `parents`.
+
+        The pathspec is explicit, not `add -A .`: `read-tree --reset` cannot remove an untracked
+        file, so a stray one would otherwise be committed. A path is included when the working
+        tree has it **or** the index does — a file deleted inside the pathspec must still be
+        staged as a deletion — and `git add` rejects a pathspec that matches nothing, so a
+        directory that does not exist yet is skipped.
+        """
+        stageable = [path for path in paths if self._stageable(path)]
+        if stageable:
+            self._checked(["add", "-A", "--", *stageable])
         tree = self._checked(["write-tree"]).stdout.decode("ascii").strip()
         parent_args = [token for parent in parents for token in ("-p", parent)]
         return self._checked(["commit-tree", tree, *parent_args, "-m", message]).stdout.decode("ascii").strip()
 
+    def _stageable(self, path: str) -> bool:
+        """True when `path` exists in the working tree or is known to the index."""
+        if (self._workdir / path).exists():
+            return True
+        result = self._run(["ls-files", "--", path], cwd=self._workdir)
+        return result.returncode == 0 and bool(result.stdout.strip())
+
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
         self._checked(["update-ref", f"refs/heads/{branch}", commit])
+
+    def materialize(self, commit: str) -> None:
+        """Reset the index and working tree to `commit`'s tree (`read-tree --reset`).
+
+        Not a merge: the tree is checked out wholesale, so a fast-forward can move the branch
+        forward and leave the working tree a later `add -A` will stage correctly.
+        """
+        self._checked(["read-tree", "--reset", "-u", commit])
 
     def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
         """Push `commit` to `branch` on `remote`, classified for the retry rule."""

@@ -43,10 +43,17 @@ keys/commitments.json binary -diff -merge
 # tracked slot, and ignoring them keeps a crash-leftover out of a hand-run `git add` — the sweep
 # in `services/repo_writer` removes them on the next cycle (docs/design/01-sync-model.md).
 GITIGNORE_CONTENT = """\
-# Leftover atomic-write temp files. Repository hygiene, not configuration.
+# Leftover atomic-write temp files and OS junk. Repository hygiene, not configuration.
 *.tmp
 .*.tmp
+.DS_Store
 """
+
+# The paths syncintosh manages inside the repo. A commit stages exactly these, so a stray file
+# that lands in the working tree — OS junk the repo's own .gitignore does not name, or a leftover
+# from a failed write outside `objects/` — can never be swept into a commit
+# (docs/design/01-sync-model.md).
+TRACKED_PATHS: tuple[str, ...] = (OBJECTS_DIR, MANIFEST_PATH, KEYS_DIR, GITATTRIBUTES_PATH, GITIGNORE_PATH)
 
 
 def object_path(file_id: str) -> str:
