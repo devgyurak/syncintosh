@@ -11,15 +11,27 @@ syntax, which is why this layer exists.
 
 ## Contract
 
-Every adapter implements the `Adapter` port from `core/ports.py`:
+Every adapter implements the `ContentAdapter` port from `core/ports.py`:
 
-- `parse(text) -> Document` — to a comparable structure (keys and values, ordered).
-- `render(document, original) -> str` — back to text.
-- `is_conflict(base, local, remote, key) -> bool` — **only a both-sides change on the same
-  key is a conflict** (AGENTS.md §5.3).
+- `parse(text) -> Tree` — to the comparable **key-path tree** (`core/tree.py`). A scalar keeps its
+  JSON kind, an array is a leaf compared whole, and an empty object survives as `EmptyObject`.
+  Raise `ContentParseError` when the text is not this format (malformed JSONC, a duplicate key).
+- `render(tree, template) -> str` — back to text, editing `template` (the local file) minimally.
 
-The port lives in `core/`; the adapter lives in `adapters/`. `core` and `services` never
-import a concrete adapter.
+The port lives in `core/`; the adapter lives in `adapters/`. `core` and `services` never import a
+concrete adapter; the CLI assembles `Mapping[FileFormat, ContentAdapter]` and injects it.
+
+## Conflict rule
+
+The adapter does **not** decide conflicts — `core/merge.py` does, in `merge_tree`:
+
+- a key changed on one side wins;
+- only a key changed on **both** sides to different values conflicts;
+- a scalar-versus-subtree clash is one **structural** conflict at the shallowest path.
+
+The content merge (`core/content_merge.py`) runs `parse -> merge_tree -> render`, then re-parses
+the rendered text and compares it with the merged tree. A parse failure or a render that does not
+round-trip is treated as a conflict, so an adapter cannot publish a partially rendered file.
 
 ## Rules
 
@@ -39,8 +51,9 @@ import a concrete adapter.
 
 ## Tests
 
-- **Round-trip**: `render(parse(text)) == text` for a fixture with comments and unusual
-  order. Put the fixture in `tests/fixtures/` — real key names, not invented.
+- **Round-trip**: `render(parse(text), text) == text` for a fixture with comments and unusual
+  order. Put the fixture in `tests/fixtures/` — real key names, not invented. A single-key edit
+  may change only that key's span.
 - **Merge semantics**, parametrized: one-sided change wins; identical change is a no-op
   (idempotent); both-sides different change is the only conflict.
 - **Property tests** with hypothesis for the merge-relevant behavior (idempotence; a
