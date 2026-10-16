@@ -47,22 +47,41 @@ def _validate_sha256(value: object) -> str:
     return value
 
 
+def _ensure_utf8(value: str, field: str) -> str:
+    """Reject a string that cannot be encoded as UTF-8 (an unpaired surrogate).
+
+    Such a string would pass field validation and then blow up as a bare `UnicodeEncodeError`
+    when the manifest is serialized, so it is turned into a `ManifestCorrupt` here.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ManifestCorrupt(f"{field} is not valid UTF-8: {value!r}") from exc
+    return value
+
+
 def _validate_path(value: object) -> str:
     if not isinstance(value, str) or value == "":
         raise ManifestCorrupt(f"path must be a non-empty string, got {value!r}")
     if "\x00" in value:
         raise ManifestCorrupt("path must not contain a NUL byte")
-    # Relative to $HOME so the manifest is portable across Macs. Whether it escapes $HOME (a
-    # `..` component, a symlinked parent) is apply's trust-boundary check, not the shape's.
+    _ensure_utf8(value, "path")
+    # Relative to $HOME so the manifest is portable across Macs. Reject a non-normalized path
+    # rather than normalizing silently: `.`, `..`, `//`, or a trailing `/` would otherwise mint a
+    # second ID for one file and no dedup rule would catch it. Apply still re-resolves the target
+    # (a symlinked parent) as its own trust-boundary check.
     if value.startswith("/"):
         raise ManifestCorrupt(f"path must be relative to $HOME, got {value!r}")
+    components = value.split("/")
+    if "" in components or "." in components or ".." in components:
+        raise ManifestCorrupt(f"path must be normalized (no '.', '..', empty, or trailing '/'): {value!r}")
     return value
 
 
 def _validate_preset(value: object) -> str:
     if not isinstance(value, str) or value == "":
         raise ManifestCorrupt(f"preset must be a non-empty string, got {value!r}")
-    return value
+    return _ensure_utf8(value, "preset")
 
 
 def _validate_scope(value: object) -> Scope:
@@ -75,7 +94,7 @@ def _validate_machine(value: object, scope: Scope) -> str | None:
     if scope == "machine":
         if not isinstance(value, str) or value == "":
             raise ManifestCorrupt("a machine-scope record must name its machine")
-        return value
+        return _ensure_utf8(value, "machine")
     if value is not None:
         raise ManifestCorrupt("a common-scope record must not name a machine")
     return None

@@ -94,6 +94,7 @@ def test_canonical_json_allows_none_bool_int_list_and_dict() -> None:
         {"a": [1.5]},
         {1: "non-string key"},
         {"a": object()},
+        {"a": "\ud800"},
     ],
 )
 def test_canonical_json_rejects_a_non_canonical_value(value) -> None:
@@ -117,7 +118,15 @@ def test_canonical_json_rejects_a_non_canonical_value(value) -> None:
         (b'{"schema":NaN,"key_generation":1,"records":{}}', ManifestCorrupt),
         (b'{"schema":"1","key_generation":1,"records":{}}', ManifestCorrupt),
         (b'{"schema":1,"key_generation":0,"records":{}}', ManifestCorrupt),
+        (b'{"key_generation":1,"records":{}}', ManifestCorrupt),
         (b'{"schema":2,"key_generation":1,"records":{}}', UnsupportedManifestSchema),
+        # A newer schema wins over an unknown field or a reshaped record: it is an upgrade, not
+        # corruption, and must not be masked by a field check.
+        (b'{"schema":2,"key_generation":1,"records":{},"extra":1}', UnsupportedManifestSchema),
+        (
+            b'{"schema":2,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":{"new":1}}}',
+            UnsupportedManifestSchema,
+        ),
     ],
 )
 def test_loads_rejects_bad_input(raw, error) -> None:
@@ -132,6 +141,7 @@ def test_loads_rejects_bad_input(raw, error) -> None:
         b'{"path":".zshrc","preset":"zsh","scope":"common","format":"text","sha256":"' + b"a" * 64 + b'","extra":1}',
         b'{"preset":"zsh","scope":"common","format":"text","sha256":"' + b"a" * 64 + b'"}',
         b'{"path":".zshrc","preset":"zsh","scope":"common","format":"text","sha256":"short"}',
+        b'{"path":"\\ud800","preset":"zsh","scope":"common","format":"text","sha256":"' + b"a" * 64 + b'"}',
     ],
 )
 def test_loads_rejects_a_bad_record(record_json) -> None:

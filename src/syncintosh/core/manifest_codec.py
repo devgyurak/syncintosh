@@ -20,7 +20,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from syncintosh.core.errors import ManifestCorrupt
+from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 
 # Top-level keys: all required, nothing else allowed.
@@ -78,7 +78,10 @@ def canonical_json_bytes(value: object) -> bytes:
     """
     _check_canonical(value, "manifest")
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    return text.encode("utf-8")
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ManifestCorrupt("manifest holds a string that is not encodable as UTF-8") from exc
 
 
 def manifest_to_mapping(manifest: Manifest) -> dict[str, Any]:
@@ -149,14 +152,18 @@ def loads_manifest(data: bytes) -> Manifest:
         raise ManifestCorrupt(f"manifest is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ManifestCorrupt("manifest must be a JSON object")
+    # Check `schema` before any field: a newer schema is an upgrade, not corruption, so it must
+    # not be masked by a field a later version added or reshaped.
+    schema = parsed.get("schema")
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        raise ManifestCorrupt(f"manifest schema must be an integer, got {type(schema).__name__}")
+    if schema != MANIFEST_SCHEMA:
+        raise UnsupportedManifestSchema(schema)
     _require_keys(parsed, _MANIFEST_KEYS, _MANIFEST_KEYS, "manifest")
     records_raw = parsed["records"]
     if not isinstance(records_raw, dict):
         raise ManifestCorrupt("manifest `records` must be a JSON object")
     records = {file_id: _parse_record(file_id, raw) for file_id, raw in records_raw.items()}
-    schema = parsed["schema"]
-    if not isinstance(schema, int) or isinstance(schema, bool):
-        raise ManifestCorrupt(f"manifest schema must be an integer, got {type(schema).__name__}")
     return Manifest.create(schema=schema, key_generation=parsed["key_generation"], records=records)
 
 
