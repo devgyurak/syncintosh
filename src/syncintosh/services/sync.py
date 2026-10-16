@@ -38,7 +38,7 @@ from syncintosh.core.errors import (
 )
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
-from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
+from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, PendingState
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
@@ -109,12 +109,34 @@ class _Collect:
 
     records: dict[str, ManifestRecord] = field(default_factory=dict)
     contents: dict[str, bytes] = field(default_factory=dict)
+    # The bytes collect read from each live file, kept so apply can compare-and-swap a record it
+    # is about to overwrite on an explicit adopt — even though it collected nothing for it.
+    seen: dict[str, bytes] = field(default_factory=dict)
+    # A local change whose ledger baseline is older than HEAD: it must be merged with HEAD's
+    # content, not pushed over it.
+    stale: list[_StaleChange] = field(default_factory=list)
     created: list[str] = field(default_factory=list)
     collected: list[str] = field(default_factory=list)
     deferred: list[str] = field(default_factory=list)
     suppressed: list[str] = field(default_factory=list)
     first_sight: list[str] = field(default_factory=list)
+    symlinks: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _StaleChange:
+    """A local change against a stale ledger baseline, waiting for a content merge.
+
+    The ledger baseline (`entry`) is the object the user actually edited; HEAD moved on since.
+    Pushing the live content would silently drop HEAD's change, so it is merged with that
+    baseline as base and HEAD's object as the other side
+    (``docs/design/01-sync-model.md`` — "a stale base is ordinary").
+    """
+
+    record: ManifestRecord
+    entry: LedgerEntry
+    live: bytes
 
 
 def _join(home: str, relpath: str) -> str:
@@ -234,12 +256,21 @@ def _collect(
         if deny.is_denied(home, item.path):
             state.skipped.append(item.path)
             continue
-        live_bytes = live.read(_join(home, item.path))
+        live_path = _join(home, item.path)
+        if live.is_symlink(live_path):
+            # Collection copies regular files, never follows a link (AGENTS.md §2.4). Following
+            # it would also leave the file with no baseline, so every later target edit would
+            # read as a first-sight prompt.
+            state.symlinks.append(item.path)
+            continue
+        live_bytes = live.read(live_path)
         live_sha = None if live_bytes is None else _sha256(live_bytes)
         record = _find_item_record(state.records, item)
         if record is None:
             _collect_new(state, item, live_bytes, live_sha, source)
         else:
+            if live_bytes is not None:
+                state.seen[record.file_id] = live_bytes
             _collect_existing(state, item, record, live_bytes, live_sha, ledger, adopt)
     return state
 
@@ -277,11 +308,18 @@ def _collect_existing(
     ledger: Mapping[str, LedgerEntry],
     adopt: AdoptChoice | None,
 ) -> None:
-    verdict = classify(ledger.get(record.file_id), live_sha, record.sha256)
-    if verdict == "local-change":
-        state.records[record.file_id] = _replace_sha(record, live_sha or record.sha256)
-        state.contents[record.file_id] = live_bytes or b""
-        state.collected.append(item.path)
+    entry = ledger.get(record.file_id)
+    verdict = classify(entry, live_sha, record.sha256)
+    if verdict == "local-change" and live_bytes is not None and live_sha is not None:
+        if entry is not None and entry.sha256 != record.sha256:
+            # The user edited the content the ledger last accounted for, while HEAD holds newer
+            # content this machine never applied. Adopting the live bytes would drop HEAD's
+            # change with no conflict, so merge instead (step 10, on a stale base).
+            state.stale.append(_StaleChange(record=record, entry=entry, live=live_bytes))
+        else:
+            state.records[record.file_id] = _replace_sha(record, live_sha)
+            state.contents[record.file_id] = live_bytes
+            state.collected.append(item.path)
     elif verdict == "deferred":
         # Nothing to collect; the apply step decides whether this machine has a file to create
         # (the directory exists) or is genuinely deferred (the app is not installed).
@@ -313,6 +351,50 @@ def _collect_first_sight(
     )
     state.contents[record.file_id] = live_bytes
     state.collected.append(item.path)
+
+
+def _merge_stale(
+    *,
+    transport: GitTransport,
+    cipher: Cipher,
+    driver: MergeDriver,
+    head_commit: str | None,
+    collected: _Collect,
+) -> tuple[PendingConflictRecord, ...]:
+    """Content-merge every local change whose ledger baseline is older than HEAD.
+
+    The three inputs are the ones the diverged merge uses, with the base taken from the ledger
+    rather than from a merge-base commit: the object the user actually edited (`entry.commit`),
+    the live file, and HEAD's object. Pushing the live bytes instead would drop HEAD's change
+    with no conflict (``docs/design/01-sync-model.md``).
+    """
+    conflicts: list[PendingConflictRecord] = []
+    for change in collected.stale:
+        file_id = change.record.file_id
+        base = _verified_object(transport, cipher, change.entry.commit, file_id, change.entry.sha256)
+        head_bytes = _verified_object(transport, cipher, head_commit, file_id, change.record.sha256)
+        if base is None or head_bytes is None:
+            conflicts.append(
+                PendingConflictRecord(file_id, change.record.path, "the baseline or HEAD object is missing")
+            )
+            continue
+        merged = merge_content(base, change.live, head_bytes, driver)
+        if merged.conflicted:
+            conflicts.append(
+                PendingConflictRecord(
+                    file_id,
+                    change.record.path,
+                    "the same region changed here and in the repo since the last apply",
+                    base,
+                    change.live,
+                    head_bytes,
+                )
+            )
+            continue
+        collected.records[file_id] = _replace_sha(change.record, _sha256(merged.data))
+        collected.contents[file_id] = merged.data
+        collected.collected.append(change.record.path)
+    return tuple(conflicts)
 
 
 # --------------------------------------------------------------------------- publish
@@ -353,7 +435,6 @@ class _Merged:
 
     commit: str | None
     conflicts: tuple[PendingConflictRecord, ...]
-    manifest: Manifest | None = None
     base_commit: str | None = None
 
 
@@ -423,7 +504,7 @@ def _merge_diverged(
         contents[file_id] = data
     write_repo(files=files, cipher=cipher, scanner=scanner, head=local_manifest, new=merged_manifest, contents=contents)
     commit = _commit(transport, branch, (local, remote), "syncintosh: merge")
-    return _Merged(commit=commit, conflicts=(), manifest=merged_manifest, base_commit=base_commit)
+    return _Merged(commit=commit, conflicts=(), base_commit=base_commit)
 
 
 def _object_content(
@@ -489,7 +570,7 @@ def _publish(
             _verify_commitments(transport, codec, store, remote_commit)
         local = transport.head()
         if remote_commit is None:
-            outcome = _try_push(transport, config.remote, branch, local_commit)
+            outcome = _push_or_raise(transport, config.remote, branch, local_commit)
             if outcome == "ok":
                 return _Publish(published=local_commit)
             continue
@@ -502,7 +583,7 @@ def _publish(
             _fast_forward(transport, branch, remote_commit)
             return _Publish(published=remote_commit, remote_commit=remote_commit)
         if transport.is_ancestor(remote_commit, local):
-            outcome = _try_push(transport, config.remote, branch, local)
+            outcome = _push_or_raise(transport, config.remote, branch, local)
             if outcome == "ok":
                 return _Publish(published=local, remote_commit=remote_commit)
             continue
@@ -519,17 +600,21 @@ def _publish(
         )
         if merged.commit is None:
             return _Publish(conflicts=merged.conflicts, base_commit=merged.base_commit, remote_commit=remote_commit)
-        outcome = _try_push(transport, config.remote, branch, merged.commit)
+        outcome = transport.push(config.remote, branch, merged.commit)
         if outcome == "ok":
             return _Publish(published=merged.commit, base_commit=merged.base_commit, remote_commit=remote_commit)
-        # Discard the unpushed merge commit, keep the collect commit, and retry against the fresh
-        # remote. Stacking a second merge on an unpushed one is what produces criss-cross history.
+        # Either way the merge commit did not land. Discard it and keep the collect commit, so a
+        # stuck branch never holds an unpushed merge — stacking a second merge on one is what
+        # produces criss-cross history.
         transport.update_ref(branch, local)
         transport.materialize(local)
+        if outcome == "non-fast-forward":
+            continue
+        raise GitError("the push was rejected for a reason other than a non-fast-forward race")
     raise GitError(f"push retry limit ({MAX_PUSH_ATTEMPTS}) reached without converging")
 
 
-def _try_push(transport: GitTransport, remote: str, branch: str, commit: str | None) -> str:
+def _push_or_raise(transport: GitTransport, remote: str, branch: str, commit: str | None) -> str:
     """Push `commit`; `"non-fast-forward"` sends the caller around its retry loop."""
     if commit is None:
         return "ok"
@@ -554,6 +639,7 @@ def _apply(
     target_commit: str,
     target_manifest: Manifest,
     baseline: Mapping[str, bytes],
+    seen: Mapping[str, bytes],
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
     deny: DenyList,
@@ -588,7 +674,12 @@ def _apply(
             symlinks.append(record.path)
             continue
         live_bytes = live.read(live_path)
-        decision = _decision(record, live_bytes, ledger.get(file_id), baseline.get(file_id), adopt)
+        # The compare-and-swap reference is the bytes collect read from this file — not the
+        # content this cycle will publish, which for a merged record is not what the file holds.
+        collect_baseline = seen.get(file_id)
+        if collect_baseline is None:
+            collect_baseline = baseline.get(file_id)
+        decision = _decision(record, live_bytes, ledger.get(file_id), collect_baseline, adopt)
         if decision == _ABORT:
             aborted.append(record.path)
             continue
@@ -614,10 +705,16 @@ def _decision(
     record: ManifestRecord,
     live_bytes: bytes | None,
     entry: LedgerEntry | None,
-    collected: bytes | None,
+    baseline: bytes | None,
     adopt: AdoptChoice | None,
 ) -> _Decision:
-    """Whether apply may write `record` over the live path, per the conservative rules."""
+    """Whether apply may write `record` over the live path, per the conservative rules.
+
+    `baseline` is the file's bytes as this cycle accounted for them — the collected content, or
+    for an `--adopt remote` record (which collected nothing) the bytes collect read. Every write
+    over an existing file is checked against it, adopt included: an edit made between collect and
+    apply must abort the write, not be overwritten.
+    """
     if live_bytes is None:
         # A missing file is not a deletion. Recreate a record this machine has never written, and
         # never one it wrote and that disappeared (that is the suppressed rule).
@@ -627,11 +724,12 @@ def _decision(
         return _SKIP
     if entry is None or entry.suppressed:
         # First sight, or a suppressed file that came back: overwrite only on an explicit adopt.
-        return _WRITE if adopt == "remote" else _SKIP
-    baseline = collected if collected is not None else None
-    if baseline is not None:
-        return _WRITE if live_bytes == baseline else _ABORT
-    return _WRITE if _sha256(live_bytes) == entry.sha256 else _ABORT
+        if adopt != "remote":
+            return _SKIP
+        return _WRITE if baseline is not None and live_bytes == baseline else _ABORT
+    if baseline is None:
+        return _WRITE if _sha256(live_bytes) == entry.sha256 else _ABORT
+    return _WRITE if live_bytes == baseline else _ABORT
 
 
 def _settle_ledger(
@@ -751,6 +849,11 @@ def _cycle(
 ) -> SyncReport:
     ledger = dict(ledger_store.load())
     head_commit = transport.head()
+    if head_commit is not None:
+        # Discard anything a previous, failed cycle left in the working tree before `git add -A`
+        # can stage it — a partially written object or a stale manifest. The commits, not the
+        # working tree, are the source of truth.
+        transport.materialize(head_commit)
     head_manifest = _read_manifest(transport, cipher, head_commit)
     collected = _collect(
         config=config,
@@ -764,15 +867,41 @@ def _cycle(
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
-        return SyncReport(first_sight=tuple(collected.first_sight), skipped=tuple(collected.skipped))
+        return SyncReport(
+            first_sight=tuple(collected.first_sight),
+            symlinks=tuple(collected.symlinks),
+            skipped=tuple(collected.skipped),
+        )
+    if collected.stale:
+        stale_conflicts = _merge_stale(
+            transport=transport,
+            cipher=cipher,
+            driver=driver,
+            head_commit=head_commit,
+            collected=collected,
+        )
+        if stale_conflicts:
+            pending_store.record(
+                PendingState.create(
+                    local_commit=head_commit or "",
+                    remote_commit=head_commit or "",
+                    base_commit=None,
+                    conflicts=stale_conflicts,
+                )
+            )
+            return SyncReport(
+                conflicts=stale_conflicts,
+                collected=tuple(collected.collected),
+                symlinks=tuple(collected.symlinks),
+                skipped=tuple(collected.skipped),
+            )
 
     generation = _current_generation(store, head_manifest)
     new_manifest = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=generation, records=collected.records)
-    changed = (
-        bool(collected.contents)
-        or head_manifest is None
-        or dumps_manifest(head_manifest) != dumps_manifest(new_manifest)
-    )
+    plan = plan_writes(head_manifest, new_manifest)
+    # A live file that merely matches HEAD again (a crash between apply and the ledger save) must
+    # not produce an empty commit; the write plan, not the collect list, decides (step 4–5).
+    changed = plan.write_manifest or bool(plan.objects_to_write) or bool(plan.objects_to_delete)
     if changed:
         write_repo(
             files=files,
@@ -823,6 +952,7 @@ def _cycle(
         target_commit=target_commit,
         target_manifest=target_manifest,
         baseline=collected.contents,
+        seen=collected.seen,
         ledger=ledger,
         live=live,
         deny=deny,
@@ -848,7 +978,7 @@ def _cycle(
         applied=tuple(applied),
         deferred=(*collected.deferred, *deferred),
         suppressed=tuple(collected.suppressed),
-        symlinks=tuple(symlinks),
+        symlinks=tuple(dict.fromkeys((*collected.symlinks, *symlinks))),
         aborted=tuple(aborted),
         refused=tuple(refused),
         skipped=tuple(collected.skipped),

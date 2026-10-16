@@ -43,9 +43,10 @@ keys/commitments.json binary -diff -merge
 # tracked slot, and ignoring them keeps a crash-leftover out of a hand-run `git add` — the sweep
 # in `services/repo_writer` removes them on the next cycle (docs/design/01-sync-model.md).
 GITIGNORE_CONTENT = """\
-# Leftover atomic-write temp files. Repository hygiene, not configuration.
+# Leftover atomic-write temp files and OS junk. Repository hygiene, not configuration.
 *.tmp
 .*.tmp
+.DS_Store
 """
 
 

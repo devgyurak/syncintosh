@@ -170,8 +170,9 @@ def _run(
     transport: GitCLITransport | None = None,
     live: LiveFiles | None = None,
 ) -> SyncReport:
+    active = transport or GitCLITransport(machine.repo)
     return sync(
-        transport=transport or GitCLITransport(machine.repo),
+        transport=active,
         files=FileRepo(machine.repo),
         cipher=EnvelopeCipher(machine.store),
         scanner=PatternSecretScanner(),
@@ -186,7 +187,7 @@ def _run(
         source=SecureFileIdSource(),
         config=load_config(machine.config_file),
         home=str(machine.home),
-        branch=BRANCH,
+        branch=active.branch() or BRANCH,
         adopt=adopt,
     )
 
@@ -687,3 +688,154 @@ def test_a_replayed_object_that_mismatches_its_record_is_refused(tmp_path, memor
     with pytest.raises(ContentDigestMismatch):
         _run(b)
     assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_a_local_edit_over_a_stale_baseline_is_merged_not_pushed(tmp_path, memory_key_store) -> None:
+    # given — A publishes a change while B's apply aborts, leaving a stale ledger baseline
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"ONE\ntwo\nthree\n")
+    _run(a)
+    aborted = _run(b, live=MidSyncEditLive(b.zshrc))
+
+    # when — B edits the content it last saw and syncs normally
+    assert aborted.aborted == (ZSH,)
+    _write_live(b, b"one\ntwo\nTHREE\n")
+    report = _run(b)
+    _run(a)
+
+    # then — HEAD's change is merged, not silently overwritten
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"ONE\ntwo\nTHREE\n"
+    assert _read_live(a) == b"ONE\ntwo\nTHREE\n"
+
+
+def test_a_stale_baseline_conflict_stops_the_sync(tmp_path, memory_key_store) -> None:
+    # given — the same stale split, but both sides changed the same region
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+
+    # when — B edits the region A changed
+    _write_live(b, b"one\nFROM B\nthree\n")
+    report = _run(b)
+
+    # then — reported, and B's file is untouched
+    assert report.has_conflicts is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+
+def test_a_symlinked_tracked_file_does_not_repeat_first_sight(tmp_path, memory_key_store) -> None:
+    # given — B's tracked file is a symlink into a dotfiles tree
+    _, b, _ = _pair(tmp_path, memory_key_store)
+    target = b.home / "dotfiles" / "zshrc"
+    _write_file(b, "dotfiles/zshrc", b"one\ntwo\nthree\n")
+    b.zshrc.unlink()
+    b.zshrc.symlink_to(target)
+
+    # when — the link's target changes
+    _write_file(b, "dotfiles/zshrc", b"edited\n")
+    first = _run(b)
+    second = _run(b)
+
+    # then — reported as a link, and never as a first-sight prompt that blocks every sync
+    assert first.symlinks == (ZSH,)
+    assert first.needs_adopt is False
+    assert second.needs_adopt is False
+
+
+def test_adopting_remote_still_checks_for_an_edit_during_the_sync(tmp_path, memory_key_store) -> None:
+    # given — B has a first-sight file and edits it while the sync runs
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write_live(a, b"from A\n")
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    _write_live(b, b"from B\n")
+
+    # when
+    report = _run(b, adopt="remote", live=MidSyncEditLive(b.zshrc))
+
+    # then — the edit is not clobbered (docs/design/01-sync-model.md, "every write is checked")
+    assert report.aborted == (ZSH,)
+    assert _read_live(b) == b"from B\n"
+
+
+def test_junk_and_leftovers_in_the_repo_are_not_committed(tmp_path, memory_key_store) -> None:
+    # given — OS junk and a stray object a failed run could have left
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    (a.repo / ".DS_Store").write_bytes(b"junk")
+    (a.repo / "objects" / "leftover.enc").write_bytes(b"stale")
+    _write_live(a, b"one changed\n")
+
+    # when
+    _run(a)
+
+    # then — neither is in the committed tree
+    tracked = _git(a.repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert ".DS_Store" not in tracked
+    assert "objects/leftover.enc" not in tracked
+
+
+def test_a_deleted_repo_file_in_the_worktree_is_not_a_committed_deletion(tmp_path, memory_key_store) -> None:
+    # given — a file vanished from the working tree, as a partial failure can leave it
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    (a.repo / "keys" / "commitments.json").unlink()
+    _write_live(a, b"one changed\n")
+
+    # when
+    _run(a)
+
+    # then — the next cycle restores it rather than committing its deletion
+    tracked = _git(a.repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "keys/commitments.json" in tracked
+
+
+def test_a_live_file_that_already_matches_head_is_not_committed_again(tmp_path, memory_key_store) -> None:
+    # given — a ledger rewound to a stale baseline while the live file already matches HEAD
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    stale = dict(JsonLedgerStore(a.ledger).load())
+    _write_live(a, b"one changed\n")
+    _run(a)
+    JsonLedgerStore(a.ledger).save(stale)
+    commits = _git(a.repo, "rev-list", "--count", "HEAD").strip()
+
+    # when
+    report = _run(a)
+
+    # then — no empty commit (the write plan, not the collect list, decides)
+    assert report.unchanged is True
+    assert _git(a.repo, "rev-list", "--count", "HEAD").strip() == commits
+
+
+def test_a_remote_whose_head_names_a_missing_branch_is_adopted(tmp_path, memory_key_store) -> None:
+    # given — a bare remote from plain `git init --bare`, whose HEAD names `master`
+    remote = tmp_path / "legacy.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    a = _machine(tmp_path, memory_key_store, "machine-a", str(remote))
+    _initialize(a)
+    _write_live(a, b"one\ntwo\nthree\n")
+    _run(a)
+
+    # when — a second machine clones a remote whose HEAD names a branch it does not have
+    b = _machine(tmp_path, memory_key_store, "machine-b", str(remote))
+    _initialize(b, import_from=a.recovery)
+    report = _run(b)
+
+    # then — B is on the branch that exists and applies A's content
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_the_ledger_holds_no_plaintext_and_no_real_path(tmp_path, memory_key_store) -> None:
+    # given
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    text = a.ledger.read_text(encoding="utf-8")
+
+    # then — the ledger is digests only (AGENTS.md §3.3)
+    assert "one" not in text
+    assert ZSH not in text
