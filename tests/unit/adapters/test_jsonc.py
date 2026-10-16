@@ -16,6 +16,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.adapters.text_merge import TextMergeDriver
+from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.tree import Scalar, Tree, tree_from_value
@@ -349,6 +351,81 @@ def test_a_reordered_array_object_is_reserialized_and_round_trips() -> None:
 
     # then — the render reproduces the reordered array (not the template's order)
     assert adapter.parse(rendered) == merged
+
+
+def test_a_whitespace_only_template_gains_a_valid_object() -> None:
+    # given — a template with no members at all
+    adapter = JsoncAdapter()
+
+    # when
+    rendered = adapter.render(tree_from_value({"b": 1}), "\n\n")
+
+    # then
+    assert adapter.parse(rendered) == tree_from_value({"b": 1})
+
+
+@pytest.mark.parametrize(
+    ("base", "remote"),
+    [
+        # The closing brace shares the last member's line, so the whole object is rewritten.
+        ('{\n  // theme\n  "theme": "dark" }', '{\n  "theme": "light",\n  "b": 1\n}'),
+        # Two members share a line.
+        (
+            '{\n  "[python]": { // fmt\n    "editor.tabSize": 4, "editor.insertSpaces": true }\n}\n',
+            '{\n  "[python]": { // fmt\n    "editor.tabSize": 8, "editor.insertSpaces": true }\n}\n',
+        ),
+        # A comment-only document is the empty object, but rewriting it would drop the comment.
+        ("// nothing yet\n", '{\n  "b": 1\n}'),
+    ],
+)
+def test_a_rewrite_that_would_drop_a_comment_is_refused(base, remote) -> None:
+    # given
+    adapter = JsoncAdapter()
+
+    # when & then — never a silent strip of the comment
+    with pytest.raises(ContentParseError):
+        adapter.render(_merged(base, base, remote), base)
+
+
+def test_a_refused_comment_rewrite_surfaces_as_a_conflict() -> None:
+    # given — both sides changed the same irregular object, which holds a comment
+    adapter = JsoncAdapter()
+    base = '{\n  // theme\n  "a": 1 }'
+    local = '{\n  // theme\n  "a": 1, "c": 2 }'
+    remote = '{\n  "a": 1,\n  "b": 3\n}'
+
+    # when
+    result = merge_content(base.encode(), local.encode(), remote.encode(), TextMergeDriver(), adapter)
+
+    # then — a conflict, not a published file with the comment stripped
+    assert result.conflicted is True
+
+
+@pytest.mark.parametrize("value", ['"https://x"', '"a\\"b"', '"/* not a comment */"', '"// nope"'])
+def test_a_comment_like_sequence_inside_a_string_does_not_block_a_rewrite(value) -> None:
+    # given — an inline object whose string holds something comment-shaped
+    adapter = JsoncAdapter()
+    inline = '{"u": ' + value + "}"
+    merged = _merged(inline, inline, '{"u": ' + value + ', "b": 2}')
+
+    # when
+    rendered = adapter.render(merged, inline)
+
+    # then — the string is not mistaken for a comment, so the rewrite is allowed
+    assert adapter.parse(rendered) == merged
+
+
+def test_a_brace_delimited_empty_object_still_splices_and_keeps_its_comment() -> None:
+    # given — an empty object with a comment is a real object with a line to splice into
+    adapter = JsoncAdapter()
+    template = "{\n  // note\n}\n"
+
+    # when
+    rendered = adapter.render(tree_from_value({"b": 2}), template)
+
+    # then
+    assert "// note" in rendered
+    assert adapter.parse(rendered) == tree_from_value({"b": 2})
 
 
 def test_a_huge_integer_is_a_parse_error_not_a_crash() -> None:

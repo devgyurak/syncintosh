@@ -329,14 +329,25 @@ class _Diff:
         if not children:
             leaf = self._leaves.get(path)
             if leaf is not None:
-                edits.append(_Edit(node.span.start, node.span.end, _leaf_text(leaf)))
+                self._rewrite(node, _leaf_text(leaf), edits)
             return
         if not isinstance(node, _ObjectNode) or not _clean_multiline_object(self._source, node):
             # The tree wants an object here, or the object is not laid out member-per-line
             # (one-line, or the closing brace shares a line): rewrite the whole value.
-            edits.append(_Edit(node.span.start, node.span.end, self._subtree(path, len(path))))
+            self._rewrite(node, self._subtree(path, len(path)), edits)
             return
         self._object(node, path, edits)
+
+    def _rewrite(self, node: _AstNode, text: str, edits: list[_Edit]) -> None:
+        """Replace a whole value, refusing when that would silently drop a comment.
+
+        Rewriting a span is only safe while it holds no comment: the merged tree has no comments,
+        so a re-parse check cannot notice them gone. Refusing turns a comment loss into a
+        conflict, which the caller surfaces rather than publishing a stripped file.
+        """
+        if _has_comment(self._source, node.span.start, node.span.end):
+            raise ContentParseError("cannot rewrite a value that contains a comment")
+        edits.append(_Edit(node.span.start, node.span.end, text))
 
     def _matches(self, node: _AstNode, path: KeyPath) -> bool:
         children = self._children(path)
@@ -505,10 +516,14 @@ def _clean_multiline_object(text: str, node: _ObjectNode) -> bool:
     """True when every member is alone on its line and the closing brace is on its own line.
 
     Only then can a member be spliced by line; anything else (one line, two members on a line,
-    `}` sharing a member's line) is reserialized whole instead of risking a broken edit.
+    `}` sharing a member's line) is reserialized whole instead of risking a broken edit. A
+    member-less object may still be spliced when it is a real, brace-delimited `{ ... }`; a
+    synthesized empty document (whitespace- or comment-only) has no braces and is rewritten.
     """
     if "\n" not in text[node.span.start : node.span.end]:
         return False
+    if not node.members:
+        return text[node.span.start] == "{"
     for member in node.members:
         if text[_line_start(text, member.span.start) : member.span.start].strip() != "":
             return False
@@ -548,6 +563,28 @@ def _skip_spaces(text: str, pos: int) -> int:
     while pos < len(text) and text[pos] in _SPACES:
         pos += 1
     return pos
+
+
+def _has_comment(text: str, start: int, end: int) -> bool:
+    """True when the ``[start, end)`` span holds a `//` or `/* */` comment, string-aware."""
+    pos = start
+    while pos < end:
+        char = text[pos]
+        if char == '"':
+            pos += 1
+            while pos < end:
+                if text[pos] == "\\":
+                    pos += 2
+                    continue
+                if text[pos] == '"':
+                    pos += 1
+                    break
+                pos += 1
+        elif text.startswith("//", pos) or text.startswith("/*", pos):
+            return True
+        else:
+            pos += 1
+    return False
 
 
 def _line_start(text: str, pos: int) -> int:
