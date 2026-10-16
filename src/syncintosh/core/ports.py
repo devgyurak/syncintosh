@@ -22,6 +22,15 @@ Domain = Literal["object", "manifest", "key-wrap"]
 # is retried against the fresh remote; anything else is reported.
 PushOutcome = Literal["ok", "non-fast-forward", "rejected"]
 
+# A generation key is 32 random bytes (``docs/design/05-key-generations.md``) — the same width
+# as an AES-256 key, which is not a coincidence: it is the key AES-GCM is driven with after
+# HKDF. `services` mints one without importing `crypto`, hence the constant here.
+GENERATION_KEY_SIZE = 32
+
+# The whole ring as ascending `(generation id, key)` pairs — the shape the key-lifecycle
+# services pass across the `RingCodec` port without naming a crypto type (``AGENTS.md`` §2.2).
+Ring = tuple[tuple[int, bytes], ...]
+
 
 @runtime_checkable
 class MergeDriver(Protocol):
@@ -273,4 +282,26 @@ class LiveFiles(Protocol):
 
     def remove(self, path: str) -> None:
         """Remove the file if present. Raises on any other failure."""
+        ...
+
+
+@runtime_checkable
+class RingCodec(Protocol):
+    """Wrap and unwrap the whole key ring under a passphrase, and commit to a generation.
+
+    `core` and `services` never touch scrypt or AES-GCM directly; `crypto` implements this
+    (``docs/design/05-key-generations.md``). `commitment` is the keyed PRF published cleartext,
+    so "same id, different key" is detectable without the key.
+    """
+
+    def wrap(self, ring: Ring, passphrase: str) -> bytes:
+        """Wrap the ascending `ring` as one self-describing export blob."""
+        ...
+
+    def unwrap(self, blob: bytes, passphrase: str) -> Ring:
+        """Unwrap an export blob, raising `MasterKeyUnwrapError` on any failure."""
+        ...
+
+    def commitment(self, key: bytes) -> str:
+        """Return the lowercase-hex commitment for a generation key."""
         ...

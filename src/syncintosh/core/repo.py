@@ -20,6 +20,8 @@ from syncintosh.core.manifest_codec import dumps_manifest
 
 MANIFEST_PATH = "manifest.enc"
 OBJECTS_DIR = "objects"
+KEYS_DIR = "keys"
+COMMITMENTS_PATH = "keys/commitments.json"
 GITATTRIBUTES_PATH = ".gitattributes"
 GITIGNORE_PATH = ".gitignore"
 
