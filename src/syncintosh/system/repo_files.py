@@ -12,6 +12,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from syncintosh.system.durability import flush_to_storage, sync_directory
+
 
 class FileRepo:
     """Read and write repo files beneath `root`."""
@@ -30,12 +32,12 @@ class FileRepo:
             return None
 
     def write(self, relpath: str, data: bytes) -> None:
-        """Write `data` atomically: a temp file in the same directory, fsync, then replace.
+        """Write `data` atomically and durably.
 
         A plain write truncates first, so a crash or a full disk leaves a truncated
         ``manifest.enc`` whose every later open fails authentication
-        (``docs/design/04-envelope-v1.md``). Writing a sibling temp file and replacing it is
-        atomic within a filesystem.
+        (``docs/design/04-envelope-v1.md``). Writing a sibling temp file, fsyncing it, replacing
+        it, and fsyncing the directory is atomic and durable within a filesystem.
         """
         path = self._resolve(relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +47,9 @@ class FileRepo:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+                flush_to_storage(handle.fileno())
             Path(tmp_name).replace(path)
+            sync_directory(path.parent)
         except BaseException:
             # Leave no partial temp file behind, whoever aborted the write.
             Path(tmp_name).unlink(missing_ok=True)

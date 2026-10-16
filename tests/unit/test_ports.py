@@ -3,14 +3,28 @@
 
 from __future__ import annotations
 
-from syncintosh.core.ports import Cipher, Domain, FileIdSource, KeyStore, MergeDriver, RepoFiles, SecretScanner
+from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
+from syncintosh.core.ports import (
+    Cipher,
+    Domain,
+    FileIdSource,
+    GitTransport,
+    KeyStore,
+    LedgerStore,
+    LiveFiles,
+    MergeDriver,
+    PendingStore,
+    RepoFiles,
+    SecretScanner,
+    SyncLock,
+)
 
 
 def test_merge_driver_port_is_structural() -> None:
     # given
     class FakeDriver:
-        def merge(self, base: str, local: str, remote: str) -> str:
-            return local
+        def merge(self, base: str, local: str, remote: str) -> TextMerge:
+            return TextMerge(text=local, conflicted=False)
 
     # when
     matches = isinstance(FakeDriver(), MergeDriver)
@@ -140,6 +154,143 @@ def test_secret_scanner_port_is_structural() -> None:
 
     # when
     matches = isinstance(FakeScanner(), SecretScanner)
+
+    # then
+    assert matches is True
+
+
+def test_git_transport_port_is_structural() -> None:
+    # given
+    class FakeTransport:
+        def init(self) -> None: ...
+        def clone(self, remote: str) -> None: ...
+        def fetch(self, remote: str, branch: str) -> None: ...
+        def head(self) -> str | None:
+            return None
+
+        def resolve(self, rev: str) -> str | None:
+            return None
+
+        def merge_bases(self, left: str, right: str) -> tuple[str, ...]:
+            return ()
+
+        def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+            return False
+
+        def read_blob(self, commit: str, relpath: str) -> bytes | None:
+            return None
+
+        def commit(self, parents: tuple[str, ...], message: str) -> str:
+            return "0" * 40
+
+        def update_ref(self, branch: str, commit: str) -> None: ...
+
+        def push(self, remote: str, branch: str, commit: str) -> str:
+            return "ok"
+
+    # when
+    matches = isinstance(FakeTransport(), GitTransport)
+
+    # then
+    assert matches is True
+
+
+def test_a_transport_without_push_does_not_conform() -> None:
+    # given
+    class NoPush:
+        def init(self) -> None: ...
+        def clone(self, remote: str) -> None: ...
+        def fetch(self, remote: str, branch: str) -> None: ...
+        def head(self) -> str | None:
+            return None
+
+        def resolve(self, rev: str) -> str | None:
+            return None
+
+        def merge_bases(self, left: str, right: str) -> tuple[str, ...]:
+            return ()
+
+        def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+            return False
+
+        def read_blob(self, commit: str, relpath: str) -> bytes | None:
+            return None
+
+        def commit(self, parents: tuple[str, ...], message: str) -> str:
+            return "0" * 40
+
+        def update_ref(self, branch: str, commit: str) -> None: ...
+
+    # when
+    matches = isinstance(NoPush(), GitTransport)
+
+    # then
+    assert matches is False
+
+
+def test_sync_lock_port_is_structural() -> None:
+    # given
+    class FakeLock:
+        def acquire(self) -> None: ...
+        def release(self) -> None: ...
+
+    # when
+    matches = isinstance(FakeLock(), SyncLock)
+
+    # then
+    assert matches is True
+
+
+def test_ledger_store_port_is_structural() -> None:
+    # given
+    class FakeLedger:
+        def load(self) -> dict[str, LedgerEntry]:
+            return {}
+
+        def save(self, entries) -> None: ...
+
+    # when
+    matches = isinstance(FakeLedger(), LedgerStore)
+
+    # then
+    assert matches is True
+
+
+def test_pending_store_port_is_structural() -> None:
+    # given
+    class FakePending:
+        def is_pending(self) -> bool:
+            return False
+
+        def record(self, state: PendingState) -> None: ...
+
+        def clear(self) -> None: ...
+
+    # when
+    matches = isinstance(FakePending(), PendingStore)
+
+    # then
+    assert matches is True
+
+
+def test_live_files_port_is_structural() -> None:
+    # given
+    class FakeLive:
+        def read(self, path: str) -> bytes | None:
+            return None
+
+        def write(self, path: str, data: bytes) -> None: ...
+
+        def exists(self, path: str) -> bool:
+            return False
+
+        def is_symlink(self, path: str) -> bool:
+            return False
+
+        def remove(self, path: str) -> None: ...
+
+    # when
+    matches = isinstance(FakeLive(), LiveFiles)
 
     # then
     assert matches is True

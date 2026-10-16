@@ -15,7 +15,14 @@ import pytest
 from syncintosh.core.errors import ContentDigestMismatch, SecretScanError
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.repo import GITATTRIBUTES_CONTENT, GITATTRIBUTES_PATH, MANIFEST_PATH, object_path
+from syncintosh.core.repo import (
+    GITATTRIBUTES_CONTENT,
+    GITATTRIBUTES_PATH,
+    GITIGNORE_CONTENT,
+    GITIGNORE_PATH,
+    MANIFEST_PATH,
+    object_path,
+)
 from syncintosh.services.repo_writer import write_repo
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
@@ -96,6 +103,7 @@ def test_write_repo_seals_the_object_and_the_manifest() -> None:
     assert sealed is not None
     assert loads_manifest(cipher.open(sealed, domain="manifest", file_id="")) == new
     assert files.read(GITATTRIBUTES_PATH) == GITATTRIBUTES_CONTENT.encode("utf-8")
+    assert files.read(GITIGNORE_PATH) == GITIGNORE_CONTENT.encode("utf-8")
     assert scanner.scanned == [".zshrc", "manifest"]
 
 
@@ -187,4 +195,18 @@ def test_an_orphan_object_is_swept() -> None:
 
     # then
     assert files.read(object_path(ID2)) is None
+    assert files.read(object_path(ID1)) == SEAL_PREFIX + CONTENT
+
+
+def test_a_non_slot_leftover_under_objects_is_swept() -> None:
+    # given — an atomic-write temp sibling a crash left behind
+    files, cipher, scanner = InMemoryRepoFiles(), FakeCipher(), RecordingScanner()
+    files.write(f"objects/.{ID1}.enc.3f2a.tmp", b"junk")
+    new = _manifest({ID1: _rec()})
+
+    # when
+    _write(files, cipher, scanner, head=None, new=new, contents={ID1: CONTENT})
+
+    # then
+    assert files.read(f"objects/.{ID1}.enc.3f2a.tmp") is None
     assert files.read(object_path(ID1)) == SEAL_PREFIX + CONTENT

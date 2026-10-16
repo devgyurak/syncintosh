@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Dangerous paths refused before collection.
+
+These are refused **before anything is read**, in code, not by asking the user
+(``AGENTS.md`` §3.4): a private key or a cloud credential must never enter a repo, however the
+user configured their presets.
+
+The judgement is by **real path**. A symlink is the obvious bypass — a preset naming
+``~/notes/link`` whose target is ``~/.ssh`` would look innocent at the path level — so both the
+resolved target *and* the unresolved path under `$HOME` are checked. Resolving only the target
+would miss a denied directory that is itself a symlink out of the tree; checking only the
+unresolved path would miss a link pointing in.
+
+The comparison is **folded** (NFC + casefold), the same way path identity is folded everywhere
+else (``core.paths``). macOS's default APFS is case-insensitive, so ``~/.SSH/id_ed25519`` names
+the very same file as ``~/.ssh/id_ed25519`` — and `os.path.realpath` does not normalize the case
+it is given, so a case-sensitive comparison here is a bypass, not a nicety.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from syncintosh.core.paths import collision_key
+
+# Relative to `$HOME`. A directory entry denies everything beneath it.
+DENIED_PATHS: tuple[str, ...] = (
+    ".ssh",
+    ".aws",
+    ".kube/config",
+    "Library/Cookies",
+    "Library/Caches",
+    ".cache",
+)
+
+
+def _under(candidate: str, root: str) -> bool:
+    """True when `candidate` is `root` or lies beneath it, folded for case and normalization."""
+    folded_candidate = collision_key(candidate)
+    folded_root = collision_key(root)
+    return folded_candidate == folded_root or folded_candidate.startswith(folded_root + "/")
+
+
+def is_denied(path: Path, home: Path) -> bool:
+    """True when `path` is a dangerous path that must never be collected.
+
+    `path` is the live path to read; `home` is the user's home directory. Both the real path and
+    the path as written are compared, so neither a symlink into a denied tree nor a denied tree
+    replaced by a symlink gets through.
+    """
+    real_home: Path = Path(os.path.realpath(home))
+    real_candidate = os.path.realpath(path)
+    # `abspath`, not `realpath`: this is the path as written, so a denied directory that is
+    # itself a symlink is still recognised by its name.
+    written_candidate = os.path.abspath(path)  # noqa: PTH100 — resolve() would follow the link we must detect
+    return any(
+        _under(real_candidate, os.path.realpath(real_home / denied))
+        or _under(written_candidate, str(real_home / denied))
+        for denied in DENIED_PATHS
+    )
+
+
+__all__ = ["DENIED_PATHS", "is_denied"]

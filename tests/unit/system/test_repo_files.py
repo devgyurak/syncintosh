@@ -7,6 +7,7 @@ import os
 
 import pytest
 
+import syncintosh.system.repo_files as repo_files
 from syncintosh.system.repo_files import FileRepo
 
 
@@ -73,3 +74,17 @@ def test_a_failed_write_keeps_the_previous_file_and_leaves_no_temp(tmp_path, mon
         repo.write("manifest.enc", b"new")
     assert repo.read("manifest.enc") == b"original"
     assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []
+
+
+def test_a_successful_write_flushes_to_storage_and_syncs_the_directory(tmp_path, monkeypatch) -> None:
+    # given — the two durability barriers are instrumented
+    calls: list[str] = []
+    monkeypatch.setattr(repo_files, "flush_to_storage", lambda descriptor: calls.append("storage"))
+    monkeypatch.setattr(repo_files, "sync_directory", lambda path: calls.append("dir"))
+    repo = FileRepo(tmp_path)
+
+    # when
+    repo.write("objects/a.enc", b"data")
+
+    # then
+    assert calls == ["storage", "dir"]

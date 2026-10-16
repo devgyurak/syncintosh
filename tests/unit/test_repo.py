@@ -6,7 +6,15 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
-from syncintosh.core.repo import GITATTRIBUTES_CONTENT, MANIFEST_PATH, object_file_id, object_path, plan_writes
+from syncintosh.core.repo import (
+    GITATTRIBUTES_CONTENT,
+    GITIGNORE_CONTENT,
+    GITIGNORE_PATH,
+    MANIFEST_PATH,
+    object_file_id,
+    object_path,
+    plan_writes,
+)
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -39,6 +47,8 @@ def test_object_path_is_a_fixed_width_slot() -> None:
         (f"objects/sub/{ID1}.enc", None),
         ("manifest.enc", None),
         (f"objects/{ID1}.enc.bak", None),
+        # An atomic-write leftover is not a slot; the sweep must recognise it as junk.
+        (f"objects/.{ID1}.enc.3f2a.tmp", None),
     ],
 )
 def test_object_file_id_recognises_only_a_slot(relpath, expected) -> None:
@@ -54,6 +64,12 @@ def test_manifest_path_and_gitattributes_content_are_fixed() -> None:
     assert MANIFEST_PATH == "manifest.enc"
     assert GITATTRIBUTES_CONTENT.startswith("objects/*.enc         binary -diff -merge\n")
     assert GITATTRIBUTES_CONTENT.endswith("keys/commitments.json binary -diff -merge\n")
+
+
+def test_gitignore_path_and_temp_patterns_are_fixed() -> None:
+    # when & then — the atomic-write temp siblings are never tracked
+    assert GITIGNORE_PATH == ".gitignore"
+    assert "*.tmp" in GITIGNORE_CONTENT
 
 
 def test_an_empty_repo_writes_every_object_and_the_manifest() -> None:

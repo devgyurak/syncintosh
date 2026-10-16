@@ -18,7 +18,13 @@ import pytest
 
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.repo import GITATTRIBUTES_CONTENT, GITATTRIBUTES_PATH, MANIFEST_PATH, object_path
+from syncintosh.core.repo import (
+    GITATTRIBUTES_CONTENT,
+    GITATTRIBUTES_PATH,
+    GITIGNORE_PATH,
+    MANIFEST_PATH,
+    object_path,
+)
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.system.repo_files import FileRepo
@@ -126,7 +132,9 @@ def test_no_filename_contains_a_path_segment(tmp_path, memory_key_store) -> None
 
     # then — every file is an allowlisted slot, and no manifest path segment leaks into a name
     disallowed = [
-        name for name in names if not (ALLOWED.fullmatch(name) or name in (MANIFEST_PATH, GITATTRIBUTES_PATH))
+        name
+        for name in names
+        if not (ALLOWED.fullmatch(name) or name in (MANIFEST_PATH, GITATTRIBUTES_PATH, GITIGNORE_PATH))
     ]
     assert disallowed == []
     segments = {
