@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import os
+import stat
 
 import pytest
 
+import syncintosh.system.live_files as live_files
 from syncintosh.system.live_files import SystemLiveFiles
 
 
@@ -72,3 +74,44 @@ def test_a_failed_write_keeps_the_previous_file_and_leaves_no_temp(tmp_path, mon
         live.write(str(target), b"new")
     assert live.read(str(target)) == b"original"
     assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []
+
+
+def test_overwriting_preserves_the_file_mode(tmp_path) -> None:
+    # given — an executable file, as an applied shell script would be
+    live = SystemLiveFiles()
+    target = tmp_path / "script.sh"
+    live.write(str(target), b"#!/bin/sh\n")
+    target.chmod(0o755)
+
+    # when
+    live.write(str(target), b"#!/bin/sh\necho hi\n")
+
+    # then — the write must not silently drop the executable bit
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+def test_a_new_file_gets_the_umask_default(tmp_path) -> None:
+    # given — `mkstemp` creates 0600, which would leave a new settings file owner-only
+    live = SystemLiveFiles()
+    current = os.umask(0o022)
+    os.umask(current)
+    target = tmp_path / "new.json"
+
+    # when
+    live.write(str(target), b"{}")
+
+    # then
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666 & ~current
+
+
+def test_a_write_flushes_to_storage_and_syncs_the_directory(tmp_path, monkeypatch) -> None:
+    # given
+    calls: list[str] = []
+    monkeypatch.setattr(live_files, "flush_to_storage", lambda descriptor: calls.append("storage"))
+    monkeypatch.setattr(live_files, "sync_directory", lambda path: calls.append("dir"))
+
+    # when
+    SystemLiveFiles().write(str(tmp_path / "x"), b"data")
+
+    # then
+    assert calls == ["storage", "dir"]
