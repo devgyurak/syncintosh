@@ -8,9 +8,40 @@ Paths are repo-relative and are only ever built by ``core.repo`` (``objects/<id>
 
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
 from pathlib import Path
+
+
+def _flush_to_storage(descriptor: int) -> None:
+    """Push the file's data to the physical device where the platform can.
+
+    On macOS `fsync` only asks for the data to be queued; `F_FULLFSYNC` is the barrier that
+    survives a power loss. It is best-effort — some filesystems reject it — so a refusal falls
+    back to the plain `fsync` already issued rather than failing the write.
+    """
+    full_sync = getattr(fcntl, "F_FULLFSYNC", None)
+    if full_sync is None:
+        return
+    try:
+        fcntl.fcntl(descriptor, full_sync)
+    except OSError:
+        return
+
+
+def _sync_directory(path: Path) -> None:
+    """fsync a directory so a rename into it is durable.
+
+    `os.fsync` on the file makes the *data* durable, but the directory entry created by
+    `replace` is a separate metadata change; without this a crash right after the write can
+    still lose the whole file.
+    """
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class FileRepo:
@@ -30,12 +61,12 @@ class FileRepo:
             return None
 
     def write(self, relpath: str, data: bytes) -> None:
-        """Write `data` atomically: a temp file in the same directory, fsync, then replace.
+        """Write `data` atomically and durably.
 
         A plain write truncates first, so a crash or a full disk leaves a truncated
         ``manifest.enc`` whose every later open fails authentication
-        (``docs/design/04-envelope-v1.md``). Writing a sibling temp file and replacing it is
-        atomic within a filesystem.
+        (``docs/design/04-envelope-v1.md``). Writing a sibling temp file, fsyncing it, replacing
+        it, and fsyncing the directory is atomic and durable within a filesystem.
         """
         path = self._resolve(relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +76,9 @@ class FileRepo:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+                _flush_to_storage(handle.fileno())
             Path(tmp_name).replace(path)
+            _sync_directory(path.parent)
         except BaseException:
             # Leave no partial temp file behind, whoever aborted the write.
             Path(tmp_name).unlink(missing_ok=True)

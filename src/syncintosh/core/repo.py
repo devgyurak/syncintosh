@@ -21,6 +21,7 @@ from syncintosh.core.manifest_codec import dumps_manifest
 MANIFEST_PATH = "manifest.enc"
 OBJECTS_DIR = "objects"
 GITATTRIBUTES_PATH = ".gitattributes"
+GITIGNORE_PATH = ".gitignore"
 
 # A stored object's slot: `objects/<32 lowercase hex>.enc`. Full match, so a nested or unrelated
 # path never parses as an object. The ID width comes from `core.ids`, its single owner.
@@ -34,6 +35,15 @@ objects/*.enc         binary -diff -merge
 manifest.enc          binary -diff -merge
 keys/*.wrap           binary -diff -merge
 keys/commitments.json binary -diff -merge
+"""
+
+# The atomic write leaves `.<name>.<random>.tmp` siblings inside the repo. They are never a
+# tracked slot, and ignoring them keeps a crash-leftover out of a hand-run `git add` — the sweep
+# in `services/repo_writer` removes them on the next cycle (docs/design/01-sync-model.md).
+GITIGNORE_CONTENT = """\
+# Leftover atomic-write temp files. Repository hygiene, not configuration.
+*.tmp
+.*.tmp
 """
 
 

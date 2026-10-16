@@ -20,6 +20,8 @@ from syncintosh.core.ports import Cipher, RepoFiles, SecretScanner
 from syncintosh.core.repo import (
     GITATTRIBUTES_CONTENT,
     GITATTRIBUTES_PATH,
+    GITIGNORE_CONTENT,
+    GITIGNORE_PATH,
     MANIFEST_PATH,
     OBJECTS_DIR,
     object_file_id,
@@ -61,23 +63,32 @@ def _verify_digests(new: Manifest, file_ids: tuple[str, ...], contents: Mapping[
 
 
 def _remove_orphan_objects(files: RepoFiles, new: Manifest) -> None:
-    """Delete any stored object with no record in `new`.
+    """Delete every stored file under `objects/` that is not a tracked object slot.
 
-    A partial failure can leave an object whose record never landed (or was already removed); a
-    record without its object, or an object without a record, is a corrupt repo
-    (``docs/design/03-manifest.md``). The sweep is idempotent, so the next sync repairs it.
+    Two cases: an object whose record never landed (or was already removed), and a leftover that
+    is not a slot at all — an atomic-write `.tmp` sibling after a crash. A record without its
+    object, or an object without a record, is a corrupt repo (``docs/design/03-manifest.md``).
+    The sweep is idempotent, so the next sync repairs either.
     """
     for relpath in files.list_paths(OBJECTS_DIR):
         file_id = object_file_id(relpath)
-        if file_id is not None and file_id not in new.records:
+        if file_id is None or file_id not in new.records:
             files.delete(relpath)
 
 
-def _ensure_gitattributes(files: RepoFiles) -> None:
-    """Mark the stored ciphertext binary so a hand-run `git merge` cannot mangle it."""
-    desired = GITATTRIBUTES_CONTENT.encode("utf-8")
-    if files.read(GITATTRIBUTES_PATH) != desired:
-        files.write(GITATTRIBUTES_PATH, desired)
+def _ensure_repo_metadata(files: RepoFiles) -> None:
+    """Keep the repo's own bookkeeping files current.
+
+    `.gitattributes` marks the stored ciphertext binary so a hand-run `git merge` cannot mangle
+    it; `.gitignore` keeps an atomic-write `.tmp` leftover out of a hand-run `git add`.
+    """
+    for relpath, content in (
+        (GITATTRIBUTES_PATH, GITATTRIBUTES_CONTENT),
+        (GITIGNORE_PATH, GITIGNORE_CONTENT),
+    ):
+        desired = content.encode("utf-8")
+        if files.read(relpath) != desired:
+            files.write(relpath, desired)
 
 
 def write_repo(
@@ -120,4 +131,4 @@ def write_repo(
     for file_id in plan.objects_to_delete:
         files.delete(object_path(file_id))
     _remove_orphan_objects(files, new)
-    _ensure_gitattributes(files)
+    _ensure_repo_metadata(files)
