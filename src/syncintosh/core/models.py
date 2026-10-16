@@ -85,11 +85,30 @@ class LedgerEntry:
 
 @dataclass(frozen=True)
 class PendingConflict:
-    """One unresolved record in a stopped sync, described for the user."""
+    """One unresolved record in a stopped sync, with the sides a resolver will need.
+
+    `base`/`local`/`remote` are the plaintexts of the unresolved record; they live here, outside
+    the repo, and nowhere else on disk (``AGENTS.md`` §3.3). `detail` is the human-facing reason.
+    """
 
     file_id: str
     path: str
     detail: str
+    base: bytes | None = None
+    local: bytes | None = None
+    remote: bytes | None = None
+
+    def __repr__(self) -> str:
+        # The sides are plaintext settings; keep them out of a log or a traceback.
+        return (
+            f"PendingConflict(file_id={self.file_id!r}, path={self.path!r}, detail={self.detail!r}, "
+            f"base=<{_length(self.base)} bytes>, local=<{_length(self.local)} bytes>, "
+            f"remote=<{_length(self.remote)} bytes>)"
+        )
+
+
+def _length(blob: bytes | None) -> int:
+    return 0 if blob is None else len(blob)
 
 
 @dataclass(frozen=True)
@@ -104,6 +123,31 @@ class PendingState:
     remote_commit: str
     base_commit: str | None
     conflicts: tuple[PendingConflict, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        local_commit: str,
+        remote_commit: str,
+        base_commit: str | None,
+        conflicts: tuple[PendingConflict, ...],
+    ) -> PendingState:
+        """Validate the two commits a divergence always has, and freeze the conflicts.
+
+        A stopped sync is always a divergence, so both the collect commit and the remote commit
+        exist; an empty string would be indistinguishable from a real id.
+        """
+        if not local_commit or not remote_commit:
+            raise ValueError("a pending divergence must name both its local and remote commit")
+        if not conflicts:
+            raise ValueError("a pending state must hold at least one conflict")
+        return cls(
+            local_commit=local_commit,
+            remote_commit=remote_commit,
+            base_commit=base_commit,
+            conflicts=conflicts,
+        )
 
     @property
     def has_conflicts(self) -> bool:
