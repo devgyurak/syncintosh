@@ -1,0 +1,215 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Integration: the git CLI transport over a real git binary.
+
+It exercises the exact plumbing the sync cycle needs — a two-parent `commit-tree`, a full
+(non-shallow) clone, `merge-base`, and a non-fast-forward push — against a temp bare remote, so
+the transport contracts the cycle relies on are pinned with real git rather than a fake
+(``AGENTS.md`` §5.1).
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from syncintosh.core.errors import GitError
+from syncintosh.vcs.git import GitCLITransport, remote_ref
+
+pytestmark = pytest.mark.integration
+
+GIT_IDENTITY = ("-c", "user.name=test", "-c", "user.email=test@example.com")
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *GIT_IDENTITY, *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _write(cwd: Path, relpath: str, data: bytes) -> None:
+    path = cwd / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _settle(transport: GitCLITransport, workdir: Path, relpath: str, data: bytes, parents: tuple[str, ...]) -> str:
+    """Write a file, commit it, and move `main` to the new commit."""
+    _write(workdir, relpath, data)
+    commit = transport.commit(parents, "commit")
+    transport.update_ref("main", commit)
+    return commit
+
+
+def test_a_root_commit_and_a_read_back(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    _write(workdir, "a.txt", b"hello")
+
+    # when
+    commit = transport.commit((), "root")
+    transport.update_ref("main", commit)
+
+    # then
+    assert transport.head() == commit
+    assert transport.resolve("main") == commit
+    assert transport.read_blob(commit, "a.txt") == b"hello"
+    assert transport.read_blob(commit, "missing.txt") is None
+    assert transport.resolve("does-not-exist") is None
+
+
+def test_push_clone_and_fetch_round_trip(tmp_path) -> None:
+    # given — machine one publishes a root commit to a bare remote
+    workdir = tmp_path / "work"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"hello", ())
+
+    # when
+    pushed = transport.push(str(remote), "main", first)
+    second_dir = tmp_path / "second"
+    second = GitCLITransport(second_dir)
+    second.clone(str(remote))
+
+    # then
+    assert pushed == "ok"
+    assert second.head() == first
+    assert second.read_blob(first, "a.txt") == b"hello"
+    # The no-depth rule (docs/design/01-sync-model.md): a shallow clone cannot merge-base.
+    assert _git(second_dir, "rev-parse", "--is-shallow-repository") == "false"
+
+
+def test_fetch_updates_the_tracking_ref_and_merge_base_resolves(tmp_path) -> None:
+    # given — machine two is one commit behind
+    workdir = tmp_path / "work"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"hello", ())
+    transport.push(str(remote), "main", first)
+    second_dir = tmp_path / "second"
+    second = GitCLITransport(second_dir)
+    second.clone(str(remote))
+    second_commit = _settle(transport, workdir, "b.txt", b"more", (first,))
+    transport.push(str(remote), "main", second_commit)
+
+    # when
+    second.fetch(str(remote), "main")
+
+    # then
+    assert second.resolve(remote_ref("main")) == second_commit
+    assert second.resolve("syncintosh/main") == second_commit
+    assert second.merge_bases(first, "syncintosh/main") == (first,)
+    assert second.is_ancestor(first, second_commit) is True
+    assert second.is_ancestor(second_commit, first) is False
+
+
+def test_a_divergent_push_is_reported_as_non_fast_forward(tmp_path) -> None:
+    # given — a remote advanced by one branch while a clone committed its own line
+    workdir = tmp_path / "work"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"hello", ())
+    transport.push(str(remote), "main", first)
+    second_dir = tmp_path / "second"
+    second = GitCLITransport(second_dir)
+    second.clone(str(remote))
+    advanced = _settle(transport, workdir, "b.txt", b"more", (first,))
+    transport.push(str(remote), "main", advanced)
+    divergent = _settle(second, second_dir, "c.txt", b"local", (first,))
+
+    # when
+    outcome = second.push(str(remote), "main", divergent)
+
+    # then
+    assert outcome == "non-fast-forward"
+
+
+def test_an_unrelated_history_has_no_merge_base(tmp_path) -> None:
+    # given — two root commits with no common ancestor
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    left = transport.commit((), "root left")
+    _write(workdir, "b.txt", b"changed")
+    right = transport.commit((), "root right")
+
+    # when
+    bases = transport.merge_bases(left, right)
+
+    # then
+    assert bases == ()
+    assert transport.is_ancestor(left, right) is False
+
+
+def test_a_criss_cross_history_has_two_merge_bases(tmp_path) -> None:
+    # given — M1 and M2 merge each other's parents, so both parents are merge bases
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    _write(workdir, "a.txt", b"x")
+    root = _settle(transport, workdir, "a.txt", b"x", ())
+    first = _settle(transport, workdir, "a.txt", b"left", (root,))
+    second = _settle(transport, workdir, "a.txt", b"right", (root,))
+    tree = _git(workdir, "rev-parse", f"{root}^{{tree}}")
+    merge_one = _git(workdir, "commit-tree", tree, "-p", first, "-p", second, "-m", "M1")
+    merge_two = _git(workdir, "commit-tree", tree, "-p", second, "-p", first, "-m", "M2")
+
+    # when
+    bases = transport.merge_bases(merge_one, merge_two)
+
+    # then
+    assert bases == tuple(sorted((first, second)))
+
+
+def test_a_bad_parent_raises_a_git_error(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    _write(workdir, "a.txt", b"x")
+
+    # when & then
+    with pytest.raises(GitError):
+        transport.commit(("0" * 40,), "bad parent")
+
+
+def test_a_bad_revision_raises_a_git_error(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    commit = _settle(transport, workdir, "a.txt", b"x", ())
+
+    # when & then — an unresolvable revision is a failure, not an empty answer
+    with pytest.raises(GitError):
+        transport.merge_bases("0" * 40, commit)
+    with pytest.raises(GitError):
+        transport.is_ancestor("0" * 40, commit)
+
+
+def test_a_push_to_an_unusable_remote_is_rejected(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    commit = _settle(transport, workdir, "a.txt", b"x", ())
+
+    # when — the remote path does not exist, so this is neither a fast-forward nor a race
+    outcome = transport.push(str(tmp_path / "no-such-remote.git"), "main", commit)
+
+    # then
+    assert outcome == "rejected"
