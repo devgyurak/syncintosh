@@ -113,21 +113,16 @@ def _fold_structure(
     empty — so it is dropped without a conflict. Deeper conflicts are subsumed so the user sees
     one decision, not a cascade.
     """
-    for path in [p for p, node in merged.items() if isinstance(node, EmptyObject) and _has_descendant(merged, p)]:
-        del merged[path]
-
     conflicts_by_path = list(conflicts)
     structural: list[Conflict] = []
     roots: list[KeyPath] = []
-    candidates = sorted(
-        p
-        for p in {*merged, *local_entries, *remote_entries}
-        if _is_terminal(local_entries.get(p)) or _is_terminal(remote_entries.get(p)) or _is_terminal(merged.get(p))
-    )
-    for path in candidates:
+    for path in sorted({*merged, *base_entries, *local_entries, *remote_entries}):
         if any(path[: len(root)] == root for root in roots):
             continue
-        if not _is_ignored(path, ignore) and _shape_conflict(path, base_entries, local_entries, remote_entries, ignore):
+        conflicted = not _is_ignored(path, ignore) and _shape_conflict(
+            path, base_entries, local_entries, remote_entries, ignore
+        )
+        if conflicted:
             roots.append(path)
             structural.append(
                 Conflict(
@@ -137,15 +132,18 @@ def _fold_structure(
                     remote=remote_entries.get(path, ABSENT),
                 )
             )
-        if _is_terminal(merged.get(path)):
-            if _keeps_local_subtree(path, ignore, local_entries):
-                # A local key under this path is ignored, so local's subtree must survive; the
-                # terminal that won here gives way instead of erasing the ignored key.
-                del merged[path]
-            else:
-                # A terminal won at this path: nothing may live beneath it.
-                for deeper in [p for p in merged if _strictly_under(p, path)]:
-                    del merged[deeper]
+            _resolve_structural(path, merged, local_entries)
+        elif _is_terminal(merged.get(path)) and _keeps_local_subtree(path, ignore, local_entries):
+            # A local key under this path is ignored, so local's subtree must survive; the
+            # terminal that won here gives way instead of erasing the ignored key. Every other
+            # terminal above live descendants is a conflict, already resolved above.
+            del merged[path]
+
+    # An `EmptyObject` that kept a surviving child is no longer empty. This runs after the fold:
+    # during it an `EmptyObject` can transiently sit above a descendant a structural conflict is
+    # about to remove, and dropping it then would erase a root or a parent that still stands.
+    for path in [p for p, node in merged.items() if isinstance(node, EmptyObject) and _has_descendant(merged, p)]:
+        del merged[path]
 
     subsumed = {conflict.path for conflict in structural}
     kept = [
@@ -159,6 +157,26 @@ def _fold_structure(
 def _is_terminal(node: Leaf | None) -> bool:
     """A leaf that cannot hold a key path: a scalar or an array."""
     return isinstance(node, (Scalar, Array))
+
+
+def _resolve_structural(path: KeyPath, merged: dict[KeyPath, Node], local_entries: Mapping[KeyPath, Node]) -> None:
+    """Make `merged` consistent at a structural conflict, with the local shape winning.
+
+    A local leaf at `path` replaces the subtree beneath it; a local subtree is restored whole
+    from the local side (a path the per-path pass deleted because remote dropped it must come
+    back), and a local deletion leaves nothing. The conflict was recorded either way, so this
+    only fixes the candidate value a resolver would start from (``AGENTS.md`` §5.3).
+    """
+    for deeper in [candidate for candidate in merged if _strictly_under(candidate, path)]:
+        del merged[deeper]
+    local_leaf = local_entries.get(path, ABSENT)
+    if isinstance(local_leaf, Absent):
+        merged.pop(path, None)
+        for deeper, node in local_entries.items():
+            if _strictly_under(deeper, path):
+                merged[deeper] = node
+        return
+    merged[path] = local_leaf
 
 
 def _keeps_local_subtree(path: KeyPath, ignore: IgnorePaths, local_entries: Mapping[KeyPath, Node]) -> bool:
@@ -176,12 +194,12 @@ def _shape_conflict(
     remote_entries: Mapping[KeyPath, Node],
     ignore: IgnorePaths,
 ) -> bool:
-    """True when one side collapsed `path` while the other changed the subtree beneath it.
+    """True when the two sides cannot both be represented at `path`.
 
-    Both halves are required: the collapsing side must have actually changed the path, and the
-    expanding side must have actually changed something below it. Otherwise the change is
-    one-sided and the changed side simply wins. An ignored path is not a change, so its update
-    never turns a restructure into a conflict.
+    Two incompatible restructures conflict: one side collapses a path to a leaf while the other
+    changed (or kept) a subtree beneath it, and one side deletes a path while the other collapses
+    or extends it. A one-sided change where the other side matches base simply wins, and an
+    ignored path is not a change, so its update never turns a restructure into a conflict.
     """
     if _is_terminal(local_entries.get(path)) and _has_descendant(_effective(remote_entries, ignore), path):
         return local_entries.get(path) != base_entries.get(path) and _subtree_changed(
@@ -190,6 +208,22 @@ def _shape_conflict(
     if _is_terminal(remote_entries.get(path)) and _has_descendant(_effective(local_entries, ignore), path):
         return remote_entries.get(path) != base_entries.get(path) and _subtree_changed(
             local_entries, base_entries, path, ignore
+        )
+    local_restructured = _has_descendant(local_entries, path)
+    remote_restructured = _has_descendant(remote_entries, path)
+    # "Deleted" means no leaf *and* no subtree. An `EmptyObject` is a present leaf, not a deletion.
+    local_deleted = isinstance(local_entries.get(path, ABSENT), Absent) and not local_restructured
+    remote_deleted = isinstance(remote_entries.get(path, ABSENT), Absent) and not remote_restructured
+    # A deletion against the other side's restructure of the same path is a conflict too: the
+    # per-path pass sees "no leaf on either side" and would let one edit vanish silently.
+    if _is_terminal(base_entries.get(path)):
+        return (local_deleted and remote_restructured) or (remote_deleted and local_restructured)
+    if _has_descendant(base_entries, path):
+        return (
+            (local_deleted and remote_restructured and _subtree_changed(remote_entries, base_entries, path, ignore))
+            or (remote_deleted and local_restructured and _subtree_changed(local_entries, base_entries, path, ignore))
+            or (local_deleted and _is_terminal(remote_entries.get(path)))
+            or (remote_deleted and _is_terminal(local_entries.get(path)))
         )
     return False
 

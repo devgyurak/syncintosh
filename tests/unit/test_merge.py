@@ -8,7 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.tree import tree_from_value
+from syncintosh.core.tree import Absent, Tree, tree_from_value
 
 # A recursive JSON strategy, then flatten each value into a Tree. Generating values (not paths)
 # keeps every drawn tree a document a real parser could produce.
@@ -51,13 +51,19 @@ def test_swapping_local_and_remote_keeps_the_conflicting_paths(base, local, remo
 
 
 @given(base=_trees, local=_trees, remote=_trees)
-def test_a_conflict_always_differs_between_the_two_sides(base, local, remote) -> None:
+def test_a_conflict_always_reflects_a_real_disagreement(base, local, remote) -> None:
     # when
     result = merge_tree(base, local, remote)
 
-    # then
-    identical = [conflict.path for conflict in result.conflicts if conflict.local == conflict.remote]
-    assert identical == []
+    # then — a conflict is real: the leaf at the path differs, or the subtree beneath it does
+    # (a deletion against a restructure conflicts with no leaf on either side)
+    spurious = [
+        conflict.path
+        for conflict in result.conflicts
+        if conflict.local == conflict.remote
+        and _subtree_view(local, conflict.path) == _subtree_view(remote, conflict.path)
+    ]
+    assert spurious == []
 
 
 @given(base=_trees, local=_trees, remote=_trees)
@@ -160,6 +166,34 @@ def test_an_ignored_key_survives_a_restructure_of_its_parent() -> None:
     assert result.conflicts == ()
 
 
+def test_a_local_subtree_wins_over_a_remote_scalar_on_a_structural_conflict() -> None:
+    # given — local changed a child of `a`; remote collapsed `a` to a scalar
+    base = tree_from_value({"a": {"y": 1}})
+    local = tree_from_value({"a": {"y": 2}})
+    remote = tree_from_value({"a": 7})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — the conflict is reported and the local subtree is the candidate, not the scalar
+    assert [conflict.path for conflict in result.conflicts] == [("a",)]
+    assert result.merged == local
+
+
+def test_a_local_scalar_wins_over_a_remote_subtree_on_a_structural_conflict() -> None:
+    # given — local collapsed `a` to a scalar; remote changed a child of `a`
+    base = tree_from_value({"a": {"y": 1}})
+    local = tree_from_value({"a": 7})
+    remote = tree_from_value({"a": {"y": 2}})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then
+    assert [conflict.path for conflict in result.conflicts] == [("a",)]
+    assert result.merged == local
+
+
 def test_nested_structural_conflicts_are_subsumed_into_the_shallowest() -> None:
     # given — local replaces `a` with a scalar; remote extends both `a.b` and `a.b.c`
     base = tree_from_value({"a": {"b": {"c": 1}}})
@@ -172,3 +206,112 @@ def test_nested_structural_conflicts_are_subsumed_into_the_shallowest() -> None:
     # then
     assert result.merged == tree_from_value({"a": 9})
     assert [conflict.path for conflict in result.conflicts] == [("a",)]
+
+
+def test_a_one_sided_restructure_keeps_the_terminal_without_a_conflict() -> None:
+    # given — local collapsed `a` to a scalar; remote left the subtree unchanged
+    base = tree_from_value({"a": {"y": 1}})
+    local = tree_from_value({"a": 9})
+    remote = tree_from_value({"a": {"y": 1}})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — only local changed, so the scalar wins and nothing conflicts
+    assert result.merged == local
+    assert result.conflicts == ()
+
+
+def test_a_local_added_child_survives_a_remote_collapse() -> None:
+    # given — local added `y` under `a`; remote collapsed `a` to a scalar
+    base = tree_from_value({"a": {"x": 1}})
+    local = tree_from_value({"a": {"x": 1, "y": 2}})
+    remote = tree_from_value({"a": 7})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — the conflict is reported and local's whole subtree is restored, `x` included
+    assert [conflict.path for conflict in result.conflicts] == [("a",)]
+    assert result.merged == local
+
+
+def test_a_local_deletion_beats_a_remote_expansion_as_a_conflict() -> None:
+    # given — local deleted `a` (a scalar); remote expanded it to an object
+    base = tree_from_value({"a": 1})
+    local = tree_from_value({})
+    remote = tree_from_value({"a": {"x": 1}})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — not a silent remote win: it is a conflict and the local deletion is the candidate
+    assert [conflict.path for conflict in result.conflicts] == [("a",)]
+    assert result.merged == local
+
+
+def test_a_local_deletion_beats_a_remote_collapse_as_a_conflict() -> None:
+    # given — local deleted an object `a`; remote collapsed it to a scalar
+    base = tree_from_value({"a": {"x": 1}})
+    local = tree_from_value({})
+    remote = tree_from_value({"a": 7})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then
+    assert [conflict.path for conflict in result.conflicts] == [("a",)]
+    assert result.merged == local
+
+
+def _covers(conflict_paths: list[tuple[str, ...]], path: tuple[str, ...]) -> bool:
+    return any(path[: len(conflict)] == conflict for conflict in conflict_paths)
+
+
+def _leaf_differs(base: Tree, local: Tree, remote: Tree, path: tuple[str, ...]) -> bool:
+    values = (base.value(path), local.value(path), remote.value(path))
+    return values[0] != values[1] and values[0] != values[2] and values[1] != values[2]
+
+
+def _subtree_view(tree: Tree, path: tuple[str, ...]) -> dict[tuple[str, ...], object]:
+    return {key: value for key, value in tree.entries.items() if len(key) > len(path) and key[: len(path)] == path}
+
+
+def _shape(tree: Tree, path: tuple[str, ...]) -> str:
+    node = tree.value(path)
+    if not isinstance(node, Absent):
+        return "leaf"
+    return "subtree" if any(other[: len(path)] == path and len(other) > len(path) for other in tree) else "absent"
+
+
+def _shape_changed(base: Tree, local: Tree, remote: Tree, path: tuple[str, ...]) -> bool:
+    shapes = (_shape(base, path), _shape(local, path), _shape(remote, path))
+    return shapes[0] != shapes[1] and shapes[0] != shapes[2] and shapes[1] != shapes[2]
+
+
+@given(base=_trees, local=_trees, remote=_trees)
+def test_every_triple_leaf_difference_is_covered_by_a_conflict(base, local, remote) -> None:
+    # when
+    result = merge_tree(base, local, remote)
+    paths = sorted({*base, *local, *remote})
+    conflict_paths = [conflict.path for conflict in result.conflicts]
+
+    # then — a path all three sides disagree on is a conflict there or at an ancestor
+    uncovered = [
+        path for path in paths if _leaf_differs(base, local, remote, path) and not _covers(conflict_paths, path)
+    ]
+    assert uncovered == []
+
+
+@given(base=_trees, local=_trees, remote=_trees)
+def test_a_both_sides_shape_change_is_covered_by_a_conflict(base, local, remote) -> None:
+    # when
+    result = merge_tree(base, local, remote)
+    paths = sorted({*base, *local, *remote})
+    conflict_paths = [conflict.path for conflict in result.conflicts]
+
+    # then — both sides changed a path's shape differently ⇒ a conflict there or at an ancestor
+    uncovered = [
+        path for path in paths if _shape_changed(base, local, remote, path) and not _covers(conflict_paths, path)
+    ]
+    assert uncovered == []
