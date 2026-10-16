@@ -34,6 +34,15 @@ def test_an_ordinary_path_is_allowed(tmp_path, relative: str) -> None:
     assert is_denied(home / relative, home) is False
 
 
+@pytest.mark.parametrize("variant", [".SSH/id_ed25519", "library/COOKIES/x", "Library/Caches/y", ".Kube/config"])
+def test_a_case_variant_of_a_denied_path_is_refused(tmp_path, variant: str) -> None:
+    # given — APFS is case-insensitive, so these name the very same files
+    home = tmp_path / "user"
+
+    # when & then — a case-sensitive comparison here would be a bypass
+    assert is_denied(home / variant, home) is True
+
+
 def test_a_symlink_into_a_denied_tree_is_refused(tmp_path) -> None:
     # given — `~/notes/link` resolves into `~/.ssh`, while its own path looks ordinary
     home = tmp_path / "home"
