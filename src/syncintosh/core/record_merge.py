@@ -295,9 +295,10 @@ def _resolve_collisions(
     Candidates are the merged records **plus** the records still pending a content merge or a
     conflict resolution. Leaving the latter out would let one path end up with two records once
     the task completes — exactly what the secondary key exists to stop
-    (``docs/design/02-base-and-merge.md``). A conflict contributes **both** sides, so the
-    grouping stays symmetric in local and remote and both machines converge. Identical content
-    among resolved records is deduplicated silently (smallest ID wins); anything else is a
+    (``docs/design/02-base-and-merge.md``). A conflict contributes **both** sides and never its
+    base (a conflict resolves to local or remote, so base cannot survive), which also keeps the
+    grouping symmetric in local and remote so both machines converge. Identical content among
+    resolved records is deduplicated silently (smallest ID wins); anything else is a
     `PathCollision`. Machine-scope records on different machines carry different keys.
     """
     groups: dict[tuple[Scope, str | None, str], list[tuple[str, ManifestRecord | None, bool]]] = {}
@@ -306,7 +307,7 @@ def _resolve_collisions(
     for task in content_merges:
         groups.setdefault((task.scope, task.machine, task.path), []).append((task.file_id, None, False))
     for conflict in conflicts:
-        for record in (conflict.local, conflict.remote, conflict.base):
+        for record in (conflict.local, conflict.remote):
             if record is not None:
                 groups.setdefault(_secondary_key(record), []).append((record.file_id, record, False))
 

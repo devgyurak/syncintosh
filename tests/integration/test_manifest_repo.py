@@ -186,3 +186,18 @@ def test_removing_a_record_removes_its_object(tmp_path, memory_key_store) -> Non
     assert files.read(object_path(ID_B)) is None
     sealed = _sealed(files, MANIFEST_PATH)
     assert loads_manifest(cipher.open(sealed, domain="manifest", file_id="")) == remaining
+
+
+def test_a_stale_orphan_object_is_removed(tmp_path, memory_key_store) -> None:
+    # given — an object with no record in the manifest, as a partial failure leaves behind
+    orphan_id = "f" * 32
+    _, files, cipher, scanner = _scene(tmp_path, memory_key_store)
+    files.write(object_path(orphan_id), b"stale ciphertext")
+    manifest = _manifest()
+
+    # when
+    write_repo(files=files, cipher=cipher, scanner=scanner, head=None, new=manifest, contents=CONTENTS)
+
+    # then — the orphan is gone and the tracked object still decrypts
+    assert files.read(object_path(orphan_id)) is None
+    assert cipher.open(_sealed(files, object_path(ID_A)), domain="object", file_id=ID_A) == CONTENTS[ID_A]

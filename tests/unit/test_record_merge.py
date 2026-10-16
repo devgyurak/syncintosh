@@ -259,6 +259,21 @@ def test_a_conflict_still_collides_by_path() -> None:
     assert result.collisions[0].file_ids == (ID2, ID1)
 
 
+def test_a_conflict_base_path_is_not_a_collision_candidate() -> None:
+    # given — ID1's path changes on both sides, and ID2 newly tracks the old base path; the base
+    # record cannot survive a conflict, so it must not manufacture a collision at ".zshrc"
+    base = {ID1: _rec(path=".zshrc")}
+    local = {ID1: _rec(path=".zshenv"), ID2: _rec(file_id=ID2, sha=SHA2, path=".zshrc")}
+    remote = {ID1: _rec(path=".zprofile")}
+
+    # when
+    result = merge_records(base, local, remote)
+
+    # then
+    assert [conflict.kind for conflict in result.conflicts] == ["modify/modify"]
+    assert result.collisions == ()
+
+
 @st.composite
 def _record_maps(draw):
     """A record map keyed by unique ids, with a unique path per id so nothing collides."""

@@ -95,6 +95,10 @@ def write_repo(
     every object the plan writes, and its digest must equal the record's. State-changing, so it
     returns `None` and raises on failure (``AGENTS.md`` §2.8): a missing plaintext, a digest
     mismatch, or a scan refusal raises before any seal or write happens.
+
+    `new` must be the **complete** manifest: the orphan sweep deletes every stored object absent
+    from it, so a manifest filtered to this machine's records would delete another machine's
+    objects.
     """
     plan = plan_writes(head, new)
     manifest_plaintext = dumps_manifest(new)
