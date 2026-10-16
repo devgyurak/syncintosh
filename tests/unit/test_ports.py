@@ -15,6 +15,7 @@ from syncintosh.core.ports import (
     MergeDriver,
     PendingStore,
     RepoFiles,
+    RingCodec,
     SecretScanner,
     SyncLock,
 )
@@ -291,6 +292,25 @@ def test_live_files_port_is_structural() -> None:
 
     # when
     matches = isinstance(FakeLive(), LiveFiles)
+
+    # then
+    assert matches is True
+
+
+def test_ring_codec_port_is_structural() -> None:
+    # given
+    class FakeCodec:
+        def wrap(self, ring, passphrase: str) -> bytes:
+            return b""
+
+        def unwrap(self, blob: bytes, passphrase: str):
+            return ()
+
+        def commitment(self, key: bytes) -> str:
+            return "0" * 64
+
+    # when
+    matches = isinstance(FakeCodec(), RingCodec)
 
     # then
     assert matches is True

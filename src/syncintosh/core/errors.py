@@ -50,6 +50,30 @@ class KeyStoreCorrupt(CryptoError):
     """
 
 
+class KeyGenerationMismatch(CryptoError):
+    """A generation id names a different key here than the one the repo published.
+
+    The message states only what was **observed** — "the published commitment for generation N
+    is not this machine's key for N" — never that two machines created different keys:
+    `keys/commitments.json` is unauthenticated cleartext, so anyone who can write the remote can
+    raise this by editing it. The action is the same either way: stop and look, do not merge
+    (``docs/design/05-key-generations.md``).
+    """
+
+    def __init__(self, key_id: int, detail: str) -> None:
+        self.key_id = key_id
+        self.detail = detail
+        super().__init__(f"generation {key_id}: {detail}")
+
+
+class CommitmentsCorrupt(DomainError):
+    """`keys/commitments.json` is not a valid commitment map.
+
+    Distinct from `KeyGenerationMismatch`: the file cannot be read at all (bad JSON, a bad id,
+    a bad digest), which is a corrupt repo rather than a key disagreement.
+    """
+
+
 class ManifestError(DomainError):
     """Base class for every manifest failure."""
 
@@ -134,4 +158,13 @@ class PendingConflict(DomainError):
 
     Only `resolve` (and `rollback`) may run until it is cleared
     (``docs/design/01-sync-model.md``).
+    """
+
+
+class InitRefused(DomainError):
+    """`init` would clobber a key or a recovery export that already exists.
+
+    Refused before anything is written, so a re-run can never leave the only recovery export
+    holding a key the keyring does not (``AGENTS.md`` §6 — the master key is unrecoverable if
+    lost).
     """
