@@ -18,6 +18,7 @@ from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
+    CommitmentsCorrupt,
     ContentDigestMismatch,
     GitError,
     KeyGenerationMismatch,
@@ -503,6 +504,20 @@ def test_a_published_commitment_mismatch_stops_the_sync(tmp_path, memory_key_sto
 
     # when & then
     with pytest.raises(KeyGenerationMismatch):
+        _run(b)
+
+
+def test_a_repo_that_publishes_no_commitments_is_refused(tmp_path, memory_key_store) -> None:
+    # given — the remote drops keys/commitments.json, disabling the check
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    FileRepo(a.repo).delete(COMMITMENTS_PATH)
+    transport = GitCLITransport(a.repo)
+    commit = transport.commit((transport.head() or "",), "drop the commitments")
+    transport.update_ref(BRANCH, commit)
+    transport.push(remote, BRANCH, commit)
+
+    # when & then
+    with pytest.raises(CommitmentsCorrupt):
         _run(b)
 
 

@@ -331,8 +331,12 @@ def _verify_commitments(transport: GitTransport, codec: RingCodec, store: KeySto
     published = loads_commitments(blob)
     for key_id in store.generations():
         expected = published.get(key_id)
+        if expected is None:
+            # A commitment exists for every generation; a held generation the repo does not
+            # commit to is the same disable-the-check lever as deleting the file, one level finer.
+            raise CommitmentsCorrupt(f"the repo publishes no commitment for generation {key_id}")
         key = store.get(key_id)
-        if expected is not None and key is not None and codec.commitment(key) != expected:
+        if key is not None and codec.commitment(key) != expected:
             raise KeyGenerationMismatch(key_id, "the published commitment is not this machine's key for it")
 
 
@@ -380,6 +384,10 @@ def _merge_diverged(
         base_bytes = _verified_object(transport, cipher, base_commit, task.file_id, task.base_sha256)
         local_bytes = _verified_object(transport, cipher, local, task.file_id, task.local_sha256)
         remote_bytes = _verified_object(transport, cipher, remote, task.file_id, task.remote_sha256)
+        if base_bytes is None:
+            # A content-merge task always has a base record, so a missing base object is a
+            # corrupt repo — not `base = ∅`, which would merge as if the file were new.
+            raise ContentDigestMismatch(task.file_id, task.base_sha256, "the base object is missing")
         if local_bytes is None or remote_bytes is None:
             conflicts = (*conflicts, PendingConflictRecord(task.file_id, task.path, "a side's object is missing"))
             continue
@@ -632,11 +640,22 @@ def _settle_ledger(
     target_commit: str,
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
+    deny: DenyList,
+    config: SyncConfig,
     home: str,
 ) -> dict[str, LedgerEntry]:
-    """Rewrite the ledger so the next cycle sees in-agreement files as a normal baseline."""
+    """Rewrite the ledger so the next cycle sees in-agreement files as a normal baseline.
+
+    Gated exactly like apply: this reads live paths, so a record that is denied, that escapes
+    `$HOME`, that is not in the local allowlist, or that belongs to another machine is never
+    opened — the deny-list refuses before anything is read (``AGENTS.md`` §3.4).
+    """
     settled: dict[str, LedgerEntry] = {}
     for file_id, record in target_manifest.records.items():
+        if record.scope == "machine" and record.machine != config.machine_id:
+            continue
+        if deny.is_denied(home, record.path) or deny.escapes(home, record.path) or not allows(config, record):
+            continue
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):
             old = ledger.get(file_id)
@@ -817,6 +836,8 @@ def _cycle(
             target_commit=target_commit,
             ledger=ledger,
             live=live,
+            deny=deny,
+            config=config,
             home=home,
         )
     )
