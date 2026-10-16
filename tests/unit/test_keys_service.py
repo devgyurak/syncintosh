@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.errors import CommitmentsCorrupt, KeyGenerationMismatch, MasterKeyUnwrapError
+from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
@@ -190,6 +190,53 @@ def test_init_aborts_when_the_export_holds_a_different_ring(memory_key_store) ->
             passphrase=PASSPHRASE,
         )
     assert files.files == {}
+
+
+def test_init_refuses_a_second_run_on_the_same_store(memory_key_store) -> None:
+    # given
+    store = memory_key_store()
+    live = InMemoryLive()
+    init_new_repo(
+        store=store,
+        codec=_codec(),
+        files=InMemoryRepoFiles(),
+        live=live,
+        recovery_path=RECOVERY_PATH,
+        passphrase=PASSPHRASE,
+    )
+    first_export = live.read(RECOVERY_PATH)
+    first_key = store.get(1)
+
+    # when & then — the second run must not overwrite the good export before the store refuses
+    with pytest.raises(InitRefused):
+        init_new_repo(
+            store=store,
+            codec=_codec(),
+            files=InMemoryRepoFiles(),
+            live=live,
+            recovery_path=RECOVERY_PATH,
+            passphrase=PASSPHRASE,
+        )
+    assert store.get(1) == first_key
+    assert live.read(RECOVERY_PATH) == first_export
+
+
+def test_init_refuses_when_the_recovery_path_is_already_taken(memory_key_store) -> None:
+    # given — a free keyring, but the export path already holds a file
+    live = InMemoryLive()
+    live.write(RECOVERY_PATH, b"someone else's export")
+
+    # when & then
+    with pytest.raises(InitRefused):
+        init_new_repo(
+            store=memory_key_store(),
+            codec=_codec(),
+            files=InMemoryRepoFiles(),
+            live=live,
+            recovery_path=RECOVERY_PATH,
+            passphrase=PASSPHRASE,
+        )
+    assert live.read(RECOVERY_PATH) == b"someone else's export"
 
 
 def test_init_leaves_the_ring_untouched_when_the_export_fails(memory_key_store) -> None:

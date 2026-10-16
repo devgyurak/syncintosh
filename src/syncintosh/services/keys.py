@@ -21,7 +21,7 @@ import os
 from collections.abc import Mapping
 
 from syncintosh.core.commitments import dumps_commitments
-from syncintosh.core.errors import CommitmentsCorrupt, KeyGenerationMismatch, MasterKeyUnwrapError
+from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
 from syncintosh.core.ports import GENERATION_KEY_SIZE, KeyStore, LiveFiles, RepoFiles, Ring, RingCodec
 from syncintosh.core.repo import COMMITMENTS_PATH
 
@@ -37,10 +37,18 @@ def init_new_repo(
 ) -> None:
     """Create generation 1, force a verified recovery export, and record its commitment.
 
-    `recovery_path` is where the wrapped ring is written for the user to keep. The export is
-    read back and unwrapped before the ring is touched, so `init` never leaves a key stored
-    without a backup the user can open — and a failure is retryable.
+    `recovery_path` is where the wrapped ring is written for the user to keep. Nothing is written
+    until both a free keyring slot and a free export path are confirmed: a re-run must never
+    overwrite a good export with a key the keyring then refuses, which would leave the user with
+    a backup they cannot use and a master key that exists nowhere else. The export is read back
+    and unwrapped before the ring is stored, so `init` also never leaves a key stored without a
+    backup, and a failure is retryable.
     """
+    if store.get(1) is not None:
+        raise InitRefused("this machine already holds a key for generation 1")
+    if live.exists(recovery_path):
+        raise InitRefused(f"a recovery export already exists at {recovery_path}")
+
     generation_key = os.urandom(GENERATION_KEY_SIZE)
     ring: Ring = ((1, generation_key),)
     blob = codec.wrap(ring, passphrase)

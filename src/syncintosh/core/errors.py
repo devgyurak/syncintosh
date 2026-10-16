@@ -159,3 +159,12 @@ class PendingConflict(DomainError):
     Only `resolve` (and `rollback`) may run until it is cleared
     (``docs/design/01-sync-model.md``).
     """
+
+
+class InitRefused(DomainError):
+    """`init` would clobber a key or a recovery export that already exists.
+
+    Refused before anything is written, so a re-run can never leave the only recovery export
+    holding a key the keyring does not (``AGENTS.md`` §6 — the master key is unrecoverable if
+    lost).
+    """
