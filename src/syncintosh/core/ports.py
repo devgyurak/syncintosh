@@ -216,12 +216,13 @@ class GitTransport(Protocol):
         """Return the blob at `relpath` in `commit`, or `None` when it is absent."""
         ...
 
-    def commit(self, parents: tuple[str, ...], message: str) -> str:
-        """Stage the working tree and create a commit with `parents`; return its id.
+    def commit(self, parents: tuple[str, ...], message: str, paths: tuple[str, ...]) -> str:
+        """Stage `paths` and create a commit with `parents`; return its id.
 
         One parent is the collect commit, two are the merge commit
-        (``docs/design/01-sync-model.md`` step 5 and 12). The working tree is staged as-is, so
-        the caller has already written exactly the desired repo state.
+        (``docs/design/01-sync-model.md`` step 5 and 12). The pathspec is explicit, never
+        `add -A` of the whole tree: the working tree is the staging area, and a file that is not
+        part of the repo layout must never be swept into a commit.
         """
         ...
 

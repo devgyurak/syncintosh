@@ -52,6 +52,8 @@ CHEAP = ScryptParams(log2_n=1, r=1, p=1)
 ALLOWED = frozenset({CHEAP})
 PASSPHRASE = "a recovery passphrase"
 BRANCH = "main"
+# The test builds commits by hand, so its pathspec is the whole repo tree.
+ALL_PATHS: tuple[str, ...] = (".",)
 ZSH = ".zshrc"
 
 
@@ -499,7 +501,7 @@ def test_a_published_commitment_mismatch_stops_the_sync(tmp_path, memory_key_sto
     a, b, remote = _pair(tmp_path, memory_key_store)
     FileRepo(a.repo).write(COMMITMENTS_PATH, b'{"1":"' + b"f" * 64 + b'"}')
     transport = GitCLITransport(a.repo)
-    commit = transport.commit((transport.head() or "",), "tamper")
+    commit = transport.commit((transport.head() or "",), "tamper", ALL_PATHS)
     transport.update_ref(BRANCH, commit)
     transport.push(remote, BRANCH, commit)
 
@@ -513,7 +515,7 @@ def test_a_repo_that_publishes_no_commitments_is_refused(tmp_path, memory_key_st
     a, b, remote = _pair(tmp_path, memory_key_store)
     FileRepo(a.repo).delete(COMMITMENTS_PATH)
     transport = GitCLITransport(a.repo)
-    commit = transport.commit((transport.head() or "",), "drop the commitments")
+    commit = transport.commit((transport.head() or "",), "drop the commitments", ALL_PATHS)
     transport.update_ref(BRANCH, commit)
     transport.push(remote, BRANCH, commit)
 
@@ -680,7 +682,7 @@ def test_a_replayed_object_that_mismatches_its_record_is_refused(tmp_path, memor
     file_id = next(iter(loads_manifest(cipher.open(stored, domain="manifest", file_id="")).records))
     FileRepo(a.repo).write(object_path(file_id), cipher.seal(b"replayed\n", domain="object", file_id=file_id, key_id=1))
     transport = GitCLITransport(a.repo)
-    commit = transport.commit((transport.head() or "",), "replace the object")
+    commit = transport.commit((transport.head() or "",), "replace the object", ALL_PATHS)
     transport.update_ref(BRANCH, commit)
     transport.push(remote, BRANCH, commit)
 

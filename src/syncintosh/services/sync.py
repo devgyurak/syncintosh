@@ -37,11 +37,10 @@ from syncintosh.core.errors import (
     PendingConflict,
 )
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
-from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
+from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, PendingState
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
-from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import (
     Cipher,
     DenyList,
@@ -59,7 +58,7 @@ from syncintosh.core.ports import (
     remote_ref,
 )
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
-from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, plan_writes
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
 from syncintosh.services.repo_writer import write_repo
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
@@ -159,25 +158,13 @@ def _replace_sha(record: ManifestRecord, sha256: str) -> ManifestRecord:
     )
 
 
-def _item_key(scope: str, machine: str | None, path: str) -> tuple[str, str | None, str]:
-    """The tracked-file key, folded the same way `track` folds it (APFS case/NFD)."""
-    return (scope, machine, collision_key(path))
-
-
 def _find_item_record(records: Mapping[str, ManifestRecord], item: LocalItem) -> ManifestRecord | None:
-    wanted = _item_key(item.scope, item.machine, item.path)
+    """The record tracking `item`, matched on the same folded key `core.manifest.track` uses."""
+    wanted = tracking_key(item.scope, item.machine, item.path)
     return next(
-        (record for record in records.values() if _item_key(record.scope, record.machine, record.path) == wanted),
+        (record for record in records.values() if tracking_key(record.scope, record.machine, record.path) == wanted),
         None,
     )
-
-
-def _mint_id(records: Mapping[str, ManifestRecord], source: FileIdSource) -> str:
-    for _ in range(1000):
-        candidate = source.new_file_id()
-        if candidate not in records:
-            return candidate
-    raise GitError("the file ID source kept returning an ID already in the manifest")
 
 
 def _read_manifest(transport: GitTransport, cipher: Cipher, commit: str | None) -> Manifest | None:
@@ -231,7 +218,7 @@ def _current_generation(store: KeyStore, head: Manifest | None) -> int:
 
 
 def _commit(transport: GitTransport, branch: str, parents: tuple[str, ...], message: str) -> str:
-    commit = transport.commit(parents, message)
+    commit = transport.commit(parents, message, TRACKED_PATHS)
     transport.update_ref(branch, commit)
     return commit
 
@@ -285,7 +272,7 @@ def _collect_new(
     if live_bytes is None or live_sha is None:
         state.deferred.append(item.path)
         return
-    file_id = _mint_id(state.records, source)
+    file_id = mint_file_id(state.records, source)
     state.records[file_id] = ManifestRecord.create(
         file_id=file_id,
         path=item.path,

@@ -98,14 +98,19 @@ class GitCLITransport:
 
         A bare remote made by a plain `git init --bare` points HEAD at `master` while the first
         publisher may have pushed `main`; `git clone` then leaves HEAD unborn, so nothing
-        resolves, and every sync would commit to a branch no other machine reads.
+        resolves, and every sync would commit to a branch no other machine reads. With exactly
+        one branch the choice is unambiguous; anything else is refused rather than left unborn,
+        because an unborn HEAD silently discards the cycle's commits.
         """
         if self.head() is not None:
             return
         result = self._checked(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"])
         names = result.stdout.decode("ascii").split()
         if len(names) != 1:
-            return
+            raise GitError(
+                f"the remote's HEAD names a branch it does not have, and origin has {names}; "
+                "set the remote's default branch"
+            )
         branch = names[0].removeprefix("origin/")
         self._checked(["symbolic-ref", "HEAD", f"refs/heads/{branch}"])
         self._checked(["update-ref", f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"])
@@ -163,12 +168,28 @@ class GitCLITransport:
             return None
         return result.stdout
 
-    def commit(self, parents: tuple[str, ...], message: str) -> str:
-        """Stage the working tree as-is and create a commit with `parents`."""
-        self._checked(["add", "-A"])
+    def commit(self, parents: tuple[str, ...], message: str, paths: tuple[str, ...]) -> str:
+        """Stage `paths` (additions, changes, and deletions) and create a commit with `parents`.
+
+        The pathspec is explicit, not `add -A .`: `read-tree --reset` cannot remove an untracked
+        file, so a stray one would otherwise be committed. A path is included when the working
+        tree has it **or** the index does — a file deleted inside the pathspec must still be
+        staged as a deletion — and `git add` rejects a pathspec that matches nothing, so a
+        directory that does not exist yet is skipped.
+        """
+        stageable = [path for path in paths if self._stageable(path)]
+        if stageable:
+            self._checked(["add", "-A", "--", *stageable])
         tree = self._checked(["write-tree"]).stdout.decode("ascii").strip()
         parent_args = [token for parent in parents for token in ("-p", parent)]
         return self._checked(["commit-tree", tree, *parent_args, "-m", message]).stdout.decode("ascii").strip()
+
+    def _stageable(self, path: str) -> bool:
+        """True when `path` exists in the working tree or is known to the index."""
+        if (self._workdir / path).exists():
+            return True
+        result = self._run(["ls-files", "--", path], cwd=self._workdir)
+        return result.returncode == 0 and bool(result.stdout.strip())
 
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
