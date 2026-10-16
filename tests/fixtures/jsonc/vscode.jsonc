@@ -1,0 +1,14 @@
+{
+  // Editor settings for this machine.
+  "editor.fontSize": 13,
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+  },
+  "editor.tabSize": 4,
+  "[python]": {
+    // The Python formatter is not a built-in.
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "charliermarsh.ruff",
+  }
+}

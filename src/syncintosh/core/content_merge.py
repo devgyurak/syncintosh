@@ -24,6 +24,7 @@ from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import ContentMerge
 from syncintosh.core.ports import ContentAdapter, MergeDriver
+from syncintosh.core.tree import KeyPath
 
 
 def _decode_all(base: bytes, local: bytes, remote: bytes) -> tuple[str, str, str] | None:
@@ -59,9 +60,9 @@ def merge_content(
         return ContentMerge(data=local, conflicted=True)
     base_text, local_text, remote_text = decoded
     if adapter is not None:
-        merged_text = _merge_via_adapter(adapter, base_text, local_text, remote_text)
+        merged_text, conflict_paths = _merge_via_adapter(adapter, base_text, local_text, remote_text)
         if merged_text is None:
-            return ContentMerge(data=local, conflicted=True)
+            return ContentMerge(data=local, conflicted=True, conflict_paths=conflict_paths)
         return ContentMerge(data=merged_text.encode("utf-8"), conflicted=False)
     result = driver.merge(base_text, local_text, remote_text)
     return ContentMerge(data=result.text.encode("utf-8"), conflicted=result.conflicted)
@@ -72,26 +73,27 @@ def _merge_via_adapter(
     base_text: str,
     local_text: str,
     remote_text: str,
-) -> str | None:
-    """The adapter merge, or `None` when it cannot be trusted (a conflict).
+) -> tuple[str | None, tuple[KeyPath, ...]]:
+    """The adapter merge as ``(text, ())``, or ``(None, conflict paths)`` when it cannot be trusted.
 
-    `None` covers three failures the caller treats identically: a side that does not parse, a
-    merged tree the engine leaves conflicted, and a render that does not re-parse to the tree
-    that was merged.
+    ``None`` the text covers three failures the caller treats identically: a side that does not
+    parse, a merged tree the engine leaves conflicted (the tree's key paths are returned so the
+    pending report can name them), and a render that does not re-parse to the tree that was
+    merged.
     """
     try:
         base_tree = adapter.parse(base_text)
         local_tree = adapter.parse(local_text)
         remote_tree = adapter.parse(remote_text)
     except ContentParseError:
-        return None
+        return None, ()
     result = merge_tree(base_tree, local_tree, remote_tree)
     if result.has_conflicts:
-        return None
+        return None, tuple(conflict.path for conflict in result.conflicts)
     try:
         rendered = adapter.render(result.merged, local_text)
         if adapter.parse(rendered) != result.merged:
-            return None
+            return None, ()
     except ContentParseError:
-        return None
-    return rendered
+        return None, ()
+    return rendered, ()

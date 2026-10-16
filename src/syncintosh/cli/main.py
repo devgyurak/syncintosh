@@ -10,10 +10,8 @@ functions, so importing this module keeps CLI startup fast (``AGENTS.md`` §4).
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-from typing import Any
 
 import typer
 
@@ -44,14 +42,6 @@ def _root() -> None:
     """
 
 
-def _load(path: Path) -> Any:
-    """Read a JSON value from ``path``; a bad file is a usage error, not a crash."""
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise typer.BadParameter(f"cannot read JSON from {path}: {exc}") from exc
-
-
 def _passphrase() -> str:
     """The recovery passphrase, from the environment or an interactive prompt."""
     from_env = os.environ.get(PASSPHRASE_ENV)
@@ -74,19 +64,24 @@ def _fail(exc: DomainError) -> None:
 
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
-    """Key-level three-way merge of three JSON files. Exits 1 when conflicts remain.
+    """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
 
-    This is the PR-A bridge: `json.loads` is turned into a tree here and the merged tree back
-    into JSON. The jsonc adapter replaces the `json.loads` half of this (and preserves
-    comments) in the next change.
+    The merged tree is rendered against the local file, so comments, a trailing comma, and the
+    key order survive and only a changed value's span is rewritten. The adapter stays a lazy
+    import so CLI startup does not pay for JSONC parsing (``AGENTS.md`` §4).
     """
-    from syncintosh.core.tree import tree_from_value
-    from syncintosh.services import merge_documents
+    from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.core.errors import ContentParseError
+    from syncintosh.services import merge_text
 
-    result = merge_documents(
-        tree_from_value(_load(base)), tree_from_value(_load(local)), tree_from_value(_load(remote))
-    )
-    typer.echo(json.dumps(result.merged.to_value(), indent=2, ensure_ascii=False, sort_keys=True))
+    try:
+        base_text = base.read_text(encoding="utf-8")
+        local_text = local.read_text(encoding="utf-8")
+        remote_text = remote.read_text(encoding="utf-8")
+        result = merge_text(base_text, local_text, remote_text, JsoncAdapter())
+    except (OSError, UnicodeDecodeError, ContentParseError) as exc:
+        raise typer.BadParameter(f"cannot read JSONC from {base} / {local} / {remote}: {exc}") from exc
+    typer.echo(result.text, nl=False)
     if result.has_conflicts:
         for conflict in result.conflicts:
             typer.echo(f"conflict: {'.'.join(conflict.path)}", err=True)
@@ -159,7 +154,8 @@ def init(
 @app.command()
 def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote, for a first-sight file")) -> None:
     """Collect, merge, publish, and apply. Exits 1 when conflicts remain."""
-    from syncintosh.adapters.text_merge import TextMergeDriver
+    from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.adapters.text import TextAdapter
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
@@ -188,7 +184,8 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             scanner=PatternSecretScanner(),
             store=store,
             codec=KeyMaterial(),
-            driver=TextMergeDriver(),
+            driver=TextAdapter(),
+            adapters={"jsonc": JsoncAdapter()},
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
             pending_store=DirectoryPendingStore(paths.pending_dir),

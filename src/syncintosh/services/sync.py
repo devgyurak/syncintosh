@@ -24,6 +24,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 from syncintosh.core.commitments import loads_commitments
@@ -37,12 +38,13 @@ from syncintosh.core.errors import (
     PendingConflict,
 )
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
-from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, mint_file_id, tracking_key
+from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, PendingState
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.ports import (
     Cipher,
+    ContentAdapter,
     DenyList,
     FileIdSource,
     GitTransport,
@@ -59,11 +61,16 @@ from syncintosh.core.ports import (
 )
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
+from syncintosh.core.tree import KeyPath
 from syncintosh.services.repo_writer import write_repo
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
 # looping forever (``docs/design/01-sync-model.md`` step 13).
 MAX_PUSH_ATTEMPTS = 4
+
+# The adapter map a caller with no structural adapters passes: an immutable empty mapping, so the
+# default argument cannot be mutated (``AGENTS.md`` §4).
+NO_ADAPTERS: Mapping[FileFormat, ContentAdapter] = MappingProxyType({})
 
 # What apply decided for one record.
 _Decision = Literal["write", "skip", "abort", "defer"]
@@ -340,11 +347,19 @@ def _collect_first_sight(
     state.collected.append(item.path)
 
 
+def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
+    """A pending-conflict detail that names the colliding key paths, never their values (§4)."""
+    if not paths:
+        return reason
+    return f"{reason}: {', '.join('.'.join(path) for path in paths)}"
+
+
 def _merge_stale(
     *,
     transport: GitTransport,
     cipher: Cipher,
     driver: MergeDriver,
+    adapters: Mapping[FileFormat, ContentAdapter],
     head_commit: str | None,
     collected: _Collect,
 ) -> tuple[PendingConflictRecord, ...]:
@@ -365,13 +380,16 @@ def _merge_stale(
                 PendingConflictRecord(file_id, change.record.path, "the baseline or HEAD object is missing")
             )
             continue
-        merged = merge_content(base, change.live, head_bytes, driver)
+        merged = merge_content(base, change.live, head_bytes, driver, adapters.get(change.record.format))
         if merged.conflicted:
             conflicts.append(
                 PendingConflictRecord(
                     file_id,
                     change.record.path,
-                    "the same region changed here and in the repo since the last apply",
+                    _content_detail(
+                        merged.conflict_paths,
+                        "the same region changed here and in the repo since the last apply",
+                    ),
                     base,
                     change.live,
                     head_bytes,
@@ -432,6 +450,7 @@ def _merge_diverged(
     cipher: Cipher,
     scanner: SecretScanner,
     driver: MergeDriver,
+    adapters: Mapping[FileFormat, ContentAdapter],
     branch: str,
     local: str,
     remote: str,
@@ -459,14 +478,14 @@ def _merge_diverged(
         if local_bytes is None or remote_bytes is None:
             conflicts = (*conflicts, PendingConflictRecord(task.file_id, task.path, "a side's object is missing"))
             continue
-        merged = merge_content(base_bytes or b"", local_bytes, remote_bytes, driver)
+        merged = merge_content(base_bytes or b"", local_bytes, remote_bytes, driver, adapters.get(task.format))
         if merged.conflicted:
             conflicts = (
                 *conflicts,
                 PendingConflictRecord(
                     task.file_id,
                     task.path,
-                    "the same region changed on both sides",
+                    _content_detail(merged.conflict_paths, "the same region changed on both sides"),
                     base_bytes,
                     local_bytes,
                     remote_bytes,
@@ -542,6 +561,7 @@ def _publish(
     cipher: Cipher,
     scanner: SecretScanner,
     driver: MergeDriver,
+    adapters: Mapping[FileFormat, ContentAdapter],
     codec: RingCodec,
     store: KeyStore,
     config: SyncConfig,
@@ -580,6 +600,7 @@ def _publish(
             cipher=cipher,
             scanner=scanner,
             driver=driver,
+            adapters=adapters,
             branch=branch,
             local=local,
             remote=remote_commit,
@@ -784,6 +805,7 @@ def sync(
     config: SyncConfig,
     home: str,
     branch: str,
+    adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
     adopt: AdoptChoice | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises."""
@@ -801,6 +823,7 @@ def sync(
             store=store,
             codec=codec,
             driver=driver,
+            adapters=adapters,
             live=live,
             ledger_store=ledger_store,
             pending_store=pending_store,
@@ -824,6 +847,7 @@ def _cycle(
     store: KeyStore,
     codec: RingCodec,
     driver: MergeDriver,
+    adapters: Mapping[FileFormat, ContentAdapter],
     live: LiveFiles,
     ledger_store: LedgerStore,
     pending_store: PendingStore,
@@ -864,6 +888,7 @@ def _cycle(
             transport=transport,
             cipher=cipher,
             driver=driver,
+            adapters=adapters,
             head_commit=head_commit,
             collected=collected,
         )
@@ -908,6 +933,7 @@ def _cycle(
         cipher=cipher,
         scanner=scanner,
         driver=driver,
+        adapters=adapters,
         codec=codec,
         store=store,
         config=config,

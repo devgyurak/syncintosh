@@ -77,11 +77,14 @@ class ContentMerge:
     """The outcome of a byte-level content merge for one record.
 
     `data` is the merged bytes when `conflicted` is False, and the local side (an unresolved
-    candidate) when it is True.
+    candidate) when it is True. `conflict_paths` names the key paths a structural merge found in
+    conflict — never their values — so a pending report can say what collided; it is empty for a
+    whole-file conflict (an undecodable, unparseable, or text merge).
     """
 
     data: bytes
     conflicted: bool
+    conflict_paths: tuple[KeyPath, ...] = ()
 
 
 @dataclass(frozen=True)
