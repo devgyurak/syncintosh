@@ -168,3 +168,15 @@ class InitRefused(DomainError):
     holding a key the keyring does not (``AGENTS.md`` §6 — the master key is unrecoverable if
     lost).
     """
+
+
+class ConfigError(DomainError):
+    """The machine's `config.json` is missing, unreadable, or not a valid configuration."""
+
+
+class LedgerCorrupt(DomainError):
+    """`applied.json` is not a valid apply ledger."""
+
+
+class PendingCorrupt(DomainError):
+    """The pending state under `pending/` is not a valid pending record."""
