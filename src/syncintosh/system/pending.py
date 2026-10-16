@@ -22,6 +22,14 @@ CONTENT_DIR = "content"
 _SIDES = ("base", "local", "remote")
 
 
+def _required_commit(parsed: dict, field: str, state_path: Path) -> str:
+    """The commit id a pending state must name; a missing or empty one is corrupt."""
+    value = parsed.get(field)
+    if not isinstance(value, str) or value == "":
+        raise PendingCorrupt(f"the pending state {state_path} does not name a {field}")
+    return value
+
+
 class DirectoryPendingStore:
     """A `PendingStore` over one directory."""
 
@@ -57,8 +65,9 @@ class DirectoryPendingStore:
         live.write(str(self._state_path), (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
     def clear(self) -> None:
-        """Remove the whole pending directory."""
-        shutil.rmtree(self._root, ignore_errors=True)
+        """Remove the whole pending directory. Raises on a failure to remove it."""
+        if self._root.exists():
+            shutil.rmtree(self._root)
 
     def load(self) -> PendingState | None:
         """Read the pending state back, or `None` when there is none."""
@@ -70,12 +79,11 @@ class DirectoryPendingStore:
             raise PendingCorrupt(f"the pending state {self._state_path} is unreadable: {exc}") from exc
         if not isinstance(parsed, dict) or not isinstance(parsed.get("conflicts"), list):
             raise PendingCorrupt(f"the pending state {self._state_path} must hold a conflicts list")
-        conflicts = tuple(self._parse_conflict(raw) for raw in parsed["conflicts"])
-        return PendingState(
-            local_commit=str(parsed.get("local_commit")),
-            remote_commit=str(parsed.get("remote_commit")),
+        return PendingState.create(
+            local_commit=_required_commit(parsed, "local_commit", self._state_path),
+            remote_commit=_required_commit(parsed, "remote_commit", self._state_path),
             base_commit=None if parsed.get("base_commit") is None else str(parsed["base_commit"]),
-            conflicts=conflicts,
+            conflicts=tuple(self._parse_conflict(raw) for raw in parsed["conflicts"]),
         )
 
     def _parse_conflict(self, raw: object) -> PendingConflict:

@@ -194,6 +194,48 @@ def test_materialize_resets_the_working_tree_to_a_commit(tmp_path) -> None:
     assert _git(workdir, "status", "--porcelain") == ""
 
 
+def test_a_revision_that_does_not_exist_resolves_to_none(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+
+    # when & then
+    assert transport.resolve("HEAD") is None
+
+
+def test_branch_is_none_when_head_is_detached(tmp_path) -> None:
+    # given
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    commit = _settle(transport, workdir, "a.txt", b"x", ())
+    _git(workdir, "checkout", "--detach", commit)
+
+    # when & then
+    assert transport.branch() is None
+
+
+def test_clone_adopts_the_branch_the_remote_actually_has(tmp_path) -> None:
+    # given — a bare remote whose HEAD names `master`, with only a `main` branch pushed to it
+    workdir = tmp_path / "work"
+    remote = tmp_path / "legacy.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"one", ())
+    assert transport.push(str(remote), "main", first) == "ok"
+
+    # when
+    second_dir = tmp_path / "second"
+    second = GitCLITransport(second_dir)
+    second.clone(str(remote))
+
+    # then — HEAD is put on the branch that exists, not left unborn on `master`
+    assert second.branch() == "main"
+    assert second.head() == first
+
+
 def test_a_bad_parent_raises_a_git_error(tmp_path) -> None:
     # given
     workdir = tmp_path / "work"

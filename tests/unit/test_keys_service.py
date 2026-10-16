@@ -8,14 +8,32 @@ passed explicitly; the production default is never reduced (``AGENTS.md`` §3.1)
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
-from syncintosh.core.commitments import loads_commitments
+from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
+from syncintosh.core.ports import GitTransport
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import import_ring, init_new_repo
+from syncintosh.services.keys import import_ring, init_new_repo, published_commitments
+
+
+class _StubTransport:
+    """The two `GitTransport` calls `published_commitments` makes."""
+
+    def __init__(self, *, head_id: str | None, blobs: dict[tuple[str, str], bytes]) -> None:
+        self._head_id = head_id
+        self._blobs = blobs
+
+    def head(self) -> str | None:
+        return self._head_id
+
+    def read_blob(self, commit: str, relpath: str) -> bytes | None:
+        return self._blobs.get((commit, relpath))
+
 
 CHEAP = ScryptParams(log2_n=1, r=1, p=1)
 ALLOWED = frozenset({CHEAP})
@@ -106,6 +124,32 @@ class UndeletableLive(VanishingLive):
 
 def _codec() -> KeyMaterial:
     return KeyMaterial(params=CHEAP, allowed=ALLOWED)
+
+
+def test_published_commitments_is_empty_without_a_head() -> None:
+    # given — a repo with no commits yet
+    transport = _StubTransport(head_id=None, blobs={})
+
+    # when & then
+    assert published_commitments(cast(GitTransport, transport)) == {}
+
+
+def test_published_commitments_parses_the_committed_map() -> None:
+    # given
+    commit = "c" * 40
+    blob = dumps_commitments({1: "a" * 64})
+    transport = _StubTransport(head_id=commit, blobs={(commit, COMMITMENTS_PATH): blob})
+
+    # when & then
+    assert published_commitments(cast(GitTransport, transport)) == {1: "a" * 64}
+
+
+def test_published_commitments_is_empty_when_the_repo_has_no_file() -> None:
+    # given — a commit whose tree has no keys/commitments.json
+    transport = _StubTransport(head_id="c" * 40, blobs={})
+
+    # when & then
+    assert published_commitments(cast(GitTransport, transport)) == {}
 
 
 def test_init_creates_generation_one_and_records_the_commitment(memory_key_store) -> None:

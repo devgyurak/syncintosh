@@ -170,6 +170,9 @@ def test_git_transport_port_is_structural() -> None:
         def head(self) -> str | None:
             return None
 
+        def branch(self) -> str | None:
+            return None
+
         def resolve(self, rev: str) -> str | None:
             return None
 
@@ -206,6 +209,9 @@ def test_a_transport_without_push_does_not_conform() -> None:
         def clone(self, remote: str) -> None: ...
         def fetch(self, remote: str, branch: str) -> None: ...
         def head(self) -> str | None:
+            return None
+
+        def branch(self) -> str | None:
             return None
 
         def resolve(self, rev: str) -> str | None:

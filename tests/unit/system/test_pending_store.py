@@ -97,3 +97,28 @@ def test_a_malformed_pending_state_is_a_domain_error(tmp_path: Path, payload: st
     # when & then
     with pytest.raises(PendingCorrupt):
         store.load()
+
+
+def test_a_pending_state_without_a_commit_is_refused(tmp_path: Path) -> None:
+    # given — a hand-edited state that names no local commit
+    root = tmp_path / "pending"
+    root.mkdir()
+    (root / "state.json").write_text(
+        f'{{"remote_commit":"{"2" * 40}","conflicts":[{{"file_id":"{FILE_ID}","path":".zshrc","detail":"x"}}]}}',
+        encoding="utf-8",
+    )
+
+    # when & then
+    with pytest.raises(PendingCorrupt):
+        DirectoryPendingStore(root).load()
+
+
+def test_clear_on_a_missing_directory_is_a_noop(tmp_path: Path) -> None:
+    # given
+    store = DirectoryPendingStore(tmp_path / "pending")
+
+    # when
+    result = store.clear()
+
+    # then
+    assert result is None

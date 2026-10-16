@@ -105,6 +105,7 @@ def init(
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
     from syncintosh.services import import_ring, init_new_repo
+    from syncintosh.services.keys import published_commitments
     from syncintosh.services.setup import mint_machine_id, new_machine_config
     from syncintosh.system.config import save_config
     from syncintosh.system.live_files import SystemLiveFiles
@@ -126,13 +127,12 @@ def init(
         codec = KeyMaterial()
         if import_file is not None:
             transport.clone(remote)
-            published = _read_commitments(transport)
             import_ring(
                 store=store,
                 codec=codec,
                 blob=import_file.read_bytes(),
                 passphrase=_passphrase(),
-                published=published,
+                published=published_commitments(transport),
             )
             typer.echo(f"imported the key ring from {import_file}")
         else:
@@ -149,18 +149,6 @@ def init(
         save_config(config, paths.config_file)
     except DomainError as exc:
         _fail(exc)
-
-
-def _read_commitments(transport) -> dict[int, str]:
-    """The repo's published commitment map, or an empty one when the repo has none yet."""
-    from syncintosh.core.commitments import loads_commitments
-    from syncintosh.core.repo import COMMITMENTS_PATH
-
-    head = transport.head()
-    if head is None:
-        return {}
-    blob = transport.read_blob(head, COMMITMENTS_PATH)
-    return {} if blob is None else loads_commitments(blob)
 
 
 @app.command()
@@ -187,8 +175,9 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     try:
         config = load_config(paths.config_file)
         store = _key_store(config.remote)
+        transport = GitCLITransport(paths.repo_dir)
         report = sync_service(
-            transport=GitCLITransport(paths.repo_dir),
+            transport=transport,
             files=FileRepo(paths.repo_dir),
             cipher=EnvelopeCipher(store),
             scanner=PatternSecretScanner(),
@@ -203,7 +192,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             source=SecureFileIdSource(),
             config=config,
             home=str(paths.home),
-            branch=BRANCH,
+            branch=transport.branch() or BRANCH,
             adopt=adopt,
         )
     except DomainError as exc:

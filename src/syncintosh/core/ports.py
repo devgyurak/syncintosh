@@ -192,6 +192,14 @@ class GitTransport(Protocol):
         """Return the current commit id, or `None` on an unborn branch."""
         ...
 
+    def branch(self) -> str | None:
+        """Return the branch HEAD points at, or `None` when it is detached.
+
+        The name is returned even for an **unborn** branch, so a repo cloned from a remote whose
+        HEAD names a branch it does not have can be put on the branch the remote actually uses.
+        """
+        ...
+
     def resolve(self, rev: str) -> str | None:
         """Return the commit id `rev` names, or `None` when it does not exist."""
         ...

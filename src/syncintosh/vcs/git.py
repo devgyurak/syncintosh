@@ -88,9 +88,28 @@ class GitCLITransport:
         self._checked(["init", "-b", "main"])
 
     def clone(self, remote: str) -> None:
-        """Clone `remote` with full history (never `--depth`)."""
+        """Clone `remote` with full history (never `--depth`), on a branch that exists."""
         self._workdir.parent.mkdir(parents=True, exist_ok=True)
         self._checked(["clone", "--quiet", remote, str(self._workdir)], cwd=self._workdir.parent)
+        self._adopt_default_branch()
+
+    def _adopt_default_branch(self) -> None:
+        """Point HEAD at a real branch when the remote's HEAD named one it does not have.
+
+        A bare remote made by a plain `git init --bare` points HEAD at `master` while the first
+        publisher may have pushed `main`; `git clone` then leaves HEAD unborn, so nothing
+        resolves, and every sync would commit to a branch no other machine reads.
+        """
+        if self.head() is not None:
+            return
+        result = self._checked(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"])
+        names = result.stdout.decode("ascii").split()
+        if len(names) != 1:
+            return
+        branch = names[0].removeprefix("origin/")
+        self._checked(["symbolic-ref", "HEAD", f"refs/heads/{branch}"])
+        self._checked(["update-ref", f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"])
+        self._checked(["read-tree", "--reset", "-u", f"refs/heads/{branch}"])
 
     def fetch(self, remote: str, branch: str) -> None:
         """Fetch every branch from `remote` into the local tracking namespace.
@@ -103,6 +122,13 @@ class GitCLITransport:
     def head(self) -> str | None:
         """The current commit id, or `None` on an unborn branch."""
         return self._rev_parse("HEAD")
+
+    def branch(self) -> str | None:
+        """The branch HEAD points at, or `None` when it is detached."""
+        result = self._run(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=self._workdir)
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode("ascii").strip()
 
     def resolve(self, rev: str) -> str | None:
         """The commit id `rev` names, or `None` when it does not exist."""
