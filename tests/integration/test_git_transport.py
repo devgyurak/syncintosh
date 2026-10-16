@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from syncintosh.core.errors import GitError
-from syncintosh.vcs.git import GitCLITransport, remote_ref
+from syncintosh.core.ports import remote_ref
+from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
 
@@ -173,6 +174,24 @@ def test_a_criss_cross_history_has_two_merge_bases(tmp_path) -> None:
 
     # then
     assert bases == tuple(sorted((first, second)))
+
+
+def test_materialize_resets_the_working_tree_to_a_commit(tmp_path) -> None:
+    # given — a repo whose second commit added a file
+    workdir = tmp_path / "work"
+    transport = GitCLITransport(workdir)
+    transport.init()
+    first = _settle(transport, workdir, "a.txt", b"one", ())
+    _settle(transport, workdir, "b.txt", b"two", (first,))
+
+    # when — the branch moves back to the first commit
+    transport.materialize(first)
+    transport.update_ref("main", first)
+
+    # then — the working tree matches, and git reports a clean state
+    assert (workdir / "a.txt").read_bytes() == b"one"
+    assert (workdir / "b.txt").exists() is False
+    assert _git(workdir, "status", "--porcelain") == ""
 
 
 def test_a_bad_parent_raises_a_git_error(tmp_path) -> None:

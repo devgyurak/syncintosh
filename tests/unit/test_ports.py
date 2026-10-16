@@ -6,6 +6,7 @@ from __future__ import annotations
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.ports import (
     Cipher,
+    DenyList,
     Domain,
     FileIdSource,
     GitTransport,
@@ -186,6 +187,8 @@ def test_git_transport_port_is_structural() -> None:
 
         def update_ref(self, branch: str, commit: str) -> None: ...
 
+        def materialize(self, commit: str) -> None: ...
+
         def push(self, remote: str, branch: str, commit: str) -> str:
             return "ok"
 
@@ -292,6 +295,22 @@ def test_live_files_port_is_structural() -> None:
 
     # when
     matches = isinstance(FakeLive(), LiveFiles)
+
+    # then
+    assert matches is True
+
+
+def test_deny_list_port_is_structural() -> None:
+    # given
+    class FakeDenyList:
+        def is_denied(self, home: str, relpath: str) -> bool:
+            return False
+
+        def escapes(self, home: str, relpath: str) -> bool:
+            return False
+
+    # when
+    matches = isinstance(FakeDenyList(), DenyList)
 
     # then
     assert matches is True

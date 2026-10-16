@@ -20,26 +20,29 @@ Two deliberate choices:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 from syncintosh.core.errors import GitError
-from syncintosh.core.ports import PushOutcome
+from syncintosh.core.ports import REMOTE_REF_PREFIX, PushOutcome
 
 # The commits syncintosh writes are machine-generated and deterministic; a fixed identity keeps
 # them reproducible and keeps a test off the developer's real git config.
 COMMIT_NAME = "syncintosh"
 COMMIT_EMAIL = "syncintosh@localhost"
 
-# A single namespace for the fetched remote branch. The remote is a URL from config, not a
-# configured `origin`, so the tracking ref is named explicitly rather than inferred.
-REMOTE_REF_PREFIX = "refs/remotes/syncintosh/"
+# git echoes the remote URL in its errors, and that URL can carry a credential
+# (`https://user:token@host`). Redact the userinfo before a message can reach a log
+# (``AGENTS.md`` §4).
+_CREDENTIALS_RE = re.compile(r"://[^/@\s]*@")
+_MAX_DETAIL = 400
 
 
-def remote_ref(branch: str) -> str:
-    """The local tracking ref a fetch of `branch` writes (``syncintosh/<branch>``)."""
-    return f"{REMOTE_REF_PREFIX}{branch}"
+def _redact(text: str) -> str:
+    """Strip URL credentials and bound the length of a git error detail."""
+    return _CREDENTIALS_RE.sub("://<redacted>@", text.strip())[:_MAX_DETAIL]
 
 
 class GitCLITransport:
@@ -71,8 +74,9 @@ class GitCLITransport:
     def _checked(self, args: Sequence[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
         result = self._run(args, cwd=self._workdir if cwd is None else cwd)
         if result.returncode != 0:
-            # Only the subcommand, never the arguments: a remote URL can carry a token.
-            detail = result.stderr.decode("utf-8", "replace").strip()
+            # The subcommand plus a redacted detail. A remote URL can carry a credential, and
+            # git echoes the URL, so the userinfo is stripped (``AGENTS.md`` §4).
+            detail = _redact(result.stderr.decode("utf-8", "replace"))
             raise GitError(f"`git {args[0]}` failed (exit {result.returncode}): {detail}")
         return result
 
@@ -89,8 +93,12 @@ class GitCLITransport:
         self._checked(["clone", "--quiet", remote, str(self._workdir)], cwd=self._workdir.parent)
 
     def fetch(self, remote: str, branch: str) -> None:
-        """Fetch `branch` into the local tracking ref for `branch`."""
-        self._checked(["fetch", "--quiet", remote, f"+refs/heads/{branch}:{remote_ref(branch)}"])
+        """Fetch every branch from `remote` into the local tracking namespace.
+
+        A wildcard refspec, not `refs/heads/<branch>` alone: fetching one branch fails on a repo
+        with no commits yet, and the first push is into exactly such a repo.
+        """
+        self._checked(["fetch", "--quiet", remote, f"+refs/heads/*:{REMOTE_REF_PREFIX}*"])
 
     def head(self) -> str | None:
         """The current commit id, or `None` on an unborn branch."""
@@ -139,6 +147,14 @@ class GitCLITransport:
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
         self._checked(["update-ref", f"refs/heads/{branch}", commit])
+
+    def materialize(self, commit: str) -> None:
+        """Reset the index and working tree to `commit`'s tree (`read-tree --reset`).
+
+        Not a merge: the tree is checked out wholesale, so a fast-forward can move the branch
+        forward and leave the working tree a later `add -A` will stage correctly.
+        """
+        self._checked(["read-tree", "--reset", "-u", commit])
 
     def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
         """Push `commit` to `branch` on `remote`, classified for the retry rule."""

@@ -31,6 +31,16 @@ GENERATION_KEY_SIZE = 32
 # services pass across the `RingCodec` port without naming a crypto type (``AGENTS.md`` §2.2).
 Ring = tuple[tuple[int, bytes], ...]
 
+# The local tracking ref a fetch writes. The remote is a URL from config, not a configured
+# `origin`, so the ref is named explicitly rather than inferred. It lives here so `services` can
+# resolve it without importing the `vcs` layer (``AGENTS.md`` §2.2).
+REMOTE_REF_PREFIX = "refs/remotes/syncintosh/"
+
+
+def remote_ref(branch: str) -> str:
+    """The local tracking ref a fetch of `branch` writes (``syncintosh/<branch>``)."""
+    return f"{REMOTE_REF_PREFIX}{branch}"
+
 
 @runtime_checkable
 class MergeDriver(Protocol):
@@ -137,6 +147,26 @@ class SecretScanner(Protocol):
 
 
 @runtime_checkable
+class DenyList(Protocol):
+    """The dangerous paths refused before collection, and the escape check before apply.
+
+    A private key or a cloud credential must never enter a repo, however the user configured
+    their items (``AGENTS.md`` §3.4). Judgement is by real path, so a symlink whose target is
+    `~/.ssh` is still refused. `escapes` is the apply-side trust-boundary check: a record's path
+    arrives from the repo, so it must be proven to stay under `$HOME` before it is written
+    (``docs/design/03-manifest.md``). `system` implements this; `services` only asks.
+    """
+
+    def is_denied(self, home: str, relpath: str) -> bool:
+        """True when the live path `home/relpath` must never be collected."""
+        ...
+
+    def escapes(self, home: str, relpath: str) -> bool:
+        """True when resolving `home/relpath` (parent first) leaves `home`."""
+        ...
+
+
+@runtime_checkable
 class GitTransport(Protocol):
     """The git plumbing the sync cycle uses, bound to one working tree.
 
@@ -189,6 +219,14 @@ class GitTransport(Protocol):
 
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
+        ...
+
+    def materialize(self, commit: str) -> None:
+        """Reset the index and working tree to `commit`'s tree.
+
+        Used after a fast-forward moves the branch forward, so the working tree a later `commit`
+        stages matches the new HEAD. It is a tree checkout, never a merge: `read-tree --reset`.
+        """
         ...
 
     def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
