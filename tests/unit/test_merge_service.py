@@ -1,45 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for the merge use-cases."""
+"""Unit tests for the merge use-case."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ContentParseError
-from syncintosh.core.tree import tree_from_value
-from syncintosh.services import merge_documents, merge_text
-
-
-def test_merge_documents_delegates_to_the_engine() -> None:
-    # when
-    result = merge_documents(tree_from_value({"a": "1"}), tree_from_value({"a": "2"}), tree_from_value({"a": "1"}))
-
-    # then
-    assert result.merged == tree_from_value({"a": "2"})
-    assert result.has_conflicts is False
-
-
-def test_merge_documents_reports_conflicts_without_raising() -> None:
-    # when
-    result = merge_documents(tree_from_value({"a": "1"}), tree_from_value({"a": "2"}), tree_from_value({"a": "3"}))
-
-    # then
-    assert [conflict.path for conflict in result.conflicts] == [("a",)]
-
-
-def test_merge_documents_passes_an_ignore_set_through() -> None:
-    # when
-    result = merge_documents(
-        tree_from_value({"a": 1}),
-        tree_from_value({"a": 2}),
-        tree_from_value({"a": 3}),
-        ignore=frozenset({("a",)}),
-    )
-
-    # then
-    assert result.merged == tree_from_value({"a": 2})
-    assert result.conflicts == ()
+from syncintosh.core.tree import Tree, tree_from_value
+from syncintosh.services import merge_text
 
 
 def test_merge_text_renders_against_the_local_template() -> None:
@@ -71,3 +42,20 @@ def test_merge_text_raises_on_a_side_that_does_not_parse() -> None:
     # when & then — a malformed side is a usage error, not a conflict
     with pytest.raises(ContentParseError):
         merge_text("{", "{}", "{}", JsoncAdapter())
+
+
+def test_merge_text_is_conflicted_when_the_render_does_not_round_trip() -> None:
+    # given — an adapter whose render drops what was merged
+    class BrokenRender:
+        def parse(self, text: str) -> Tree:
+            return tree_from_value(json.loads(text))
+
+        def render(self, tree: Tree, template: str) -> str:
+            return "{}"
+
+    # when
+    result = merge_text('{"a": 1}', '{"a": 1}', '{"a": 1}', BrokenRender())
+
+    # then — never a silent success with text that is not the merge
+    assert result.has_conflicts is True
+    assert result.conflicts == ()

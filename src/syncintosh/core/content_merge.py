@@ -24,7 +24,7 @@ from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import ContentMerge
 from syncintosh.core.ports import ContentAdapter, MergeDriver
-from syncintosh.core.tree import KeyPath
+from syncintosh.core.tree import KeyPath, Tree
 
 
 def _decode_all(base: bytes, local: bytes, remote: bytes) -> tuple[str, str, str] | None:
@@ -68,6 +68,22 @@ def merge_content(
     return ContentMerge(data=result.text.encode("utf-8"), conflicted=result.conflicted)
 
 
+def render_merged(adapter: ContentAdapter, merged: Tree, template: str) -> str | None:
+    """Render `merged` and re-parse it; `None` when it does not round-trip to the same tree.
+
+    This is the guard that keeps an adapter from publishing a partially rendered file: the caller
+    treats `None` as a conflict rather than writing text that says it is the merge but is not.
+    Shared by the byte-level content merge and the `merge` command so the two cannot drift.
+    """
+    try:
+        rendered = adapter.render(merged, template)
+        if adapter.parse(rendered) != merged:
+            return None
+    except ContentParseError:
+        return None
+    return rendered
+
+
 def _merge_via_adapter(
     adapter: ContentAdapter,
     base_text: str,
@@ -90,10 +106,7 @@ def _merge_via_adapter(
     result = merge_tree(base_tree, local_tree, remote_tree)
     if result.has_conflicts:
         return None, tuple(conflict.path for conflict in result.conflicts)
-    try:
-        rendered = adapter.render(result.merged, local_text)
-        if adapter.parse(rendered) != result.merged:
-            return None, ()
-    except ContentParseError:
+    rendered = render_merged(adapter, result.merged, local_text)
+    if rendered is None:
         return None, ()
     return rendered, ()

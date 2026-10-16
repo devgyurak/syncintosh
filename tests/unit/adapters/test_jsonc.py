@@ -18,7 +18,7 @@ from hypothesis import strategies as st
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.tree import Scalar, Tree
+from syncintosh.core.tree import Scalar, Tree, tree_from_value
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "jsonc"
 
@@ -180,8 +180,6 @@ def test_two_escapes_for_one_string_are_the_same_key() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "",  # empty file
-        "   \n\t ",  # whitespace only
         '{\n  "a": 1,\n  "a": 2\n}\n',  # duplicate key
         '{\n  "a": 1\n',  # unterminated object
         "[1, 2",  # unterminated array
@@ -201,6 +199,26 @@ def test_malformed_jsonc_is_a_parse_error(text) -> None:
     # when & then
     with pytest.raises(ContentParseError):
         adapter.parse(text)
+
+
+@pytest.mark.parametrize("text", ["", "   \n\t ", "// only a comment\n", "/* only a block */"])
+def test_an_empty_document_is_the_empty_object(text) -> None:
+    # given — a file with nothing, or only comments, is `{}`, not a parse failure
+    adapter = JsoncAdapter()
+
+    # when & then
+    assert adapter.parse(text) == tree_from_value({})
+
+
+def test_an_empty_template_gains_the_merged_object() -> None:
+    # given — the local file is empty but the merge has content
+    adapter = JsoncAdapter()
+
+    # when
+    rendered = adapter.render(tree_from_value({"a": 1, "b": [2]}), "")
+
+    # then — the empty document is replaced with a valid object
+    assert adapter.parse(rendered) == tree_from_value({"a": 1, "b": [2]})
 
 
 def test_an_array_of_objects_round_trips() -> None:
@@ -267,3 +285,114 @@ def test_a_serialized_json_document_round_trips(value) -> None:
     # then
     assert adapter.render(adapter.parse(compact), compact) == compact
     assert adapter.render(adapter.parse(pretty), pretty) == pretty
+
+
+def test_deleting_the_last_member_then_adding_a_new_last_keeps_the_comma() -> None:
+    # given — remote drops the last member `b` and adds `c`; local changed `x`
+    adapter = JsoncAdapter()
+    base = '{\n  "x": 0,\n  "a": 1,\n  "b": 2\n}\n'
+    local = '{\n  "x": 9,\n  "a": 1,\n  "b": 2\n}\n'
+    remote = '{\n  "x": 0,\n  "a": 1,\n  "c": 3\n}\n'
+
+    # when
+    merged = _merged(base, local, remote)
+    rendered = adapter.render(merged, local)
+
+    # then — the result is valid JSONC that re-parses to the merge
+    assert adapter.parse(rendered) == merged
+
+
+def test_a_key_added_after_a_block_comment_does_not_double_the_comma() -> None:
+    # given
+    adapter = JsoncAdapter()
+    base = '{\n  "a": 1 /* n */,\n  "b": 2\n}\n'
+    remote = '{\n  "a": 1 /* n */,\n  "new": 9,\n  "b": 2\n}\n'
+
+    # when
+    rendered = adapter.render(_merged(base, base, remote), base)
+
+    # then
+    assert rendered == remote
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        '{\n  "a": 1 }',  # closing brace shares the member's line
+        '{\n  "a": 1, "b": 2\n}\n',  # two members on one line
+        '{"a": 1}',  # a single-line object
+    ],
+)
+def test_an_irregular_object_layout_is_rewritten_whole(base) -> None:
+    # given — a new key `c` arrives, but the layout has no per-member line to splice
+    adapter = JsoncAdapter()
+    remote = '{"a": 1, "b": 2, "c": 3}'
+
+    # when
+    merged = _merged(base, base, remote)
+    rendered = adapter.render(merged, base)
+
+    # then — the object is reserialized and re-parses to the merge
+    assert adapter.parse(rendered) == merged
+
+
+def test_a_reordered_array_object_is_reserialized_and_round_trips() -> None:
+    # given — remote reorders the keys inside an object held in an array
+    adapter = JsoncAdapter()
+    base = '{"a": [{"b": 1, "c": 2}]}'
+    local = '{"a": [{"b": 1, "c": 2}], "x": 1}'
+    remote = '{"a": [{"c": 2, "b": 1}]}'
+
+    # when
+    merged = _merged(base, local, remote)
+    rendered = adapter.render(merged, local)
+
+    # then — the render reproduces the reordered array (not the template's order)
+    assert adapter.parse(rendered) == merged
+
+
+def test_a_huge_integer_is_a_parse_error_not_a_crash() -> None:
+    # given — a Python int conversion limit would raise ValueError
+    adapter = JsoncAdapter()
+
+    # when & then
+    with pytest.raises(ContentParseError):
+        adapter.parse('{"n": ' + "1" * 5000 + "}")
+
+
+def test_a_deeply_nested_document_is_a_parse_error_not_a_crash() -> None:
+    # given — nesting deep enough to exhaust the stack
+    adapter = JsoncAdapter()
+
+    # when & then
+    with pytest.raises(ContentParseError):
+        adapter.parse("[" * 3000 + "]" * 3000)
+
+
+def test_a_crlf_delete_removes_the_whole_line() -> None:
+    # given — CRLF line endings must be handled by the "alone on its line" check
+    adapter = JsoncAdapter()
+    base = '{\r\n\t"a": 1,\r\n\t"b": 2,\r\n\t"c": 3\r\n}\r\n'
+    local = '{\r\n\t"a": 1,\r\n\t"c": 3\r\n}\r\n'
+
+    # when
+    rendered = adapter.render(_merged(base, local, base), base)
+
+    # then
+    assert rendered == local
+
+
+@given(base=_json_values, local=_json_values, remote=_json_values)
+def test_a_render_always_reparses_to_the_merged_tree(base, local, remote) -> None:
+    # given
+    adapter = JsoncAdapter()
+    base_text = json.dumps(base, ensure_ascii=False, indent=2)
+    local_text = json.dumps(local, ensure_ascii=False, indent=2)
+    remote_text = json.dumps(remote, ensure_ascii=False, indent=2)
+
+    # when
+    merged = merge_tree(adapter.parse(base_text), adapter.parse(local_text), adapter.parse(remote_text))
+    rendered = adapter.render(merged.merged, local_text)
+
+    # then — the invariant content_merge relies on
+    assert adapter.parse(rendered) == merged.merged

@@ -8,12 +8,16 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
 * **parse** is a small hand-written scanner that accepts `//` and `/* */` comments and a trailing
   comma, records every value's source span, and rejects a **duplicate key** — the one hazard a
   comment-tolerant parser must not swallow, because two definitions of one key make "the value
-  of key K" ill-defined.
+  of key K" ill-defined. An empty or comment-only file is the empty object; a malformed literal
+  that a Python int/nesting limit would reject as `ValueError`/`RecursionError` is reported as a
+  parse failure, never a crash.
 * **render** edits the *original* text at the spans that actually changed. A changed value
   rewrites only that value's span; an added key is inserted after the sibling the remote had
   before it; a removed key takes its line, comma, and same-line comment with it, leaving the
   comment above it. Indentation, trailing-comma style, newline style, and a BOM are detected in
-  the original and kept.
+  the original and kept. An array is one value, so a change to it (or to an object inside it) is
+  rendered by reserializing the whole array; an object that is not laid out member-per-line is
+  reserialized whole too, because a one-line object has no per-member line to splice.
 
 The merge itself is not this module's job: it returns a :class:`~syncintosh.core.tree.Tree` and
 takes one back, and the engine decides what changed (``core/merge.py``).
@@ -30,6 +34,7 @@ from syncintosh.core.tree import Array, EmptyObject, KeyPath, Node, Object, Scal
 
 # Whitespace the scanner skips; a BOM is treated as leading trivia so spans stay absolute.
 _WHITESPACE = " \t\r\n\ufeff"
+_SPACES = " \t"
 
 # JSON number grammar (RFC 8259). A bare `01` or `.5` matches a prefix and then fails the caller's
 # separator check, which is the correct "not a number" verdict.
@@ -40,9 +45,6 @@ _LITERALS: dict[str, tuple[ScalarKind, bool | None]] = {
     "false": ("bool", False),
     "null": ("null", None),
 }
-
-# What may follow a member value on its own line: an optional comma, an optional trailing comment.
-_MEMBER_TAIL = re.compile(r"[ \t]*,?[ \t]*(?://[^\n]*)?[ \t]*")
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,11 @@ class _Parser:
 
     def parse(self) -> _AstNode:
         self._skip()
+        if self._pos >= len(self._text):
+            # An empty or comment-only file is the empty object, not a parse failure: a settings
+            # file with nothing in it is `{}`, and treating it as malformed would make every
+            # both-sides change a whole-file conflict.
+            return _ObjectNode((), _Span(0, len(self._text)))
         node = self._value()
         self._skip()
         if self._pos != len(self._text):
@@ -170,10 +177,7 @@ class _Parser:
         token = match.group(0)
         self._pos = match.end()
         kind: ScalarKind = "float" if any(char in token for char in ".eE") else "int"
-        try:
-            value = json.loads(token)
-        except json.JSONDecodeError as exc:
-            raise ContentParseError(f"invalid number literal: {exc}") from exc
+        value = json.loads(token)
         return _ScalarNode(kind, value, _Span(start, self._pos))
 
     def _object(self) -> _ObjectNode:
@@ -274,10 +278,21 @@ class JsoncAdapter:
 
     def parse(self, text: str) -> Tree:
         """Parse JSONC into a tree, raising `ContentParseError` on malformed input."""
-        return _tree_of(_Parser(text).parse())
+        try:
+            return _tree_of(_Parser(text).parse())
+        except (ValueError, RecursionError) as exc:
+            # A literal Python int/nesting limit (huge integer, very deep document) is a
+            # malformed input for this format, not a crash the caller has to know about.
+            raise ContentParseError(str(exc)) from exc
 
     def render(self, tree: Tree, template: str) -> str:
         """Render `tree` by editing `template`; unchanged content returns the bytes verbatim."""
+        try:
+            return self._render(tree, template)
+        except (ValueError, RecursionError) as exc:
+            raise ContentParseError(str(exc)) from exc
+
+    def _render(self, tree: Tree, template: str) -> str:
         root = _Parser(template).parse()
         if _tree_of(root) == tree:
             return template
@@ -316,9 +331,9 @@ class _Diff:
             if leaf is not None:
                 edits.append(_Edit(node.span.start, node.span.end, _leaf_text(leaf)))
             return
-        if not isinstance(node, _ObjectNode) or "\n" not in self._source[node.span.start : node.span.end]:
-            # An object the tree wants here, or an inline object: replacing it is the only safe
-            # edit, because a one-line object has no per-member line to splice.
+        if not isinstance(node, _ObjectNode) or not _clean_multiline_object(self._source, node):
+            # The tree wants an object here, or the object is not laid out member-per-line
+            # (one-line, or the closing brace shares a line): rewrite the whole value.
             edits.append(_Edit(node.span.start, node.span.end, self._subtree(path, len(path))))
             return
         self._object(node, path, edits)
@@ -336,9 +351,13 @@ class _Diff:
     def _object(self, node: _ObjectNode, path: KeyPath, edits: list[_Edit]) -> None:
         desired = self._children(path)
         by_key = {member.key: member for member in node.members}
+        index_of = {member.key: index for index, member in enumerate(node.members)}
         trailing = _has_trailing_comma(self._source, node)
+
         pending: list[str] = []
         anchor: _MemberNode | None = None
+        anchor_index: int | None = None
+        insert_anchors: set[int] = set()
         for key in desired:
             member = by_key.get(key)
             if member is None:
@@ -346,14 +365,18 @@ class _Diff:
                 continue
             if pending:
                 self._insert(edits, anchor, node, pending, at_end=False, trailing=trailing)
+                if anchor_index is not None:
+                    insert_anchors.add(anchor_index)
                 pending = []
             anchor = member
+            anchor_index = index_of[key]
             self._render(member.value, (*path, key), edits)
         if pending:
             self._insert(edits, anchor, node, pending, at_end=True, trailing=trailing)
-        for index, member in enumerate(node.members):
-            if member.key not in desired:
-                self._remove(edits, node, member, index)
+            if anchor_index is not None:
+                insert_anchors.add(anchor_index)
+
+        self._remove_deleted(node, desired, insert_anchors, trailing, edits)
 
     def _insert(
         self,
@@ -379,24 +402,33 @@ class _Diff:
             position = _next_line_start(self._source, anchor.value.span.end)
         edits.append(_Edit(position, position, block))
 
-    def _remove(self, edits: list[_Edit], node: _ObjectNode, member: _MemberNode, index: int) -> None:
+    def _remove_deleted(
+        self,
+        node: _ObjectNode,
+        desired: list[str],
+        insert_anchors: set[int],
+        trailing: bool,
+        edits: list[_Edit],
+    ) -> None:
+        """Delete each removed member's line, and the dangling comma a tail deletion leaves."""
         text = self._source
-        comma = _comma_after(text, member)
-        line_start = _line_start(text, member.span.start)
-        line_end = _line_end(text, member.value.span.end)
-        alone = text[line_start : member.span.start].strip() == "" and _MEMBER_TAIL.fullmatch(
-            text[member.value.span.end : line_end]
-        )
-        if alone:
-            edits.append(_Edit(line_start, _next_line_start(text, member.value.span.end), ""))
-        else:
-            end = comma + 1 if comma is not None else member.value.span.end
-            edits.append(_Edit(member.span.start, end, ""))
-        if comma is None and index > 0:
-            prev_comma = _comma_after(text, node.members[index - 1])
-            if prev_comma is not None:
-                # Removing the last member would leave the previous one with a dangling comma.
-                edits.append(_Edit(prev_comma, prev_comma + 1, ""))
+        deleted = [index for index, member in enumerate(node.members) if member.key not in desired]
+        if not deleted:
+            return
+        survivors = [index for index in range(len(node.members)) if index not in deleted]
+        last_survivor = survivors[-1] if survivors else None
+        tail_deleted = (len(node.members) - 1) in deleted
+        # When the last member is removed and the style has no trailing comma, the comma after
+        # the new last member dangles — unless an inserted member will follow it and needs that
+        # very comma as its separator.
+        drop_comma = tail_deleted and not trailing and last_survivor is not None and last_survivor not in insert_anchors
+        for index in deleted:
+            member = node.members[index]
+            edits.append(_Edit(_line_start(text, member.span.start), _next_line_start(text, member.value.span.end), ""))
+        if drop_comma and last_survivor is not None:
+            comma = _comma_after(text, node.members[last_survivor])
+            if comma is not None:
+                edits.append(_Edit(comma, comma + 1, ""))
 
     def _member_line(self, path: KeyPath, level: int) -> str:
         key = path[-1]
@@ -437,10 +469,14 @@ def _same_value(leaf: Node, node: _AstNode) -> bool:
 
 
 def _same_object(entries: tuple[tuple[str, Node], ...], members: tuple[_MemberNode, ...]) -> bool:
+    """Compare an object **in order**: an array of objects compares as a whole, so a reordering
+    of the keys inside one is a real change, matching `core.tree.Object`'s own equality."""
     if len(entries) != len(members):
         return False
-    by_key = {member.key: member for member in members}
-    return all(key in by_key and _same_value(value, by_key[key].value) for key, value in entries)
+    return all(
+        key == member.key and _same_value(value, member.value)
+        for (key, value), member in zip(entries, members, strict=True)
+    )
 
 
 def _leaf_text(node: Node) -> str:
@@ -465,13 +501,57 @@ def _detect_style(text: str, root: _AstNode) -> tuple[str, str]:
     return indent, newline
 
 
+def _clean_multiline_object(text: str, node: _ObjectNode) -> bool:
+    """True when every member is alone on its line and the closing brace is on its own line.
+
+    Only then can a member be spliced by line; anything else (one line, two members on a line,
+    `}` sharing a member's line) is reserialized whole instead of risking a broken edit.
+    """
+    if "\n" not in text[node.span.start : node.span.end]:
+        return False
+    for member in node.members:
+        if text[_line_start(text, member.span.start) : member.span.start].strip() != "":
+            return False
+        if not _member_tail_clean(text, member.value.span.end):
+            return False
+    close = node.span.end - 1
+    return text[_line_start(text, close) : close].strip() == ""
+
+
+def _member_tail_clean(text: str, value_end: int) -> bool:
+    """True when what follows a value to end of line is only a comma, comments, and whitespace."""
+    length = len(text)
+    pos = value_end
+    while True:
+        spaces = _skip_spaces(text, pos)
+        if text.startswith("/*", spaces):
+            end = text.find("*/", spaces + 2)
+            if end == -1:
+                return False
+            pos = end + 2
+            continue
+        if spaces < length and text[spaces] == ",":
+            pos = spaces + 1
+            continue
+        pos = spaces
+        break
+    if text.startswith("//", pos):
+        newline = text.find("\n", pos)
+        pos = length if newline == -1 else newline
+    pos = _skip_spaces(text, pos)
+    while pos < length and text[pos] == "\r":
+        pos += 1
+    return pos >= length or text[pos] == "\n"
+
+
+def _skip_spaces(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in _SPACES:
+        pos += 1
+    return pos
+
+
 def _line_start(text: str, pos: int) -> int:
     return text.rfind("\n", 0, pos) + 1
-
-
-def _line_end(text: str, pos: int) -> int:
-    newline = text.find("\n", pos)
-    return len(text) if newline == -1 else newline
 
 
 def _next_line_start(text: str, pos: int) -> int:
@@ -480,18 +560,28 @@ def _next_line_start(text: str, pos: int) -> int:
 
 
 def _comma_after(text: str, member: _MemberNode) -> int | None:
-    """The offset of the comma that follows `member`'s value, or `None` when it is the last."""
+    """The offset of the comma that follows `member`'s value, or `None` when there is none.
+
+    A block comment between the value and its comma is skipped, so `1 /* n */,` reads as
+    followed by a comma; a line comment ends the search (a comma cannot follow it on the line).
+    """
     pos = member.value.span.end
     length = len(text)
     while pos < length:
-        if text[pos] in " \t":
+        if text[pos] in _SPACES:
             pos += 1
+        elif text.startswith("/*", pos):
+            end = text.find("*/", pos + 2)
+            if end == -1:
+                return None
+            pos = end + 2
         elif text.startswith("//", pos):
-            newline = text.find("\n", pos)
-            pos = length if newline == -1 else newline
+            return None
+        elif text[pos] == ",":
+            return pos
         else:
-            break
-    return pos if pos < length and text[pos] == "," else None
+            return None
+    return None
 
 
 def _has_trailing_comma(text: str, node: _ObjectNode) -> bool:
