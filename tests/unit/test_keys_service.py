@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the key-lifecycle use-cases.
 
-The load-bearing property for `init`: it does not complete without a verified recovery export,
-and a failed export leaves the keyring untouched so a retry starts clean. Cheap scrypt
-parameters are passed explicitly; the production default is never reduced (``AGENTS.md`` §3.1).
+The load-bearing properties: `init` does not complete without a verified recovery export, and
+`import_ring` checks every generation before it mutates the store. Cheap scrypt parameters are
+passed explicitly; the production default is never reduced (``AGENTS.md`` §3.1).
 """
 
 from __future__ import annotations
@@ -11,17 +11,20 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.errors import MasterKeyUnwrapError
+from syncintosh.core.errors import CommitmentsCorrupt, KeyGenerationMismatch, MasterKeyUnwrapError
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import init_new_repo
+from syncintosh.services.keys import import_ring, init_new_repo
 
 CHEAP = ScryptParams(log2_n=1, r=1, p=1)
 ALLOWED = frozenset({CHEAP})
 PASSPHRASE = "a recovery passphrase"
 RECOVERY_PATH = "/home/user/recovery.sntr"
+KEY_ONE = b"\x01" * 32
+KEY_TWO = b"\x02" * 32
 KEY_OTHER = b"\x03" * 32
+RING = ((1, KEY_ONE), (2, KEY_TWO))
 
 
 class InMemoryRepoFiles:
@@ -135,7 +138,6 @@ def test_init_aborts_when_the_export_cannot_be_written(memory_key_store) -> None
             passphrase=PASSPHRASE,
         )
     assert files.files == {}
-    assert store.generations() == ()
 
 
 def test_init_aborts_when_the_export_cannot_be_read_back(memory_key_store) -> None:
@@ -216,3 +218,90 @@ def test_init_leaves_the_ring_untouched_when_the_export_fails(memory_key_store) 
         passphrase=PASSPHRASE,
     )
     assert store.generations() == (1,)
+
+
+def test_import_adds_the_generations_after_checking_them(memory_key_store) -> None:
+    # given
+    store = memory_key_store()
+    codec = _codec()
+    published = {key_id: codec.commitment(key) for key_id, key in RING}
+
+    # when
+    import_ring(
+        store=store,
+        codec=codec,
+        blob=codec.wrap(RING, PASSPHRASE),
+        passphrase=PASSPHRASE,
+        published=published,
+    )
+
+    # then
+    assert store.generations() == (1, 2)
+    assert store.get(2) == KEY_TWO
+
+
+def test_import_refuses_a_generation_the_commitment_disagrees_with(memory_key_store) -> None:
+    # given
+    store = memory_key_store()
+    codec = _codec()
+    published = {1: "f" * 64}
+
+    # when & then
+    with pytest.raises(KeyGenerationMismatch):
+        import_ring(
+            store=store,
+            codec=codec,
+            blob=codec.wrap(RING, PASSPHRASE),
+            passphrase=PASSPHRASE,
+            published=published,
+        )
+    assert store.generations() == ()
+
+
+def test_import_refuses_a_generation_this_machine_already_holds_differently(memory_key_store) -> None:
+    # given — this machine already holds a different key for generation 1
+    store = memory_key_store({1: KEY_OTHER})
+    codec = _codec()
+
+    # when & then
+    with pytest.raises(KeyGenerationMismatch):
+        import_ring(
+            store=store,
+            codec=codec,
+            blob=codec.wrap(RING, PASSPHRASE),
+            passphrase=PASSPHRASE,
+            published={},
+        )
+    assert store.get(1) == KEY_OTHER
+
+
+def test_import_refuses_a_wrong_passphrase(memory_key_store) -> None:
+    # given
+    codec = _codec()
+
+    # when & then
+    with pytest.raises(MasterKeyUnwrapError):
+        import_ring(
+            store=memory_key_store(),
+            codec=codec,
+            blob=codec.wrap(RING, PASSPHRASE),
+            passphrase="the wrong passphrase",
+            published={},
+        )
+
+
+def test_import_refuses_a_generation_the_repo_does_not_commit_to(memory_key_store) -> None:
+    # given — the repo publishes no commitment for generation 1, so its key cannot be checked
+    store = memory_key_store()
+    codec = _codec()
+
+    # when & then
+    with pytest.raises(CommitmentsCorrupt):
+        import_ring(
+            store=store,
+            codec=codec,
+            blob=codec.wrap(((1, KEY_ONE),), PASSPHRASE),
+            passphrase=PASSPHRASE,
+            published={},
+        )
+    assert store.generations() == ()
