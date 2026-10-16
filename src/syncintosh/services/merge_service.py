@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Use-case: merge three parsed, flat documents at the key level.
+"""Use-case: merge three typed trees at the key-path level.
 
 This is a thin orchestration over the pure engine so the CLI never calls `core` directly and
 `core` stays free of use-case concerns.
@@ -7,16 +7,17 @@ This is a thin orchestration over the pure engine so the CLI never calls `core` 
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
-from syncintosh.core.merge import merge_keys
-from syncintosh.core.models import MergeResult
+from syncintosh.core.merge import IgnorePaths, merge_tree
+from syncintosh.core.models import TreeMerge
+from syncintosh.core.tree import Tree
 
 
 def merge_documents(
-    base: Mapping[str, str],
-    local: Mapping[str, str],
-    remote: Mapping[str, str],
-) -> MergeResult:
-    """Merge base/local/remote key maps; conflicts are returned, not raised."""
-    return merge_keys(base, local, remote)
+    base: Tree,
+    local: Tree,
+    remote: Tree,
+    *,
+    ignore: IgnorePaths = frozenset(),
+) -> TreeMerge:
+    """Merge base/local/remote trees; conflicts are returned, not raised."""
+    return merge_tree(base, local, remote, ignore=ignore)

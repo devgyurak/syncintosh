@@ -7,8 +7,12 @@ both-sides change is a conflict rather than a decode crash (``docs/design/03-man
 
 from __future__ import annotations
 
+import json
+
 from syncintosh.core.content_merge import merge_content
+from syncintosh.core.errors import ContentParseError
 from syncintosh.core.models import ContentMerge, TextMerge
+from syncintosh.core.tree import Tree, tree_from_value
 
 
 class RecordingDriver:
@@ -21,6 +25,29 @@ class RecordingDriver:
     def merge(self, base: str, local: str, remote: str) -> TextMerge:
         self.calls.append((base, local, remote))
         return self._result
+
+
+class JsonAdapter:
+    """A minimal `ContentAdapter` over JSON, enough to exercise the routing."""
+
+    def __init__(self, *, parse_raises: bool = False, corrupt_render: bool = False) -> None:
+        self.parse_calls = 0
+        self._parse_raises = parse_raises
+        self._corrupt_render = corrupt_render
+
+    def parse(self, text: str) -> Tree:
+        self.parse_calls += 1
+        if self._parse_raises:
+            raise ContentParseError("nope")
+        try:
+            return tree_from_value(json.loads(text))
+        except json.JSONDecodeError as exc:
+            raise ContentParseError(str(exc)) from exc
+
+    def render(self, tree: Tree, template: str) -> str:
+        if self._corrupt_render:
+            return "{}"
+        return json.dumps(tree.to_value())
 
 
 def test_identical_sides_need_no_driver() -> None:
@@ -106,3 +133,100 @@ def test_an_undecodable_one_sided_change_is_still_applied() -> None:
     # then
     assert result == ContentMerge(data=local, conflicted=False)
     assert driver.calls == []
+
+
+def test_a_both_sides_change_routes_through_an_adapter() -> None:
+    # given — different keys changed on each side
+    driver = RecordingDriver(TextMerge(text="unused", conflicted=False))
+    adapter = JsonAdapter()
+
+    # when
+    result = merge_content(b'{"a": 1}', b'{"a": 2, "b": 3}', b'{"a": 1, "c": 4}', driver, adapter)
+
+    # then — the adapter merged the keys, and the driver was not consulted
+    assert result.conflicted is False
+    assert json.loads(result.data) == {"a": 2, "b": 3, "c": 4}
+    assert driver.calls == []
+
+
+def test_a_one_sided_change_never_touches_the_adapter() -> None:
+    # given
+    adapter = JsonAdapter()
+
+    # when
+    result = merge_content(
+        b'{"a": 1}', b'{"a": 2}', b'{"a": 1}', RecordingDriver(TextMerge(text="", conflicted=False)), adapter
+    )
+
+    # then
+    assert result == ContentMerge(data=b'{"a": 2}', conflicted=False)
+    assert adapter.parse_calls == 0
+
+
+def test_an_unparseable_side_is_a_conflict() -> None:
+    # given — local is not valid JSON
+    adapter = JsonAdapter()
+
+    # when
+    result = merge_content(
+        b"{}", b"{not json", b'{"a": 1}', RecordingDriver(TextMerge(text="", conflicted=False)), adapter
+    )
+
+    # then
+    assert result == ContentMerge(data=b"{not json", conflicted=True)
+
+
+def test_a_parse_that_raises_is_a_conflict() -> None:
+    # given
+    adapter = JsonAdapter(parse_raises=True)
+
+    # when
+    result = merge_content(b"a", b"b", b"c", RecordingDriver(TextMerge(text="", conflicted=False)), adapter)
+
+    # then
+    assert result == ContentMerge(data=b"b", conflicted=True)
+
+
+def test_a_both_sides_conflict_on_one_key_is_a_conflict() -> None:
+    # given — the adapter's engine finds a conflicting key
+    adapter = JsonAdapter()
+
+    # when
+    result = merge_content(
+        b'{"a": 1}', b'{"a": 2}', b'{"a": 3}', RecordingDriver(TextMerge(text="", conflicted=False)), adapter
+    )
+
+    # then
+    assert result == ContentMerge(data=b'{"a": 2}', conflicted=True)
+
+
+def test_a_render_that_does_not_round_trip_is_a_conflict() -> None:
+    # given — the render loses the merged content
+    adapter = JsonAdapter(corrupt_render=True)
+
+    # when
+    result = merge_content(
+        b'{"a": 1}',
+        b'{"a": 2, "b": 3}',
+        b'{"a": 1, "c": 4}',
+        RecordingDriver(TextMerge(text="", conflicted=False)),
+        adapter,
+    )
+
+    # then
+    assert result == ContentMerge(data=b'{"a": 2, "b": 3}', conflicted=True)
+
+
+def test_an_undecodable_both_sides_change_skips_the_adapter() -> None:
+    # given
+    adapter = JsonAdapter()
+    local = b"\xff\xfe local"
+
+    # when
+    result = merge_content(
+        b"base", local, b"\xff\xfe remote", RecordingDriver(TextMerge(text="", conflicted=False)), adapter
+    )
+
+    # then
+    assert result == ContentMerge(data=local, conflicted=True)
+    assert adapter.parse_calls == 0

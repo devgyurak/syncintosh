@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from syncintosh.core.tree import Absent, KeyPath, Leaf, Tree
+
 # Whether a value applies to every machine or only to the current one.
 Scope = Literal["common", "machine"]
 
@@ -17,25 +19,38 @@ Scope = Literal["common", "machine"]
 Side = Literal["base", "local", "remote"]
 
 
+def _shape(value: Leaf) -> str:
+    """A value's kind, for a conflict's repr — never the value itself (``AGENTS.md`` §4)."""
+    return "absent" if isinstance(value, Absent) else type(value).__name__.lower()
+
+
 @dataclass(frozen=True)
 class Conflict:
-    """A key that was changed on both sides to different values.
+    """A key path that was changed on both sides to different values.
 
-    Only a both-sides change on the same key is a conflict; a one-sided change is applied
-    automatically (``AGENTS.md`` §5.3).
+    Only a both-sides change on the same path is a conflict; a one-sided change is applied
+    automatically (``AGENTS.md`` §5.3). A value is ``ABSENT`` when that side has no leaf there —
+    a key it never had, deleted, or replaced by an object whose children are the real change.
     """
 
-    key: str
-    base: str | None
-    local: str | None
-    remote: str | None
+    path: KeyPath
+    base: Leaf
+    local: Leaf
+    remote: Leaf
+
+    def __repr__(self) -> str:
+        # The sides are plaintext settings; a log or a traceback must not print them (§4).
+        return (
+            f"Conflict(path={self.path!r}, base=<{_shape(self.base)}>, "
+            f"local=<{_shape(self.local)}>, remote=<{_shape(self.remote)}>)"
+        )
 
 
 @dataclass(frozen=True)
-class MergeResult:
-    """The outcome of a three-way, key-level merge."""
+class TreeMerge:
+    """The outcome of a three-way, key-level merge over two typed trees."""
 
-    merged: dict[str, str]
+    merged: Tree
     conflicts: tuple[Conflict, ...]
 
     @property

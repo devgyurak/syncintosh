@@ -44,15 +44,12 @@ def _root() -> None:
     """
 
 
-def _load(path: Path) -> dict[str, Any]:
-    """Read a JSON object from ``path``; a bad file is a usage error, not a crash."""
+def _load(path: Path) -> Any:
+    """Read a JSON value from ``path``; a bad file is a usage error, not a crash."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise typer.BadParameter(f"cannot read JSON from {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise typer.BadParameter(f"{path} must contain a JSON object")
-    return data
 
 
 def _passphrase() -> str:
@@ -77,14 +74,22 @@ def _fail(exc: DomainError) -> None:
 
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
-    """Key-level three-way merge of three JSON files. Exits 1 when conflicts remain."""
+    """Key-level three-way merge of three JSON files. Exits 1 when conflicts remain.
+
+    This is the PR-A bridge: `json.loads` is turned into a tree here and the merged tree back
+    into JSON. The jsonc adapter replaces the `json.loads` half of this (and preserves
+    comments) in the next change.
+    """
+    from syncintosh.core.tree import tree_from_value
     from syncintosh.services import merge_documents
 
-    result = merge_documents(_load(base), _load(local), _load(remote))
-    typer.echo(json.dumps(result.merged, indent=2, ensure_ascii=False, sort_keys=True))
+    result = merge_documents(
+        tree_from_value(_load(base)), tree_from_value(_load(local)), tree_from_value(_load(remote))
+    )
+    typer.echo(json.dumps(result.merged.to_value(), indent=2, ensure_ascii=False, sort_keys=True))
     if result.has_conflicts:
         for conflict in result.conflicts:
-            typer.echo(f"conflict: {conflict.key}", err=True)
+            typer.echo(f"conflict: {'.'.join(conflict.path)}", err=True)
         raise typer.Exit(code=1)
 
 
