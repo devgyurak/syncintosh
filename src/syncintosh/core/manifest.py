@@ -21,6 +21,7 @@ from typing import Literal
 from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
 from syncintosh.core.ids import is_file_id
 from syncintosh.core.models import Scope
+from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import FileIdSource
 
 # Bumping this is a migration, not a routine change (docs/design/03-manifest.md).
@@ -60,7 +61,8 @@ def _ensure_utf8(value: str, field: str) -> str:
     return value
 
 
-def _validate_path(value: object) -> str:
+def validate_path(value: object) -> str:
+    """Validate a `$HOME`-relative path; raise `ManifestCorrupt` when it is not normalized."""
     if not isinstance(value, str) or value == "":
         raise ManifestCorrupt(f"path must be a non-empty string, got {value!r}")
     if "\x00" in value:
@@ -78,19 +80,22 @@ def _validate_path(value: object) -> str:
     return value
 
 
-def _validate_preset(value: object) -> str:
+def validate_preset(value: object) -> str:
+    """Validate a preset name; raise `ManifestCorrupt` when it is empty or not UTF-8."""
     if not isinstance(value, str) or value == "":
         raise ManifestCorrupt(f"preset must be a non-empty string, got {value!r}")
     return _ensure_utf8(value, "preset")
 
 
-def _validate_scope(value: object) -> Scope:
+def validate_scope(value: object) -> Scope:
+    """Validate the scope; raise `ManifestCorrupt` when it is neither `common` nor `machine`."""
     if value not in _SCOPES:
         raise ManifestCorrupt(f"scope must be one of {_SCOPES}, got {value!r}")
     return value  # ty: ignore[invalid-return-type]  # narrowed by the membership check above
 
 
-def _validate_machine(value: object, scope: Scope) -> str | None:
+def validate_machine(value: object, scope: Scope) -> str | None:
+    """Validate the machine field against the scope; raise `ManifestCorrupt` on a mismatch."""
     if scope == "machine":
         if not isinstance(value, str) or value == "":
             raise ManifestCorrupt("a machine-scope record must name its machine")
@@ -100,7 +105,8 @@ def _validate_machine(value: object, scope: Scope) -> str | None:
     return None
 
 
-def _validate_format(value: object) -> FileFormat:
+def validate_format(value: object) -> FileFormat:
+    """Validate the adapter key; raise `ManifestCorrupt` when it is not one of `FORMATS`."""
     if value not in FORMATS:
         raise ManifestCorrupt(f"format must be one of {FORMATS}, got {value!r}")
     return value  # ty: ignore[invalid-return-type]  # narrowed by the membership check above
@@ -133,14 +139,14 @@ class ManifestRecord:
         """Validate every field and build the frozen record; never assign fields afterwards."""
         if not isinstance(file_id, str) or not is_file_id(file_id):
             raise ManifestCorrupt(f"file_id must be 32 lowercase hex characters, got {file_id!r}")
-        validated_scope = _validate_scope(scope)
+        validated_scope = validate_scope(scope)
         return cls(
             file_id=file_id,
-            path=_validate_path(path),
-            preset=_validate_preset(preset),
+            path=validate_path(path),
+            preset=validate_preset(preset),
             scope=validated_scope,
-            machine=_validate_machine(machine, validated_scope),
-            format=_validate_format(format),
+            machine=validate_machine(machine, validated_scope),
+            format=validate_format(format),
             sha256=_validate_sha256(sha256),
         )
 
@@ -180,7 +186,9 @@ class Manifest:
 
 
 def _tracking_key(record: ManifestRecord) -> tuple[Scope, str | None, str]:
-    return (record.scope, record.machine, record.path)
+    # The path is folded (NFC + casefold) so `.Zshrc` and `.zshrc` name one tracked file on a
+    # case-insensitive APFS; the record keeps the exact path it was created with.
+    return (record.scope, record.machine, collision_key(record.path))
 
 
 def track(
@@ -201,7 +209,7 @@ def track(
     A freshly minted ID is re-checked here — a bad or colliding ID is a source-contract bug, a
     `ValueError`, not a corrupt manifest.
     """
-    key = (scope, machine, path)
+    key = (scope, machine, collision_key(path))
     existing = next((record for record in manifest.records.values() if _tracking_key(record) == key), None)
     file_id = existing.file_id if existing is not None else _mint_file_id(manifest, source)
     record = ManifestRecord.create(

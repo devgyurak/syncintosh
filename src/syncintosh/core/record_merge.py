@@ -20,6 +20,7 @@ from typing import Literal
 from syncintosh.core.errors import GenerationDivergence
 from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord
 from syncintosh.core.models import Scope
+from syncintosh.core.paths import collision_key
 
 # The three record-level conflicts; the kind decides the user's choice
 # (docs/design/03-manifest.md).
@@ -281,7 +282,8 @@ def _merge_both_changed(
 
 
 def _secondary_key(record: ManifestRecord) -> tuple[Scope, str | None, str]:
-    return (record.scope, record.machine, record.path)
+    # Folded the same way `track` folds it, so `.Zshrc` and `.zshrc` collide on APFS.
+    return (record.scope, record.machine, collision_key(record.path))
 
 
 def _resolve_collisions(
@@ -300,31 +302,38 @@ def _resolve_collisions(
     grouping symmetric in local and remote so both machines converge. Identical content among
     resolved records is deduplicated silently (smallest ID wins); anything else is a
     `PathCollision`. Machine-scope records on different machines carry different keys.
+
+    The key is folded (NFC + casefold) so two spellings of one APFS path collide, while the
+    collision still reports a real path for the user to recognise.
     """
-    groups: dict[tuple[Scope, str | None, str], list[tuple[str, ManifestRecord | None, bool]]] = {}
+    # `(file_id, record, resolved, display path)`; the display path is the path as written on
+    # whichever side contributed the entry, never the folded key.
+    groups: dict[tuple[Scope, str | None, str], list[tuple[str, ManifestRecord | None, bool, str]]] = {}
     for file_id, record in merged.items():
-        groups.setdefault(_secondary_key(record), []).append((file_id, record, True))
+        groups.setdefault(_secondary_key(record), []).append((file_id, record, True, record.path))
     for task in content_merges:
-        groups.setdefault((task.scope, task.machine, task.path), []).append((task.file_id, None, False))
+        groups.setdefault((task.scope, task.machine, collision_key(task.path)), []).append(
+            (task.file_id, None, False, task.path)
+        )
     for conflict in conflicts:
         for record in (conflict.local, conflict.remote):
             if record is not None:
-                groups.setdefault(_secondary_key(record), []).append((record.file_id, record, False))
+                groups.setdefault(_secondary_key(record), []).append((record.file_id, record, False, record.path))
 
     collisions: list[PathCollision] = []
     for key in sorted(groups, key=lambda item: (item[0], item[1] or "", item[2])):
         entries = groups[key]
-        file_ids = sorted({file_id for file_id, _, _ in entries})
+        file_ids = sorted({file_id for file_id, _, _, _ in entries})
         if len(file_ids) < 2:
             continue
-        resolved_records = [record for _, record, resolved in entries if resolved and record is not None]
-        if all(resolved for _, _, resolved in entries) and _all_identical(resolved_records):
+        resolved_records = [record for _, record, resolved, _ in entries if resolved and record is not None]
+        if all(resolved for _, _, resolved, _ in entries) and _all_identical(resolved_records):
             for loser in file_ids[1:]:
                 merged.pop(loser, None)
                 deduplicated.append(loser)
             continue
-        scope, machine, path = key
-        collisions.append(PathCollision(scope=scope, machine=machine, path=path, file_ids=tuple(file_ids)))
+        scope, machine, _folded = key
+        collisions.append(PathCollision(scope=scope, machine=machine, path=entries[0][3], file_ids=tuple(file_ids)))
     return tuple(collisions)
 
 

@@ -199,6 +199,19 @@ def test_identical_content_dedups_to_the_smaller_id() -> None:
     assert result.collisions == ()
 
 
+def test_two_spellings_of_one_path_collide() -> None:
+    # given — `.Zshrc` and `.zshrc` name one file on APFS, so they must not survive as two
+    other = _rec(file_id=ID2, path=".Zshrc", sha=SHA2)
+
+    # when
+    result = merge_records(None, {ID1: BASE}, {ID2: other})
+
+    # then
+    assert len(result.collisions) == 1
+    assert result.collisions[0].file_ids == (ID2, ID1)
+    assert result.collisions[0].path in (".zshrc", ".Zshrc")
+
+
 def test_different_content_is_a_path_collision() -> None:
     # given
     other = _rec(file_id=ID2, path=".zshrc", sha=SHA2)

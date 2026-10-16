@@ -171,6 +171,22 @@ def test_track_mints_and_reuses_one_id_for_a_path() -> None:
     assert second.records[ID2].sha256 == SHA2
 
 
+def test_track_folds_the_path_so_two_spellings_share_one_id() -> None:
+    # given — macOS's filesystem is case-insensitive, so `.Zshrc` and `.zshrc` are one file
+    source = StubIdSource(ID2)
+    first = track(
+        Manifest.empty(1), path=".zshrc", preset="zsh", scope="common", format="text", sha256=SHA1, source=source
+    )
+
+    # when
+    second = track(first, path=".Zshrc", preset="zsh", scope="common", format="text", sha256=SHA2, source=source)
+
+    # then — no second id was minted; the existing record was refreshed
+    assert list(second.records) == [ID2]
+    assert second.records[ID2].path == ".Zshrc"
+    assert second.records[ID2].sha256 == SHA2
+
+
 def test_track_keeps_the_manifest_sibling_records() -> None:
     # given
     base = _manifest({ID1: _record()})
