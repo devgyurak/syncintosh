@@ -7,15 +7,16 @@ import dataclasses
 
 import pytest
 
-from syncintosh.core.models import Conflict, LedgerEntry, MergeResult, PendingConflict, PendingState
+from syncintosh.core.models import Conflict, LedgerEntry, PendingConflict, PendingState, TreeMerge
+from syncintosh.core.tree import ABSENT, Scalar, tree_from_value
 
 
 def test_has_conflicts_is_true_when_a_conflict_is_present() -> None:
     # given
-    conflict = Conflict(key="a", base="1", local="2", remote="3")
+    conflict = Conflict(path=("a",), base=ABSENT, local=Scalar("int", 2), remote=Scalar("int", 3))
 
     # when
-    result = MergeResult(merged={"a": "2"}, conflicts=(conflict,))
+    result = TreeMerge(merged=tree_from_value({"a": 2}), conflicts=(conflict,))
 
     # then
     assert result.has_conflicts is True
@@ -23,19 +24,38 @@ def test_has_conflicts_is_true_when_a_conflict_is_present() -> None:
 
 def test_has_conflicts_is_false_when_no_conflict() -> None:
     # when
-    result = MergeResult(merged={"a": "1"}, conflicts=())
+    result = TreeMerge(merged=tree_from_value({"a": 1}), conflicts=())
 
     # then
     assert result.has_conflicts is False
 
 
-def test_merge_result_is_frozen() -> None:
+def test_tree_merge_is_frozen() -> None:
     # given
-    result = MergeResult(merged={}, conflicts=())
+    result = TreeMerge(merged=tree_from_value({}), conflicts=())
 
     # when & then
     with pytest.raises(dataclasses.FrozenInstanceError):
-        result.merged = {"a": "1"}  # ty: ignore[invalid-assignment]  # frozen dataclass must reject this
+        result.merged = tree_from_value({"a": 1})  # ty: ignore[invalid-assignment]  # frozen dataclass
+
+
+def test_a_conflict_repr_hides_the_values() -> None:
+    # given
+    conflict = Conflict(
+        path=("token",),
+        base=ABSENT,
+        local=Scalar("str", "hunter2"),
+        remote=Scalar("str", "swordfish"),
+    )
+
+    # when
+    text = repr(conflict)
+
+    # then — the shape shows, the secrets do not
+    assert "('token',)" in text
+    assert "scalar" in text
+    assert "hunter2" not in text
+    assert "swordfish" not in text
 
 
 def test_pending_state_has_conflicts_is_true_when_a_record_is_unresolved() -> None:

@@ -66,16 +66,18 @@ def test_merge_rejects_an_unreadable_file(tmp_path) -> None:
     assert result.exit_code == 2
 
 
-def test_merge_rejects_a_non_object_document(tmp_path) -> None:
-    # given
-    array = _write(tmp_path, "array.json", [1, 2, 3])
-    good = _write(tmp_path, "good.json", {})
+def test_merge_accepts_a_top_level_array(tmp_path) -> None:
+    # given — a document whose root is an array
+    base = _write(tmp_path, "base.json", [1, 2])
+    local = _write(tmp_path, "local.json", [1, 2, 3])
+    remote = _write(tmp_path, "remote.json", [1, 2])
 
     # when
-    result = runner.invoke(main_module.app, ["merge", array, good, good])
+    result = runner.invoke(main_module.app, ["merge", base, local, remote])
 
     # then
-    assert result.exit_code == 2
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == [1, 2, 3]
 
 
 def test_main_dispatches_to_the_app(monkeypatch) -> None:

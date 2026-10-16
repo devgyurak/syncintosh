@@ -6,6 +6,7 @@ from __future__ import annotations
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.ports import (
     Cipher,
+    ContentAdapter,
     DenyList,
     Domain,
     FileIdSource,
@@ -20,6 +21,7 @@ from syncintosh.core.ports import (
     SecretScanner,
     SyncLock,
 )
+from syncintosh.core.tree import Tree
 
 
 def test_merge_driver_port_is_structural() -> None:
@@ -33,6 +35,35 @@ def test_merge_driver_port_is_structural() -> None:
 
     # then
     assert matches is True
+
+
+def test_content_adapter_port_is_structural() -> None:
+    # given
+    class FakeAdapter:
+        def parse(self, text: str) -> Tree:
+            return Tree.create({})
+
+        def render(self, tree: Tree, template: str) -> str:
+            return template
+
+    # when
+    matches = isinstance(FakeAdapter(), ContentAdapter)
+
+    # then
+    assert matches is True
+
+
+def test_a_parser_without_render_does_not_conform() -> None:
+    # given — both halves of the adapter contract are required
+    class ParseOnly:
+        def parse(self, text: str) -> Tree:
+            return Tree.create({})
+
+    # when
+    matches = isinstance(ParseOnly(), ContentAdapter)
+
+    # then
+    assert matches is False
 
 
 def test_key_store_port_is_structural() -> None:

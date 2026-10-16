@@ -137,6 +137,16 @@ class ContentDigestMismatch(DomainError):
         super().__init__(f"content for {file_id} has sha256 {actual}, expected {expected}")
 
 
+class ContentParseError(DomainError):
+    """A format adapter could not parse a document as its format.
+
+    Raised by an adapter's ``parse`` when the text is malformed for that format (including a
+    duplicate key, which JSONC silently folds). The content merge turns it into a conflict: two
+    sides that no longer parse as the same structure cannot be merged key by key
+    (``docs/design/03-manifest.md``).
+    """
+
+
 class GitError(DomainError):
     """A git plumbing command failed.
 

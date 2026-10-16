@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Literal, Protocol, runtime_checkable
 
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
+from syncintosh.core.tree import Tree
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
 # (`docs/design/04-envelope-v1.md`). A value is serialized verbatim in the HKDF `info`, so it
@@ -53,6 +54,29 @@ class MergeDriver(Protocol):
 
     def merge(self, base: str, local: str, remote: str) -> TextMerge:
         """Return the merged text and whether a conflict remains."""
+        ...
+
+
+@runtime_checkable
+class ContentAdapter(Protocol):
+    """Parses one format to a typed tree and renders a merged tree back to text.
+
+    The adapter is where a format's *key-level* rules live: it turns text into the comparable
+    :class:`~syncintosh.core.tree.Tree` the merge engine consumes, and turns the merged tree
+    back into a file that preserves the original's comments, key order, and formatting
+    (``AGENTS.md`` §2.5). ``render`` takes the local text as a template so a format that cannot
+    be re-serialized faithfully (JSONC) is edited minimally instead of rewritten.
+
+    Implementations live in ``adapters``; ``core`` and ``services`` depend only on this port
+    (``AGENTS.md`` §2.2).
+    """
+
+    def parse(self, text: str) -> Tree:
+        """Parse `text` into a typed tree, or raise when the text is not this format."""
+        ...
+
+    def render(self, tree: Tree, template: str) -> str:
+        """Render `tree` into text, using `template` as the unchanged baseline to edit."""
         ...
 
 
