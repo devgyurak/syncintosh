@@ -185,10 +185,13 @@ class Manifest:
         return cls.create(schema=MANIFEST_SCHEMA, key_generation=key_generation, records={})
 
 
-def _tracking_key(record: ManifestRecord) -> tuple[Scope, str | None, str]:
-    # The path is folded (NFC + casefold) so `.Zshrc` and `.zshrc` name one tracked file on a
-    # case-insensitive APFS; the record keeps the exact path it was created with.
-    return (record.scope, record.machine, collision_key(record.path))
+def tracking_key(scope: Scope, machine: str | None, path: str) -> tuple[Scope, str | None, str]:
+    """The identity a tracked file keeps: scope, machine, and the **folded** path.
+
+    The fold (NFC + casefold) is why `.Zshrc` and `.zshrc` are one tracked file on a
+    case-insensitive APFS; `track` and the record merge both compare through this key.
+    """
+    return (scope, machine, collision_key(path))
 
 
 def track(
@@ -209,9 +212,16 @@ def track(
     A freshly minted ID is re-checked here — a bad or colliding ID is a source-contract bug, a
     `ValueError`, not a corrupt manifest.
     """
-    key = (scope, machine, collision_key(path))
-    existing = next((record for record in manifest.records.values() if _tracking_key(record) == key), None)
-    file_id = existing.file_id if existing is not None else _mint_file_id(manifest, source)
+    key = tracking_key(scope, machine, path)
+    existing = next(
+        (
+            record
+            for record in manifest.records.values()
+            if tracking_key(record.scope, record.machine, record.path) == key
+        ),
+        None,
+    )
+    file_id = existing.file_id if existing is not None else mint_file_id(manifest.records, source)
     record = ManifestRecord.create(
         file_id=file_id,
         path=path,
@@ -225,10 +235,15 @@ def track(
     return Manifest.create(schema=manifest.schema, key_generation=manifest.key_generation, records=records)
 
 
-def _mint_file_id(manifest: Manifest, source: FileIdSource) -> str:
+def mint_file_id(records: Mapping[str, ManifestRecord], source: FileIdSource) -> str:
+    """A fresh file ID that no record in `records` already uses.
+
+    A malformed or already-used ID is a source-contract bug — the fix is the `FileIdSource`, not
+    the manifest — so it raises `ValueError` rather than a corrupt-manifest error.
+    """
     file_id = source.new_file_id()
     if not isinstance(file_id, str) or not is_file_id(file_id):
         raise ValueError(f"the file ID source returned a malformed id: {file_id!r}")
-    if file_id in manifest.records:
+    if file_id in records:
         raise ValueError(f"the file ID source returned an id already in the manifest: {file_id!r}")
     return file_id
