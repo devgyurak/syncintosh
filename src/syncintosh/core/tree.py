@@ -134,8 +134,8 @@ class Tree:
     def to_value(self) -> object:
         """Rebuild the nested JSON value this tree came from.
 
-        The inverse of :func:`tree_from_value`, used by a caller that needs the plain document
-        back (the ``merge`` command before a format adapter exists).
+        The inverse of :func:`tree_from_value`, for a caller that needs the plain document back
+        (a debug dump or a test that compares against the source value).
         """
         if () in self._entries:
             return _node_to_value(self._entries[()])

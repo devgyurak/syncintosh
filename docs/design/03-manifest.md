@@ -75,8 +75,11 @@ A record carries metadata **and** the content digest, so there are two merges, i
 1. **Record merge** (this section). Keyed by `file_id`, comparing canonical record bytes. It
    decides which records survive and which are in conflict.
 2. **Content merge** (the adapter). For every surviving record whose content changed on at
-   least one side, the adapter runs a key-level 3-way merge on the plaintext:
-   `merge(base_plain, local_plain, remote_plain)`.
+   least one side, `services` selects a `ContentAdapter` by `record.format` and runs
+   `parse -> merge_tree -> render` on the plaintext; the rendered text is re-parsed and compared
+   with the merged tree, and a parse or round-trip failure is a conflict. A format with no
+   structural adapter falls back to the line-level `MergeDriver` port, whose unreconcilable
+   verdict is a whole-file conflict.
 
 Splitting them is not tidiness. Because `sha256` is part of the record, a content-only change
 *is* a record change — so a side that edits a file and a side that deletes it collide as
@@ -86,8 +89,9 @@ be byte-identical on both sides ("unchanged") and the edit would vanish with no 
 But the record merge must **not** try to decide the content itself. It cannot tell "the other
 side changed a key I did not touch" from "both sides changed the same key", so it routes every
 content change into the content merge, and only the content merge may declare a content
-conflict. That is where [`AGENTS.md` §2.9](../../AGENTS.md) applies: the text adapter
-implements the key-level rules and calls the line-level `MergeDriver` port.
+conflict. That is where [`AGENTS.md` §2.9](../../AGENTS.md) applies: a structural adapter
+(`adapters/jsonc.py`) turns the text into the key-path tree `core/merge.py` merges and renders
+it back, and a format without one uses the line-level `MergeDriver` port instead.
 
 ## Record-level merge
 

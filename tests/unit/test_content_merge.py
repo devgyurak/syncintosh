@@ -196,8 +196,10 @@ def test_a_both_sides_conflict_on_one_key_is_a_conflict() -> None:
         b'{"a": 1}', b'{"a": 2}', b'{"a": 3}', RecordingDriver(TextMerge(text="", conflicted=False)), adapter
     )
 
-    # then
-    assert result == ContentMerge(data=b'{"a": 2}', conflicted=True)
+    # then — the colliding path is reported (never its values) and the local side is the candidate
+    assert result.data == b'{"a": 2}'
+    assert result.conflicted is True
+    assert result.conflict_paths == (("a",),)
 
 
 def test_a_render_that_does_not_round_trip_is_a_conflict() -> None:

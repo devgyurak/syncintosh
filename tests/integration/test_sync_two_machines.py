@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
@@ -27,6 +28,7 @@ from syncintosh.core.errors import (
     UnknownKeyGeneration,
 )
 from syncintosh.core.ledger import AdoptChoice
+from syncintosh.core.manifest import FileFormat
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.ports import LiveFiles, PushOutcome
 from syncintosh.core.repo import COMMITMENTS_PATH, object_path
@@ -130,17 +132,19 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str) -> Machine:
     )
 
 
-def _config_items(machine: Machine, path: str = ZSH) -> SyncConfig:
+def _config_items(machine: Machine, path: str = ZSH, fmt: FileFormat = "text") -> SyncConfig:
     return SyncConfig.create(
         remote=machine.remote,
         machine_id=machine.machine_id,
-        items=(LocalItem.create(path=path, preset="zsh", scope="common", format="text"),),
+        items=(LocalItem.create(path=path, preset="zsh", scope="common", format=fmt),),
     )
 
 
-def _initialize(machine: Machine, *, import_from: Path | None = None, path: str = ZSH) -> None:
+def _initialize(
+    machine: Machine, *, import_from: Path | None = None, path: str = ZSH, fmt: FileFormat = "text"
+) -> None:
     machine.home.mkdir(parents=True, exist_ok=True)
-    save_config(_config_items(machine, path=path), machine.config_file)
+    save_config(_config_items(machine, path=path, fmt=fmt), machine.config_file)
     transport = GitCLITransport(machine.repo)
     if import_from is None:
         transport.init()
@@ -171,6 +175,7 @@ def _run(
     adopt: AdoptChoice | None = None,
     transport: GitCLITransport | None = None,
     live: LiveFiles | None = None,
+    adapters: dict | None = None,
 ) -> SyncReport:
     active = transport or GitCLITransport(machine.repo)
     return sync(
@@ -181,6 +186,7 @@ def _run(
         store=machine.store,
         codec=machine.codec,
         driver=TextMergeDriver(),
+        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         live=live or SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
@@ -228,15 +234,23 @@ def _read_live(machine: Machine) -> bytes | None:
     return machine.zshrc.read_bytes() if machine.zshrc.exists() else None
 
 
-def _pair(tmp_path: Path, make_store, content: bytes = b"one\ntwo\nthree\n") -> tuple[Machine, Machine, str]:
+def _pair(
+    tmp_path: Path,
+    make_store,
+    content: bytes = b"one\ntwo\nthree\n",
+    *,
+    path: str = ZSH,
+    fmt: FileFormat = "text",
+) -> tuple[Machine, Machine, str]:
     """Two machines in sync on `content`: A published it, B cloned and applied it."""
     remote = _bare_remote(tmp_path)
     a = _machine(tmp_path, make_store, "machine-a", remote)
-    _initialize(a)
-    _write_live(a, content)
+    _initialize(a, path=path, fmt=fmt)
+    _write_file(a, path, content)
     _run(a)
     b = _machine(tmp_path, make_store, "machine-b", remote)
-    _initialize(b, import_from=a.recovery)
+    _initialize(b, import_from=a.recovery, path=path, fmt=fmt)
+    (b.home / path).parent.mkdir(parents=True, exist_ok=True)
     _run(b)
     return a, b, remote
 
@@ -841,3 +855,67 @@ def test_the_ledger_holds_no_plaintext_and_no_real_path(tmp_path, memory_key_sto
     # then — the ledger is digests only (AGENTS.md §3.3)
     assert "one" not in text
     assert ZSH not in text
+
+
+# --------------------------------------------------------------------------- jsonc
+
+
+JSONC = "Library/Application Support/Code/User/settings.json"
+JSONC_BASE = '{\n  // editor\n  "editor.fontSize": 13,\n  "editor.tabSize": 4\n}\n'
+
+
+def _read_jsonc(machine: Machine) -> str:
+    return (machine.home / JSONC).read_text(encoding="utf-8")
+
+
+def test_jsonc_different_keys_merge_and_comments_survive(tmp_path, memory_key_store) -> None:
+    # given — two machines in sync on a commented settings file
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+
+    # when — each changes a different key
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace('"editor.tabSize": 4', '"editor.tabSize": 2'), encoding="utf-8")
+    report = _run(b)
+    _run(a)
+
+    # then — both changes land, the comment is kept, and nothing conflicted
+    assert report.has_conflicts is False
+    merged = _read_jsonc(b)
+    assert '"editor.fontSize": 15' in merged
+    assert '"editor.tabSize": 2' in merged
+    assert "// editor" in merged
+
+
+def test_jsonc_same_key_on_both_sides_stops_the_sync(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+
+    # when — B edits the same key A changed
+    local = JSONC_BASE.replace("13", "12")
+    (b.home / JSONC).write_text(local, encoding="utf-8")
+    report = _run(b)
+
+    # then — the conflict names the key path and never its values, and B's file is untouched
+    assert report.has_conflicts is True
+    assert report.conflicts[0].detail.endswith("editor.fontSize")
+    assert "15" not in report.conflicts[0].detail
+    assert _read_jsonc(b) == local
+
+
+def test_jsonc_that_does_not_parse_is_a_conflict(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+
+    # when — B's file is malformed (no closing brace)
+    bad = '{\n  "editor.fontSize": 12\n'
+    (b.home / JSONC).write_text(bad, encoding="utf-8")
+    report = _run(b)
+
+    # then
+    assert report.has_conflicts is True
+    assert _read_jsonc(b) == bad

@@ -121,3 +121,14 @@ def test_importing_the_cli_does_not_import_a_heavy_dependency() -> None:
 
     # then — CLI startup stays fast (AGENTS.md §4)
     assert result.stdout.strip() == ""
+
+
+def test_importing_the_cli_does_not_import_the_jsonc_adapter() -> None:
+    # given — the jsonc adapter is only needed inside `merge`/`sync`, not at import time
+    code = "import sys, syncintosh.cli.main; print('syncintosh.adapters.jsonc' in sys.modules)"
+
+    # when
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+
+    # then
+    assert result.stdout.strip() == "False"
