@@ -111,3 +111,27 @@ class ContentDigestMismatch(DomainError):
         self.expected = expected
         self.actual = actual
         super().__init__(f"content for {file_id} has sha256 {actual}, expected {expected}")
+
+
+class GitError(DomainError):
+    """A git plumbing command failed.
+
+    The transport raises this instead of leaking a `subprocess.CalledProcessError`, so a caller
+    can report "git failed" without importing the subprocess layer (``AGENTS.md`` §2.2).
+    """
+
+
+class SyncLockError(DomainError):
+    """The advisory sync lock could not be taken within the bounded wait.
+
+    Deliberately a domain error rather than a bare timeout: the user action is "another sync is
+    running — wait for it", not "fix a bug" (``docs/design/01-sync-model.md`` step 1).
+    """
+
+
+class PendingConflict(DomainError):
+    """A previous sync stopped with unresolved conflicts, so a new merge must not start.
+
+    Only `resolve` (and `rollback`) may run until it is cleared
+    (``docs/design/01-sync-model.md``).
+    """

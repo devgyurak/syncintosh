@@ -8,12 +8,19 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal, Protocol, runtime_checkable
+
+from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
 # (`docs/design/04-envelope-v1.md`). A value is serialized verbatim in the HKDF `info`, so it
 # is a `Literal`, never an `Enum` (``AGENTS.md`` §4).
 Domain = Literal["object", "manifest", "key-wrap"]
+
+# How a push attempt ended (``docs/design/01-sync-model.md`` step 12–13). A non-fast-forward
+# is retried against the fresh remote; anything else is reported.
+PushOutcome = Literal["ok", "non-fast-forward", "rejected"]
 
 
 @runtime_checkable
@@ -21,11 +28,12 @@ class MergeDriver(Protocol):
     """Line-level three-way merge.
 
     `merge3` and `git merge-file` are not stdlib, so they sit behind this port; `core` keeps
-    only the key-level rules (``AGENTS.md`` §2.9).
+    only the key-level rules (``AGENTS.md`` §2.9). `conflicted` is the merge's own verdict, so
+    no caller re-derives it from markers.
     """
 
-    def merge(self, base: str, local: str, remote: str) -> str:
-        """Return the merged text, or text containing conflict markers."""
+    def merge(self, base: str, local: str, remote: str) -> TextMerge:
+        """Return the merged text and whether a conflict remains."""
         ...
 
 
@@ -110,10 +118,159 @@ class SecretScanner(Protocol):
     """The secret scan that gates the encrypt boundary.
 
     Nothing reaches `Cipher.seal` without passing this (``docs/design/01-sync-model.md``,
-    ``AGENTS.md`` §3.4). The implementation lands with #7; until then only tests provide one,
-    and no no-op default exists (decision 3 of the #3 plan).
+    ``AGENTS.md`` §3.4). A refusal names the location only, never the matched bytes
+    (``AGENTS.md`` §4).
     """
 
     def scan(self, plaintext: bytes, *, subject: str) -> None:
         """Raise `SecretScanError` when a secret is found; return `None` when clean."""
+        ...
+
+
+@runtime_checkable
+class GitTransport(Protocol):
+    """The git plumbing the sync cycle uses, bound to one working tree.
+
+    Only the commands the cycle needs, and never `pull`, `merge`, or `rebase`
+    (``docs/design/01-sync-model.md``): sync decrypts both sides, merges the plaintext, and
+    builds the resulting tree itself with `commit`. `fetch` never passes `--depth`, because
+    `merge-base` needs history.
+    """
+
+    def init(self) -> None:
+        """Create the repository in the transport's working tree. Raises on failure."""
+        ...
+
+    def clone(self, remote: str) -> None:
+        """Clone `remote` into the transport's working tree, with full history."""
+        ...
+
+    def fetch(self, remote: str, branch: str) -> None:
+        """Fetch `branch` from `remote` (never shallow)."""
+        ...
+
+    def head(self) -> str | None:
+        """Return the current commit id, or `None` on an unborn branch."""
+        ...
+
+    def resolve(self, rev: str) -> str | None:
+        """Return the commit id `rev` names, or `None` when it does not exist."""
+        ...
+
+    def merge_bases(self, left: str, right: str) -> tuple[str, ...]:
+        """Return every merge base of `left` and `right`, sorted; empty when unrelated."""
+        ...
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        """True when `ancestor` is reachable from `descendant`."""
+        ...
+
+    def read_blob(self, commit: str, relpath: str) -> bytes | None:
+        """Return the blob at `relpath` in `commit`, or `None` when it is absent."""
+        ...
+
+    def commit(self, parents: tuple[str, ...], message: str) -> str:
+        """Stage the working tree and create a commit with `parents`; return its id.
+
+        One parent is the collect commit, two are the merge commit
+        (``docs/design/01-sync-model.md`` step 5 and 12). The working tree is staged as-is, so
+        the caller has already written exactly the desired repo state.
+        """
+        ...
+
+    def update_ref(self, branch: str, commit: str) -> None:
+        """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
+        ...
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        """Push `commit` to `branch` on `remote`, classified for the retry rule."""
+        ...
+
+
+@runtime_checkable
+class SyncLock(Protocol):
+    """The advisory lock every mutating operation shares.
+
+    Two callers (the daemon and the CLI) must not interleave, and a rotation must not race a
+    sync (``docs/design/01-sync-model.md`` step 1). `acquire` waits for a bounded time and
+    raises `SyncLockError` instead of racing when the deadline passes. No I/O in the
+    constructor (``AGENTS.md`` §2.6).
+    """
+
+    def acquire(self) -> None:
+        """Take the lock, or raise `SyncLockError` after the bounded wait."""
+        ...
+
+    def release(self) -> None:
+        """Release the lock. Releasing a lock this process does not hold is not an error."""
+        ...
+
+
+@runtime_checkable
+class LedgerStore(Protocol):
+    """The apply ledger, read and written whole.
+
+    `applied.json` lives outside the repo (``AGENTS.md`` §3.3) and is settled at the end of
+    every successful cycle (``docs/design/01-sync-model.md``). `load` returns an empty map when
+    no ledger exists yet.
+    """
+
+    def load(self) -> Mapping[str, LedgerEntry]:
+        """Return the per-file baselines, keyed by `file_id`."""
+        ...
+
+    def save(self, entries: Mapping[str, LedgerEntry]) -> None:
+        """Replace the ledger with `entries`. Raises on failure."""
+        ...
+
+
+@runtime_checkable
+class PendingStore(Protocol):
+    """The unresolved merge a stopped sync leaves behind, outside the repo.
+
+    While a pending state exists, `sync` refuses to start a new merge; only `resolve` may run
+    (``docs/design/01-sync-model.md``). The plaintext of the unresolved records lives here, and
+    nowhere else on disk (``AGENTS.md`` §3.3).
+    """
+
+    def is_pending(self) -> bool:
+        """True when a previous sync stopped with unresolved conflicts."""
+        ...
+
+    def record(self, state: PendingState) -> None:
+        """Write `state` and its unresolved plaintexts. Raises on failure."""
+        ...
+
+    def clear(self) -> None:
+        """Remove the pending state, if any. Raises on failure."""
+        ...
+
+
+@runtime_checkable
+class LiveFiles(Protocol):
+    """The user's real files, addressed by absolute path.
+
+    `apply` writes live files through this port after the push, and the collection step reads
+    them, so `services` never opens a path from an untrusted manifest directly
+    (``docs/design/03-manifest.md``). `is_symlink` lets `apply` refuse to write through a link.
+    """
+
+    def read(self, path: str) -> bytes | None:
+        """Return the file's bytes, or `None` when it does not exist."""
+        ...
+
+    def write(self, path: str, data: bytes) -> None:
+        """Write `data`, creating parent directories. Raises on failure."""
+        ...
+
+    def exists(self, path: str) -> bool:
+        """True when `path` exists (a symlink counts as existing)."""
+        ...
+
+    def is_symlink(self, path: str) -> bool:
+        """True when `path` is a symbolic link."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Remove the file if present. Raises on any other failure."""
         ...
