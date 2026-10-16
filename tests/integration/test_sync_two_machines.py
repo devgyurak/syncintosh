@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.adapters.text import TextAdapter
+from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
@@ -185,7 +185,7 @@ def _run(
         scanner=PatternSecretScanner(),
         store=machine.store,
         codec=machine.codec,
-        driver=TextAdapter(),
+        driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         live=live or SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),

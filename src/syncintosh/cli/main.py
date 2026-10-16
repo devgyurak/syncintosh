@@ -155,7 +155,7 @@ def init(
 def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote, for a first-sight file")) -> None:
     """Collect, merge, publish, and apply. Exits 1 when conflicts remain."""
     from syncintosh.adapters.jsonc import JsoncAdapter
-    from syncintosh.adapters.text import TextAdapter
+    from syncintosh.adapters.text_merge import TextMergeDriver
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
@@ -184,7 +184,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             scanner=PatternSecretScanner(),
             store=store,
             codec=KeyMaterial(),
-            driver=TextAdapter(),
+            driver=TextMergeDriver(),
             adapters={"jsonc": JsoncAdapter()},
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
