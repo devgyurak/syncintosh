@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 
 import pytest
@@ -80,8 +79,8 @@ def test_a_failed_write_keeps_the_previous_file_and_leaves_no_temp(tmp_path, mon
 def test_a_successful_write_flushes_to_storage_and_syncs_the_directory(tmp_path, monkeypatch) -> None:
     # given — the two durability barriers are instrumented
     calls: list[str] = []
-    monkeypatch.setattr(repo_files, "_flush_to_storage", lambda descriptor: calls.append("storage"))
-    monkeypatch.setattr(repo_files, "_sync_directory", lambda path: calls.append("dir"))
+    monkeypatch.setattr(repo_files, "flush_to_storage", lambda descriptor: calls.append("storage"))
+    monkeypatch.setattr(repo_files, "sync_directory", lambda path: calls.append("dir"))
     repo = FileRepo(tmp_path)
 
     # when
@@ -89,32 +88,3 @@ def test_a_successful_write_flushes_to_storage_and_syncs_the_directory(tmp_path,
 
     # then
     assert calls == ["storage", "dir"]
-
-
-def test_flush_to_storage_is_a_noop_without_fullfsync(tmp_path, monkeypatch) -> None:
-    # given — a platform whose fcntl has no F_FULLFSYNC (Linux)
-    monkeypatch.delattr(fcntl, "F_FULLFSYNC", raising=False)
-    descriptor = os.open(tmp_path / "scratch", os.O_RDWR | os.O_CREAT)
-
-    # when
-    result = repo_files._flush_to_storage(descriptor)
-
-    # then
-    assert result is None
-    os.close(descriptor)
-
-
-def test_flush_to_storage_tolerates_a_refusing_filesystem(tmp_path, monkeypatch) -> None:
-    # given — F_FULLFSYNC exists but the filesystem rejects it
-    def _refuse(descriptor: int, command: int) -> None:
-        raise OSError("operation not supported")
-
-    monkeypatch.setattr(fcntl, "fcntl", _refuse)
-    descriptor = os.open(tmp_path / "scratch", os.O_RDWR | os.O_CREAT)
-
-    # when
-    result = repo_files._flush_to_storage(descriptor)
-
-    # then
-    assert result is None
-    os.close(descriptor)
