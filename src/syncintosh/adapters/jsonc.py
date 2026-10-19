@@ -90,6 +90,10 @@ class _Parser:
     def __init__(self, text: str) -> None:
         self._text = text
         self._pos = 0
+        # Every comment this parse skips, in order. The renderer edits the *text*, so it needs to
+        # know where its syntax is: re-finding `//` or `/*` with a search is what read a documented
+        # glob inside a comment as syntax, and deleted the member after it.
+        self.comments: list[_Span] = []
 
     def parse(self) -> _AstNode:
         self._skip()
@@ -109,16 +113,19 @@ class _Parser:
         length = len(text)
         while self._pos < length:
             char = text[self._pos]
+            start = self._pos
             if char in _WHITESPACE:
                 self._pos += 1
             elif text.startswith("//", self._pos):
                 newline = text.find("\n", self._pos)
                 self._pos = length if newline == -1 else newline
+                self.comments.append(_Span(start, self._pos))
             elif text.startswith("/*", self._pos):
                 end = text.find("*/", self._pos + 2)
                 if end == -1:
                     raise ContentParseError("unterminated block comment")
                 self._pos = end + 2
+                self.comments.append(_Span(start, self._pos))
             else:
                 return
 
@@ -293,17 +300,19 @@ class JsoncAdapter:
             raise ContentParseError(str(exc)) from exc
 
     def _render(self, tree: Tree, template: str) -> str:
-        root = _Parser(template).parse()
+        parser = _Parser(template)
+        root = parser.parse()
         if _tree_of(root) == tree:
             return template
-        return _Diff(tree, root, template).apply()
+        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments))).apply()
 
 
 class _Diff:
     """Computes the minimal edits that turn the template's AST into the merged tree."""
 
-    def __init__(self, tree: Tree, root: _AstNode, text: str) -> None:
+    def __init__(self, tree: Tree, root: _AstNode, text: str, comments: _Comments) -> None:
         self._source = text
+        self._comments = comments
         self._root = root
         self._leaves = dict(tree.entries)
         self._kids: dict[KeyPath, list[str]] = {}
@@ -333,7 +342,7 @@ class _Diff:
                 # out in place — line by line, or by splice — rather than rewriting the span, so a
                 # comment above a member and the object's own layout survive (`_rewrite` would
                 # refuse the comment anyway).
-                if _clean_multiline_object(self._source, node):
+                if _clean_multiline_object(self._source, node, self._comments):
                     self._object(node, path, edits)
                     return
                 if self._splice_inline(node, path, edits):
@@ -345,7 +354,7 @@ class _Diff:
             # The tree wants an object here but the template has something else: rewrite it.
             self._rewrite(node, self._subtree(path, len(path)), edits)
             return
-        if _clean_multiline_object(self._source, node):
+        if _clean_multiline_object(self._source, node, self._comments):
             self._object(node, path, edits)
             return
         if self._splice_inline(node, path, edits):
@@ -371,7 +380,7 @@ class _Diff:
             return None
         if self._source[node.span.start] != "{" or self._source[node.span.end - 1] != "}":
             return None
-        if _has_comment(self._source, node.span.start + 1, node.span.end - 1):
+        if self._comments.overlaps(node.span.start + 1, node.span.end - 1):
             return None
         return self._source[node.span.start + 1 : node.span.end - 1]
 
@@ -491,11 +500,10 @@ class _Diff:
         position = _line_start(self._source, node.members[0].span.start)
         while position > 0:
             previous = _line_start(self._source, position - 1)
-            line = self._source[previous : position - 1]
-            # A line inside a block comment can start with `//`, so a line that carries a block
-            # marker stops the walk: stepping over it would put the block inside the comment, where
-            # it parses as nothing and the render stops matching the tree.
-            if not line.strip().startswith("//") or "/*" in line or "*/" in line:
+            # A comment on its own line above the member documents that member, so the block goes
+            # above the comment. `is_own_line_comment` answers from the parse rather than by reading
+            # the line, which would call a `/*` inside a `//` comment a block comment and stop early.
+            if not self._comments.is_own_line_comment(previous, position - 1):
                 break
             position = previous
         return position
@@ -507,7 +515,7 @@ class _Diff:
         so a re-parse check cannot notice them gone. Refusing turns a comment loss into a
         conflict, which the caller surfaces rather than publishing a stripped file.
         """
-        if _has_comment(self._source, node.span.start, node.span.end):
+        if self._comments.overlaps(node.span.start, node.span.end):
             raise ContentParseError("cannot rewrite a value that contains a comment")
         edits.append(_Edit(node.span.start, node.span.end, text))
 
@@ -523,9 +531,10 @@ class _Diff:
 
     def _object(self, node: _ObjectNode, path: KeyPath, edits: list[_Edit]) -> None:
         desired = self._children(path)
+        wanted = set(desired)
         by_key = {member.key: member for member in node.members}
         index_of = {member.key: index for index, member in enumerate(node.members)}
-        trailing = _has_trailing_comma(self._source, node)
+        trailing = _has_trailing_comma(self._comments, node)
 
         pending: list[str] = []
         anchor: _MemberNode | None = None
@@ -537,7 +546,7 @@ class _Diff:
                 pending.append(self._member_line((*path, key), len(path)))
                 continue
             if pending:
-                self._insert(edits, anchor, node, pending, trailing=trailing)
+                self._insert(edits, anchor, node, pending, wanted=wanted, trailing=trailing)
                 if anchor_index is not None:
                     insert_anchors.add(anchor_index)
                 pending = []
@@ -545,7 +554,7 @@ class _Diff:
             anchor_index = index_of[key]
             self._render(member.value, (*path, key), edits)
         if pending:
-            self._insert(edits, anchor, node, pending, trailing=trailing)
+            self._insert(edits, anchor, node, pending, wanted=wanted, trailing=trailing)
             if anchor_index is not None:
                 insert_anchors.add(anchor_index)
 
@@ -558,16 +567,21 @@ class _Diff:
         node: _ObjectNode,
         pending: list[str],
         *,
+        wanted: set[str],
         trailing: bool,
     ) -> None:
         """Insert a run of newly added members, after `anchor` or before the first existing member.
 
-        Whether the block needs a *trailing* comma is decided by what follows it **in the file**, not
-        by where it sits in the tree: the tree's order can differ from the document's, and a block put
-        after an anchor that has members below it is followed by one of them — leaving its comma out
-        there produces `{ "b": 2, "c": 3 "a": 1 }`, which does not parse.
+        Whether the block needs a *trailing* comma is decided by what follows it **in the file among
+        the members that survive**, because a removed member is no longer there to be separated from:
+        reading the original neighbour put a comma back into `{"psFormat": "b", "imagesFormat": "table"}`
+        when the second member was deleted, and Docker's strict JSON parser refuses that file.
         """
-        follows = bool(node.members) if anchor is None else anchor is not node.members[-1]
+        if anchor is None:
+            follows = any(member.key in wanted for member in node.members)
+        else:
+            following = node.members[node.members.index(anchor) + 1 :]
+            follows = any(member.key in wanted for member in following)
         last = len(pending) - 1
         block = "".join(
             member + ("," if index < last or follows or trailing else "") + self._newline
@@ -582,11 +596,11 @@ class _Diff:
             # so a genuinely empty `{ ... }` still takes the block just above its brace.
             position = self._open_position(node)
         else:
-            if _comma_after(self._source, anchor) is None:
+            if _comma_after(self._comments, anchor) is None:
                 # The anchor is now followed by a member: it needs the comma it never had.
                 edits.append(_Edit(anchor.value.span.end, anchor.value.span.end, ","))
             position = _past_block_comment(
-                self._source, anchor.value.span.end, _next_line_start(self._source, anchor.value.span.end)
+                self._comments, anchor.value.span.end, _next_line_start(self._source, anchor.value.span.end)
             )
         edits.append(_Edit(position, position, block))
 
@@ -613,10 +627,10 @@ class _Diff:
         for index in deleted:
             member = node.members[index]
             start = _line_start(text, member.span.start)
-            end = _line_end_outside_comment(text, start, _next_line_start(text, member.value.span.end))
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, member.value.span.end))
             edits.append(_Edit(start, end, ""))
         if drop_comma and last_survivor is not None:
-            comma = _comma_after(text, node.members[last_survivor])
+            comma = _comma_after(self._comments, node.members[last_survivor])
             if comma is not None:
                 edits.append(_Edit(comma, comma + 1, ""))
 
@@ -691,7 +705,7 @@ def _detect_style(text: str, root: _AstNode) -> tuple[str, str]:
     return indent, newline
 
 
-def _clean_multiline_object(text: str, node: _ObjectNode) -> bool:
+def _clean_multiline_object(text: str, node: _ObjectNode, comments: _Comments) -> bool:
     """True when every member is alone on its line and the closing brace is on its own line.
 
     Only then can a member be spliced by line; anything else (one line, two members on a line,
@@ -706,36 +720,20 @@ def _clean_multiline_object(text: str, node: _ObjectNode) -> bool:
     for member in node.members:
         if text[_line_start(text, member.span.start) : member.span.start].strip() != "":
             return False
-        if not _member_tail_clean(text, member.value.span.end):
+        if not _member_tail_clean(comments, member.value.span.end):
             return False
     close = node.span.end - 1
     return text[_line_start(text, close) : close].strip() == ""
 
 
-def _member_tail_clean(text: str, value_end: int) -> bool:
+def _member_tail_clean(comments: _Comments, value_end: int) -> bool:
     """True when what follows a value to end of line is only a comma, comments, and whitespace."""
-    length = len(text)
-    pos = value_end
-    while True:
-        spaces = _skip_spaces(text, pos)
-        if text.startswith("/*", spaces):
-            end = text.find("*/", spaces + 2)
-            if end == -1:
-                return False
-            pos = end + 2
-            continue
-        if spaces < length and text[spaces] == ",":
-            pos = spaces + 1
-            continue
-        pos = spaces
-        break
-    if text.startswith("//", pos):
-        newline = text.find("\n", pos)
-        pos = length if newline == -1 else newline
-    pos = _skip_spaces(text, pos)
-    while pos < length and text[pos] == "\r":
-        pos += 1
-    return pos >= length or text[pos] == "\n"
+    text = comments.text
+    line_end = text.find("\n", value_end)
+    line_end = len(text) if line_end == -1 else line_end
+    # The comments are masked out with the parse's own spans, so a `, // hides **/*.map` tail reads
+    # as a comma rather than as text that only looks like syntax.
+    return comments.without_comments(value_end, line_end).strip() in ("", ",")
 
 
 def _skip_spaces(text: str, pos: int) -> int:
@@ -744,26 +742,61 @@ def _skip_spaces(text: str, pos: int) -> int:
     return pos
 
 
-def _has_comment(text: str, start: int, end: int) -> bool:
-    """True when the ``[start, end)`` span holds a `//` or `/* */` comment, string-aware."""
-    pos = start
-    while pos < end:
-        char = text[pos]
-        if char == '"':
-            pos += 1
-            while pos < end:
-                if text[pos] == "\\":
-                    pos += 2
-                    continue
-                if text[pos] == '"':
-                    pos += 1
-                    break
-                pos += 1
-        elif text.startswith("//", pos) or text.startswith("/*", pos):
-            return True
-        else:
-            pos += 1
-    return False
+@dataclass(frozen=True)
+class _Comments:
+    """The comment spans one parse found, so nothing later has to look for syntax again.
+
+    Every question the renderer asks about comments — does this span hold one, does one straddle this
+    offset, what is the next real character, is this line only a comment — is answered from the spans
+    the *parser* recorded, never by searching the text. A search cannot tell a comment from a string,
+    and a settings file documents path globs in its comments.
+    """
+
+    text: str
+    spans: tuple[_Span, ...]
+
+    def overlaps(self, start: int, end: int) -> bool:
+        """True when a comment starts, ends, or lies inside ``[start, end)``."""
+        return any(span.start < end and span.end > start for span in self.spans)
+
+    def closes_after(self, start: int, limit: int) -> int | None:
+        """The end of a comment opening in ``[start, limit)`` and closing at or after `limit`."""
+        for span in self.spans:
+            if start <= span.start < limit and span.end > limit:
+                return span.end
+        return None
+
+    def next_meaningful(self, position: int) -> int:
+        """The offset of the first character after `position` that is not in a comment or a space."""
+        cursor = position
+        while True:
+            while cursor < len(self.text) and self.text[cursor] in _WHITESPACE:
+                cursor += 1
+            span = next((item for item in self.spans if item.start <= cursor < item.end), None)
+            if span is None:
+                return cursor
+            cursor = span.end
+
+    def without_comments(self, start: int, end: int) -> str:
+        """The text of ``[start, end)`` with every comment in it blanked out."""
+        pieces: list[str] = []
+        cursor = start
+        for span in self.spans:
+            if span.end <= cursor or span.start >= end:
+                continue
+            pieces.append(self.text[cursor : max(cursor, span.start)])
+            cursor = min(end, span.end)
+        pieces.append(self.text[cursor:end])
+        return "".join(pieces)
+
+    def is_own_line_comment(self, line_start: int, line_end: int) -> bool:
+        """True when the line holds nothing but whitespace and a `//` comment that ends it."""
+        if self.without_comments(line_start, line_end).strip():
+            return False
+        return any(
+            span.start >= line_start and span.end >= line_end - 1 and self.text.startswith("//", span.start)
+            for span in self.spans
+        )
 
 
 def _line_start(text: str, pos: int) -> int:
@@ -775,61 +808,20 @@ def _next_line_start(text: str, pos: int) -> int:
     return len(text) if newline == -1 else newline + 1
 
 
-def _skip_string(text: str, start: int, limit: int) -> int:
-    """The offset just past the string opening at `start`, or `limit` when it never closes."""
-    cursor = start + 1
-    while cursor < limit:
-        if text[cursor] == "\\":
-            cursor += 2
-            continue
-        if text[cursor] == '"':
-            return cursor + 1
-        cursor += 1
-    return limit
-
-
-def _straddling_comment(text: str, start: int, limit: int) -> int | None:
-    """The offset just past a `*/` that a block comment opened in `[start, limit)` closes after it.
-
-    `None` when no comment spans `limit`. A block comment can open on a member's line and close below
-    it, which is what makes "the next line" a place *inside* a comment rather than after it.
-
-    Only a comment *outside a string* counts. A settings value spells comment punctuation often — a
-    glob `**/*.pyc` next to a sibling `**/.git` is a `/*` and a `*/`, and reading those as a comment
-    deletes the wrong member, or splices one into text that only looks like a comment.
-    """
-    cursor = start
-    while cursor < limit:
-        if text[cursor] == '"':
-            cursor = _skip_string(text, cursor, limit)
-            continue
-        if text.startswith("/*", cursor):
-            closing = text.find("*/", cursor + 2)
-            if closing == -1:
-                # An unterminated comment means the text never parsed, so this cannot be reached.
-                return None
-            if closing + 2 > limit:
-                return closing + 2
-            cursor = closing + 2
-            continue
-        cursor += 1
-    return None
-
-
-def _past_block_comment(text: str, after: int, position: int) -> int:
-    """A position that is not inside a block comment opened after `after`.
+def _past_block_comment(comments: _Comments, after: int, position: int) -> int:
+    """A position that is not inside a comment opened after `after`.
 
     Splicing a member inside a comment makes it parse as nothing — or, when the comment's closing
     text is what follows, breaks the file — and the render then stops matching the tree, so a merge
     reports a conflict it had already resolved. The block goes after the comment instead, which
     leaves the comment where it was, attached to the member it documents.
     """
-    closing = _straddling_comment(text, after, position)
-    return position if closing is None else _next_line_start(text, closing)
+    closing = comments.closes_after(after, position)
+    return position if closing is None else _next_line_start(comments.text, closing)
 
 
-def _line_end_outside_comment(text: str, start: int, end: int) -> int:
-    """The end of a line deletion, extended past a block comment the line opens.
+def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
+    """The end of a line deletion, extended past a comment the line opens.
 
     A member is deleted together with its line, its comma, and a same-line comment, so cutting at the
     line's end would leave the remainder of a comment that closes below it in the file — text the
@@ -837,39 +829,25 @@ def _line_end_outside_comment(text: str, start: int, end: int) -> int:
     """
     limit = end
     while True:
-        closing = _straddling_comment(text, start, limit)
+        closing = comments.closes_after(start, limit)
         if closing is None:
             return limit
-        limit = _next_line_start(text, closing)
+        limit = _next_line_start(comments.text, closing)
 
 
-def _comma_after(text: str, member: _MemberNode) -> int | None:
+def _comma_after(comments: _Comments, member: _MemberNode) -> int | None:
     """The offset of the comma that follows `member`'s value, or `None` when there is none.
 
-    A block comment between the value and its comma is skipped, so `1 /* n */,` reads as
-    followed by a comma; a line comment ends the search (a comma cannot follow it on the line).
+    A comment between the value and its comma is skipped, so `1 /* n */,` reads as followed by a
+    comma; a line comment ends the search, because a comma cannot follow it on the line.
     """
-    pos = member.value.span.end
-    length = len(text)
-    while pos < length:
-        if text[pos] in _SPACES:
-            pos += 1
-        elif text.startswith("/*", pos):
-            end = text.find("*/", pos + 2)
-            if end == -1:
-                return None
-            pos = end + 2
-        elif text.startswith("//", pos):
-            return None
-        elif text[pos] == ",":
-            return pos
-        else:
-            return None
-    return None
+    position = comments.next_meaningful(member.value.span.end)
+    text = comments.text
+    return position if position < len(text) and text[position] == "," else None
 
 
-def _has_trailing_comma(text: str, node: _ObjectNode) -> bool:
-    return bool(node.members) and _comma_after(text, node.members[-1]) is not None
+def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
+    return bool(node.members) and _comma_after(comments, node.members[-1]) is not None
 
 
 def _apply_edits(text: str, edits: list[_Edit]) -> str:

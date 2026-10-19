@@ -627,13 +627,30 @@ _MUTATIONS = st.sampled_from(["reorder", "add", "drop", "change", "nested", "ind
 # Comments that sit *between* members, where a member edit never has to rewrite one, so a render is
 # always expected to succeed. This is the strict gate; the tolerant one below also allows comments in
 # positions a rewrite can legitimately refuse.
-_BETWEEN_COMMENTS = ["none", "before-first", "after-first", "own-line", "before-close"]
-
-_COMMENTS = st.sampled_from(
+# Where a comment can sit, and what it can say. The *text* matters as much as the position: a
+# settings file documents a path glob inside a line comment (`// hides **/*.map below`), which is a
+# `/*` and a `*/` and a `"` that must never be read as syntax.
+_COMMENT_PLACEMENTS = st.sampled_from(
     [
-        *_BETWEEN_COMMENTS,
-        "block-after-first",  # a block comment opening on a member's line and closing below it
-        "block-before-close",
+        "none",
+        "before-first",  # right after the opening brace
+        "after-first",  # at the end of the first member's line
+        "own-line",  # on its own line between two members
+        "before-close",  # above the closing brace
+    ]
+)
+
+# Every text here is one a person writes and a raw byte scan reads wrongly: a `/*` inside a `//`
+# comment, a `*/` where none closes anything, a quote that is not a string, a glob that is both. The
+# benign `// fuzz` is in the unit tests, which do not need a generator to find it.
+_COMMENT_TEXTS = st.sampled_from(
+    [
+        "// hides **/*.map below",
+        "// /* nested */",
+        "// */",
+        '// say "hi"',
+        "/* fuzz\nstill */",
+        '/* say "hi" */',
     ]
 )
 
@@ -645,18 +662,17 @@ _LAYOUT_FIELDS = {
     "pad": st.booleans(),
 }
 
-_LAYOUT = st.fixed_dictionaries({**_LAYOUT_FIELDS, "comment": _COMMENTS})
+# An indent, so a comment between two *root* members can be placed unambiguously — an empty indent
+# makes a nested member's line look exactly like a root one, which puts a comment inside a value.
+_LAYOUT_FIELDS_INDENTED = {**_LAYOUT_FIELDS, "indent": st.sampled_from(["  ", "\t", " "])}
 
-# The same layouts, restricted to a member-per-line document *with an indent* — so the comment can
-# be placed between two root members unambiguously — and to comments a member edit cannot need to
-# rewrite. An empty indent makes a nested member's line look exactly like a root one, which is how a
-# comment ends up inside a value.
-_LAYOUT_BETWEEN = st.fixed_dictionaries(
-    {
-        **_LAYOUT_FIELDS,
-        "indent": st.sampled_from(["  ", "\t", " "]),
-        "comment": st.sampled_from(_BETWEEN_COMMENTS),
-    }
+# The same fields as a strategy, for a property that draws its comments separately.
+_LAYOUT_INDENTED = st.fixed_dictionaries(_LAYOUT_FIELDS_INDENTED)
+
+# Up to two comments: the shapes that broke the renderer need one whose text holds `/*` and a later
+# one that closes it, which is a document a person writes and a single comment cannot express.
+_LAYOUT = st.fixed_dictionaries(
+    {**_LAYOUT_FIELDS_INDENTED, "comments": st.lists(st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), max_size=2)}
 )
 
 
@@ -679,13 +695,13 @@ def _mutated(value, how):
     return {"d": "v"}
 
 
-def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment) -> str:
+def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comments) -> str:
     """One settings file, laid out the way this combination describes.
 
     Comments go where a member edit cannot need to rewrite one: between the *root* members, found
     through the root's own indent so a nested object's separator is never mistaken for one of them.
-    `block-after-first` is the exception — a block comment that opens on a member's line and closes
-    below it, which the tolerant property allows to refuse.
+    The text may be a `//` comment that *contains* `/*`, `*/`, or a quote — a path glob documented in
+    a comment — which is syntax only where the parser says it is.
     """
     text = json.dumps(value, indent=indent, separators=separators, ensure_ascii=False)
     if pad and "\n" not in text and text[0] in "{[":
@@ -700,21 +716,18 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
         line_start = body.rfind("\n")
         cut = len(body) - 1 if line_start == -1 else line_start
         text = body[:cut] + "," + body[cut:] + text[len(body) :]
-    if isinstance(value, dict) and value and "\n" in text:
+    for placement, comment_text in comments:
+        if not (isinstance(value, dict) and value and "\n" in text) or placement == "none":
+            continue
         unit = indent if isinstance(indent, str) else ""
         root_comma = ",\n" + unit + '"'
         head, found, _ = text.rpartition("\n}")
         text = {
-            "none": text,
-            "before-first": text.replace("{", "{ // fuzz", 1),
-            "after-first": text.replace(root_comma, ", // fuzz\n" + unit + '"', 1),
-            "own-line": text.replace(root_comma, ",\n// fuzz\n" + unit + '"', 1),
-            "before-close": (head + "\n// fuzz" + found + text[len(head) + len(found) :]) if found else text,
-            "block-after-first": text.replace(root_comma, ", /* fuzz\nstill */\n" + unit + '"', 1),
-            "block-before-close": (head + "\n/* fuzz\nstill */" + found + text[len(head) + len(found) :])
-            if found
-            else text,
-        }[comment]
+            "before-first": text.replace("{", "{ " + comment_text, 1),
+            "after-first": text.replace(root_comma, ", " + comment_text + "\n" + unit + '"', 1),
+            "own-line": text.replace(root_comma, ",\n" + comment_text + "\n" + unit + '"', 1),
+            "before-close": (head + "\n" + comment_text + found + text[len(head) + len(found) :]) if found else text,
+        }[placement]
     return text if newline == "\n" else text.replace("\n", newline)
 
 
@@ -767,26 +780,6 @@ def test_deleting_a_member_below_a_block_comment_does_not_leave_its_tail_behind(
     assert adapter.parse(rendered) == tree
 
 
-@settings(max_examples=500, deadline=None)
-@given(
-    value=_FUZZ_VALUES,
-    how=_MUTATIONS,
-    layout=_LAYOUT_BETWEEN,
-)
-def test_a_render_of_a_commented_document_always_succeeds(value, how, layout) -> None:
-    # given — a document whose comments sit between members, and whose values may hold `/*` or `//`
-    # themselves, since a path value like `**/*.pyc` is not a comment
-    adapter = JsoncAdapter()
-    template = _fuzz_template(value, **layout)
-    tree = tree_from_value(_mutated(value, how))
-
-    # when — nothing here may refuse: a comment that a rewrite would drop is not in the way
-    rendered = adapter.render(tree, template)
-
-    # then
-    assert adapter.parse(rendered) == tree
-
-
 def test_a_glob_that_looks_like_a_comment_is_not_one() -> None:
     # given — `**/*.pyc` and `**/.git` are two members whose text, read as raw bytes, spells a block
     # comment opening and closing around them
@@ -814,3 +807,41 @@ def test_a_member_added_between_reordered_members_gets_its_comma() -> None:
     # then — it carries the comma that separates it from `a`
     assert rendered == '{\n  "b": 2,\n  "c": 3,\n  "a": 1\n}\n'
     assert adapter.parse(rendered) == tree
+
+
+@settings(max_examples=400, deadline=None)
+@given(
+    value=_FUZZ_VALUES,
+    how=st.sampled_from(["drop", "add"]),
+    comments=st.lists(st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), min_size=1, max_size=2),
+    layout=_LAYOUT_INDENTED,
+)
+def test_a_commented_document_renders_a_member_edit_cleanly(value, how, comments, layout) -> None:
+    # given — a commented document and the edit the projection actually makes: remove a noise key, or
+    # add an excluded one. The comments' *text* holds `/*`, `*/`, and quotes (a documented glob), so
+    # this is where a renderer that re-finds syntax by hand goes wrong.
+    adapter = JsoncAdapter()
+    template = _fuzz_template(value, comments=comments, **layout)
+    tree = tree_from_value(_mutated(value, how))
+
+    # when
+    rendered = adapter.render(tree, template)
+
+    # then
+    assert adapter.parse(rendered) == tree
+    assert layout["trailing"] or ",\n}" not in rendered
+
+
+def test_deleting_the_last_member_does_not_invent_a_trailing_comma() -> None:
+    # given — Docker's `config.json` shape: two members, no trailing comma, and a strict JSON reader
+    adapter = JsoncAdapter()
+    text = '{\n  "psFormat": "b",\n  "imagesFormat": "table"\n}\n'
+    tree = tree_from_value({"psFormat": "b", "imagesFormat": "table", "detachKeys": "ctrl-e,e"})
+
+    # when — a member is added after the first, and the second is deleted
+    rendered = adapter.render(tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"}), text)
+
+    # then — no comma is invented where the file had none
+    assert rendered == '{\n  "psFormat": "b",\n  "detachKeys": "ctrl-e,e"\n}\n'
+    assert adapter.parse(rendered) == tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"})
+    assert tree != tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"})

@@ -170,6 +170,15 @@ def _zsh_config(machine: Machine) -> SyncConfig:
     return _config(machine, (LocalItem.create(path=ZSH, preset="zsh", scope="common", format="text"),))
 
 
+def _record_for(machine: Machine, path: str):
+    """The machine's published record for `path`, read from its own manifest."""
+    files = FileRepo(machine.repo)
+    manifest = loads_manifest(
+        EnvelopeCipher(machine.store).open(files.read(MANIFEST_PATH) or b"", domain="manifest", file_id="")
+    )
+    return next(record for record in manifest.records.values() if record.path == path)
+
+
 def _two_file_config(machine: Machine) -> SyncConfig:
     return _config(
         machine,
@@ -706,6 +715,37 @@ def test_a_record_is_republished_in_the_format_its_object_is_really_in(tmp_path,
     # `$` is a literal) rather than as a shell file, and apply no longer sees a mismatch
     assert report.unprojectable == ()
     assert formats[JSONC] == "jsonc"
+
+
+def test_a_merge_carries_an_object_it_re_uses_unchanged(tmp_path, memory_key_store) -> None:
+    # given — both machines are settled, then A publishes a settings file that holds a key this
+    # machine's policy excludes (A's build does not exclude it), and B edits its *other* file
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(a, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(b, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(b)
+    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
+    _run(a, catalog=_UnawareCatalog())
+    published = _record_for(a, JSONC)
+
+    # when — B merges against A's commit; the settings object is one it only re-uses
+    _write(b, SECOND, b'[\n  {"key": "cmd+j"}\n]\n')
+    report = _run(b)
+
+    # then — B's merge commit names A's object exactly as A published it: projecting it would delete
+    # A's own values (its noise, its credential) without removing anything from the history, since
+    # the blob is already in A's commit. B's own change lands, and A's file is untouched.
+    assert report.has_conflicts is False
+    assert _record_for(b, JSONC).sha256 == published.sha256
+    assert _read(b, SECOND) == b'[\n  {"key": "cmd+j"}\n]\n'
+    assert _read(a, JSONC) == b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n'
 
 
 def test_a_merge_projects_an_object_it_only_re_uses(tmp_path, memory_key_store) -> None:

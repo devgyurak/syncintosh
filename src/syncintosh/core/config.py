@@ -84,9 +84,6 @@ class SyncConfig:
         return cls(remote=remote, machine_id=machine_id, items=tuple(items))
 
 
-__all__ = ["LocalItem", "SyncConfig"]
-
-
 def allows_path(config: SyncConfig, *, scope: Scope, machine: str | None, path: str) -> bool:
     """True when the local allowlist names this `(scope, machine, path)`.
 
