@@ -182,6 +182,15 @@ def test_the_docker_preset_excludes_its_credential_keys() -> None:
     assert excluded & noise == frozenset()
 
 
+def test_every_docker_file_is_checked_as_strict_json() -> None:
+    # when — Docker's CLI and `dockerd` both read these with a strict JSON parser
+    validators = {file.validator for file in docker.DOCKER.files}
+
+    # then — so a render that leaves JSONC-only syntax (a trailing comma, a comment) is refused
+    # rather than written (AGENTS.md §3.5)
+    assert validators == {"json"}
+
+
 def test_the_docker_daemon_config_excludes_its_documented_proxy_key() -> None:
     # given
     daemon = next(file for file in docker.DOCKER.files if file.path == docker.DAEMON)

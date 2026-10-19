@@ -9,6 +9,7 @@ proves nothing (``AGENTS.md`` §3.4).
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,7 @@ from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
+from syncintosh.system.json_check import JsonSyntaxValidator
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.lock import FileLock
@@ -140,6 +142,9 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()},
         catalog=BuiltinCatalog.default(),
+        # The preset names the strict JSON check, and a missing one is refused rather than skipped,
+        # so the harness wires what the CLI wires.
+        validators={"json": JsonSyntaxValidator()},
         live=SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
@@ -377,3 +382,29 @@ def test_a_case_variant_of_the_tls_directory_is_also_refused(tmp_path, memory_ke
     # then
     assert variant in report.skipped
     assert FileRepo(machine.repo).list_paths("objects") == ()
+
+
+def test_a_config_that_is_not_strict_json_is_never_written(tmp_path, memory_key_store) -> None:
+    # given — A's `config.json` holds a trailing comma in a key the projection keeps: JSONC parses
+    # it, Docker's strict reader does not, so A publishes bytes a strict reader would refuse
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _docker_config(a))
+    _write(a, CONFIG, b'{\n  "experimental": "enabled",\n}\n')
+    first = _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _docker_config(b), import_from=a.recovery)
+    (b.home / ".docker").mkdir(parents=True)
+
+    # when
+    report = _run(b)
+
+    # then — the payload really is what a strict reader refuses, and the write is refused with a
+    # reason instead of handing B a file Docker cannot read. A's own file is untouched: it is the
+    # user's, and A is the machine whose Docker is already in that state.
+    with pytest.raises(ValueError):
+        json.loads(_read(a, CONFIG))
+    assert first.invalid == ()
+    assert _read(a, CONFIG) == b'{\n  "experimental": "enabled",\n}\n'
+    assert [refusal.path for refusal in report.invalid] == [CONFIG]
+    assert (b.home / CONFIG).exists() is False

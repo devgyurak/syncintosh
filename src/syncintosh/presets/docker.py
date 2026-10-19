@@ -85,10 +85,15 @@ DOCKER = Preset.create(
             format="jsonc",
             noise=NOISE_KEYS,
             excluded=CREDENTIAL_KEYS,
+            # Docker's CLI reads this file with a strict JSON parser, so the renderer's JSONC freedom
+            # (a trailing comma, a comment) is not allowed to reach it: the check refuses instead of
+            # writing a file that stops the user's Docker working (``AGENTS.md`` §3.5).
+            validator="json",
         ),
         # The daemon config's `proxies` is a `user:pass@` URL carrier. `HttpHeaders` is a CLI-only
         # key, so it is not repeated here.
-        PresetFile.create(path=DAEMON, format="jsonc", excluded={("proxies",)}),
+        # `dockerd` reads this with the same strict parser, so it is checked the same way.
+        PresetFile.create(path=DAEMON, format="jsonc", excluded={("proxies",)}, validator="json"),
     ),
     bundle_id="com.docker.docker",
     download_url="https://www.docker.com/products/docker-desktop/",
