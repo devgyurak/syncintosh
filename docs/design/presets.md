@@ -45,7 +45,9 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 - `http.proxyAuthorization` is registered in **both** shapes a file can spell it (the dotted key
   VS Code writes, and a nested object), so neither can carry a credential into the repo. The secret
   scan gained a `scheme://user:pass@` pattern as the backstop for a proxy URL written under *any
-  other* key (`system/secret_scan.py`).
+  other* key (`system/secret_scan.py`) — and it matches a *literal* password only: `$DB_PASS` and
+  `${PGPASSWORD}` are references, which is the recommended way to keep the value out of the file,
+  so a URL that uses them is not refused.
 - `keybindings.json` has **no** strip list: the merge compares an array whole, because a later
   binding overrides an earlier one, so identifying entries by key would change behaviour. A change
   to the same binding on both machines is therefore a whole-file conflict.

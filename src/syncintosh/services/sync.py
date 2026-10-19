@@ -640,14 +640,15 @@ def _collect_first_sight(
 def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
-    A whole-document conflict — an array like `keybindings.json`, compared as one value — arrives
-    as the **root** path, which has no name to print, so the reason stands alone rather than
-    trailing a colon.
+    A conflict the merge cannot put a name to still gets one: a whole-document conflict — an array
+    like `keybindings.json`, compared as one value — arrives as the **root** path, and a key whose
+    own name is empty renders as nothing. Both print `(document)`, the same word the `merge`
+    command uses, so the detail never trails a bare colon.
     """
-    named = [path for path in paths if path]
+    named = dict.fromkeys(".".join(path) or "(document)" for path in paths)
     if not named:
         return reason
-    return f"{reason}: {', '.join('.'.join(path) for path in named)}"
+    return f"{reason}: {', '.join(named)}"
 
 
 def _merge_stale(

@@ -340,7 +340,7 @@ def test_a_both_sides_keybindings_change_is_a_whole_file_conflict(tmp_path, memo
     # then — one conflict for the document, and B's file is untouched
     assert report.has_conflicts is True
     assert report.conflicts[0].path == KEYBINDINGS
-    assert report.conflicts[0].detail == "the same region changed on both sides"
+    assert report.conflicts[0].detail == "the same region changed on both sides: (document)"
     assert _read(b, KEYBINDINGS) == original.replace(b"terminal.clear", b"terminal.kill")
 
 
@@ -408,3 +408,19 @@ def test_a_credential_url_inside_a_keybinding_is_refused(tmp_path, memory_key_st
         _run(a)
     assert KEYBINDINGS in str(refusal.value)
     assert "binding-password" not in str(refusal.value)
+
+
+def test_a_conflict_on_an_unnamed_key_is_named_as_the_document(tmp_path, memory_key_store) -> None:
+    # given — a key whose own name is empty, changed on both machines
+    a, b = _pair(tmp_path, memory_key_store, b'{\n  "": 1\n}\n')
+    _write(a, SETTINGS, b'{\n  "": 2\n}\n')
+    _run(a)
+    _write(b, SETTINGS, b'{\n  "": 3\n}\n')
+
+    # when
+    report = _run(b)
+
+    # then — there is no key name to print, so the document is named rather than leaving a colon
+    # dangling at the end of the detail
+    assert report.conflicts[0].path == SETTINGS
+    assert report.conflicts[0].detail == "the same region changed on both sides: (document)"
