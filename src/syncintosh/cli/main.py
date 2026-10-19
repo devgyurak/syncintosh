@@ -208,9 +208,11 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         _fail(exc)
         return
     _render(report, config)
-    if report.has_conflicts or report.needs_adopt or report.unprojectable or report.invalid:
-        # A path that could not be projected or written is a failure, not a partial success: a
-        # launchd job or a script must not read "nothing was applied here" as "all is well".
+    if report.has_conflicts or report.needs_adopt or report.unprojectable or report.invalid or report.refused:
+        # A path that was refused, could not be projected, or would not parse is a failure, not a
+        # partial success: a launchd job or a script must not read "nothing was applied here" as
+        # "all is well". `refused` covers the collect-stage case too — a local config naming a path
+        # its preset does not own would otherwise publish a record nothing could ever apply.
         raise typer.Exit(code=1)
 
 
@@ -232,13 +234,16 @@ def _render(report: SyncReport, config) -> None:
         ("deferred (app not installed)", report.deferred),
         ("suppressed (removed here)", report.suppressed),
         ("skipped (dangerous path)", report.skipped),
-        ("refused (path not allowed here)", report.refused),
         ("skipped (symbolic link)", report.symlinks),
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:
             typer.echo(f"{label}: {path}")
-    for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
+    for label, refusals in (
+        ("refused", report.refused),
+        ("unprojectable", report.unprojectable),
+        ("invalid", report.invalid),
+    ):
         for refusal in refusals:
             # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
             typer.echo(f"{label} ({refusal.reason}): {refusal.path}", err=True)

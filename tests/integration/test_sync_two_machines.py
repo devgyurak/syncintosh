@@ -659,7 +659,7 @@ def test_a_record_this_machine_does_not_track_is_never_written(tmp_path, memory_
     report = _run(b)
 
     # then — the record is refused and B's file is left alone
-    assert report.refused == (ZSH,)
+    assert [refusal.path for refusal in report.refused] == [ZSH]
     assert _read_live(b) == b"unaccounted\n"
 
 
@@ -681,7 +681,7 @@ def test_an_apply_path_that_escapes_home_is_never_written(tmp_path, memory_key_s
     report = _run(b)
 
     # then — refused, and nothing landed outside the home tree
-    assert report.refused == (path,)
+    assert [refusal.path for refusal in report.refused] == [path]
     assert sorted(p.name for p in outside.iterdir()) == []
 
 

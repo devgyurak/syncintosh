@@ -17,7 +17,7 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ProjectionError
 from syncintosh.core.presets import PresetFile
 from syncintosh.core.projection import graft, project_text, restore_text, strip
-from syncintosh.core.tree import tree_from_value
+from syncintosh.core.tree import Tree, tree_from_value
 
 ADAPTER = JsoncAdapter()
 
@@ -296,3 +296,35 @@ def test_an_empty_one_line_repo_text_still_re_attaches_the_local_key() -> None:
     # then
     assert restored == '{"auth": {"token": "SECRET"}}\n'
     assert _project(restored, policy) == "{}\n"
+
+
+def test_restore_text_refuses_an_object_that_is_not_a_projection() -> None:
+    # given — the published object still holds the excluded key, which happens when the other
+    # machine's build does not exclude it, and this machine's file holds its own value
+    policy = _policy(excluded={EXCLUDED})
+    repo_text = '{"auth": {"token": "FROM-AN-OLD-PUBLISH"}}'
+    live_text = '{"auth": {"token": "LOCAL"}}'
+
+    # when & then — refused, loudly (``unprojectable`` plus exit 1), rather than written: the two
+    # builds disagree about what the file should hold, and applying would start a churn of commits
+    # as each side re-published its own view. The user can act on a reported file; a silent
+    # disagreement between builds is the failure mode this check exists to prevent.
+    with pytest.raises(ProjectionError):
+        restore_text(ADAPTER, repo_text, live_text, policy)
+
+
+def test_restore_text_still_refuses_a_render_that_breaks_a_projection() -> None:
+    # given — a renderer that silently loses a member, standing in for a renderer bug
+    class Losing:
+        def parse(self, text: str) -> Tree:
+            return ADAPTER.parse(text)
+
+        def render(self, tree: Tree, template: str) -> str:
+            return "{}"
+
+    policy = _policy(noise={NOISE})
+    repo_text = '{"editor.fontSize": 13}'
+
+    # when & then — the object *is* a projection, so a render that does not reproduce it is refused
+    with pytest.raises(ProjectionError):
+        restore_text(Losing(), repo_text, '{"editor.fontSize": 13, "window": {"zoomLevel": 9}}', policy)

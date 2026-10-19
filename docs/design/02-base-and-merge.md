@@ -154,3 +154,10 @@ decide about survives:
   comes back from the tree rather than from the live file's own text, so a nested object's
   internal layout may differ from what the file had. A scalar value — the usual noise or excluded
   key — is byte-identical.
+
+A strict consequence: **an object that is not itself a projection is refused, not applied.** An
+object can hold a key the local policy strips when the machine that published it did not exclude
+it — two builds disagreeing about the preset. Writing the file then would make its projection
+differ from the object, and the next cycle would publish that difference, which the other build
+would publish back: a churn of commits instead of a fix. The file is reported as `unprojectable`
+(and `sync` exits non-zero) so the user can see the disagreement and act on it.

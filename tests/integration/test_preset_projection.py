@@ -346,8 +346,9 @@ def test_an_item_whose_preset_does_not_own_its_path_is_refused(tmp_path, memory_
     # when
     report = _run(machine)
 
-    # then — refused at collect, reported, and nothing is published for it
-    assert report.refused == (path,)
+    # then — refused at collect with the reason, and nothing is published for it
+    assert [refusal.path for refusal in report.refused] == [path]
+    assert report.refused[0].reason == "the path's preset does not own it"
     assert FileRepo(machine.repo).list_paths("objects") == ()
 
 
@@ -373,7 +374,7 @@ def test_a_record_the_local_catalog_does_not_own_is_refused(tmp_path, memory_key
     report = _run(b)
 
     # then — the path is reported and never written (docs/design/03-manifest.md)
-    assert report.refused == (path,)
+    assert [refusal.path for refusal in report.refused] == [path]
     assert (b.home / path).exists() is False
 
 
@@ -550,10 +551,11 @@ def test_a_cycle_projects_a_file_once(tmp_path, memory_key_store) -> None:
     # when
     _run(machine, adapters={"jsonc": counting})
 
-    # then — the projection itself, and the re-parse that verifies it; apply reuses the projection
-    # collect made (the raw bytes are unchanged) and settle takes apply's digest, so neither runs
-    # the adapter again. A regression here shows up as 6.
-    assert counting.parses == 2
+    # then — two for collect (the projection, and the re-parse that verifies it) and two for
+    # settle, which projects the bytes it actually read so the ledger records what it saw. Apply
+    # reuses collect's projection because the raw bytes are unchanged, saving the two it used to
+    # spend; without that reuse this would be 6.
+    assert counting.parses == 4
 
 
 def test_a_dangerous_path_is_reported_as_dangerous_not_as_unowned(tmp_path, memory_key_store) -> None:
@@ -569,3 +571,26 @@ def test_a_dangerous_path_is_reported_as_dangerous_not_as_unowned(tmp_path, memo
     # then — the deny-list reason wins, because it is the one the user needs to see
     assert report.skipped == (".ssh/id_rsa",)
     assert report.refused == ()
+
+
+def test_a_record_published_in_another_format_is_refused_however_fresh_the_file_is(tmp_path, memory_key_store) -> None:
+    # given — A's catalog does not know the path, so A publishes it as plain `text`; this machine's
+    # catalog says it is JSONC and strips keys from it
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    item = LocalItem.create(path=JSONC, preset="keyed-test", scope="common", format="text")
+    _initialize(a, _config(a, (item,)))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _run(a, catalog=_Catalog())
+    assert FileRepo(a.repo).list_paths("objects") != ()
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
+
+    # when — B's own file is byte-for-byte the one collect read, so collect's projection is cached
+    report = _run(b, adopt="remote")
+
+    # then — refused: reusing that projection across a format mismatch would apply the record here
+    # and refuse it on a machine whose file had been touched in the same window, for the same input
+    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
+    assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"

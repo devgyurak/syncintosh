@@ -154,7 +154,7 @@ class SyncReport:
     suppressed: tuple[str, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
-    refused: tuple[str, ...] = ()
+    refused: tuple[Refusal, ...] = ()
     unprojectable: tuple[Refusal, ...] = ()
     invalid: tuple[Refusal, ...] = ()
     first_sight: tuple[str, ...] = ()
@@ -199,7 +199,7 @@ class _Collect:
     first_sight: list[str] = field(default_factory=list)
     symlinks: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    refused: list[str] = field(default_factory=list)
+    refused: list[Refusal] = field(default_factory=list)
     unprojectable: list[Refusal] = field(default_factory=list)
 
 
@@ -333,11 +333,6 @@ class _Projected:
     view: bytes | None
     failure: ProjectionFailure | None = None
 
-    @property
-    def failed(self) -> bool:
-        """True when a preset owns this path and the file could not be projected."""
-        return self.failure is not None
-
 
 def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileFormat) -> _Projected:
     """Reduce a live file to the bytes that would be sealed, or report why it cannot be."""
@@ -367,11 +362,37 @@ def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileForm
     return _Projected(raw=raw, view=view)
 
 
-def _refusal(path: str, projected: _Projected) -> Refusal:
+# Why a record's path may not be written here, as fixed phrases: a report names the location and
+# the reason, never anything from the file (``AGENTS.md`` §4).
+UNOWNED_PATH = "the path's preset does not own it"
+_NOT_ALLOWED = "the path is not in this machine's config"
+_DENIED = "a dangerous path this machine never collects"
+_ESCAPES = "the target leaves this machine's home directory"
+
+
+def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
     """The report row for a projection that failed, phrased by its fixed reason code."""
-    if projected.failure is None:
-        return Refusal(path, "the file could not be reduced to its synced form")
-    return Refusal(path, _PROJECTION_FAILURE[projected.failure])
+    return Refusal(path, _PROJECTION_FAILURE[failure])
+
+
+def _record_refusal(
+    presets: _Presets, config: SyncConfig, deny: DenyList, home: str, record: ManifestRecord
+) -> Refusal | None:
+    """Why `record` may not be written here, or `None` when it may.
+
+    The first matching reason wins, most serious first: a record's `path` and `preset` arrive from
+    the repo, so each check is a trust boundary (``docs/design/03-manifest.md``), and the user needs
+    to know *which* one refused it.
+    """
+    if deny.is_denied(home, record.path):
+        return Refusal(record.path, _DENIED)
+    if deny.escapes(home, record.path):
+        return Refusal(record.path, _ESCAPES)
+    if not presets.catalog.knows(record.preset, record.path):
+        return Refusal(record.path, UNOWNED_PATH)
+    if not allows(config, record):
+        return Refusal(record.path, _NOT_ALLOWED)
+    return None
 
 
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
@@ -436,7 +457,7 @@ def _collect(
             # config, or a catalog that changed under it. Publishing it would create a record every
             # machine, this one included, refuses to apply, so the file would never settle and every
             # later sync would ask for `--adopt` again. Refused here, and reported.
-            state.refused.append(item.path)
+            state.refused.append(Refusal(item.path, UNOWNED_PATH))
             continue
         live_path = _join(home, item.path)
         if live.is_symlink(live_path):
@@ -446,8 +467,8 @@ def _collect(
             state.symlinks.append(item.path)
             continue
         projected = _project_file(presets, live.read(live_path), item.path, item.format)
-        if projected.failed:
-            state.unprojectable.append(_refusal(item.path, projected))
+        if projected.failure is not None:
+            state.unprojectable.append(_refusal(item.path, projected.failure))
             continue
         record = _find_item_record(state.records, item)
         if record is not None and projected.raw is not None:
@@ -870,22 +891,15 @@ def _fast_forward(transport: GitTransport, branch: str, commit: str) -> None:
 
 @dataclass(frozen=True)
 class _Applied:
-    """What step 14 did with each record, by outcome.
-
-    `digests` carries the projection digest of every file apply left on disk, keyed by file_id, so
-    `_settle_ledger` does not have to project each file a second time. A file apply wrote has the
-    record's digest by construction — `restore_text` proved the round-trip — and one it left alone
-    has the digest apply observed.
-    """
+    """What step 14 did with each record, by outcome."""
 
     applied: tuple[str, ...] = ()
     deferred: tuple[str, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
-    refused: tuple[str, ...] = ()
+    refused: tuple[Refusal, ...] = ()
     unprojectable: tuple[Refusal, ...] = ()
     invalid: tuple[Refusal, ...] = ()
-    digests: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def _apply(
@@ -924,20 +938,15 @@ def _apply(
     deferred: list[str] = []
     symlinks: list[str] = []
     aborted: list[str] = []
-    refused: list[str] = []
+    refused: list[Refusal] = []
     unprojectable: list[Refusal] = []
     invalid: list[Refusal] = []
-    digests: dict[str, str] = {}
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
-        if (
-            deny.is_denied(home, record.path)
-            or deny.escapes(home, record.path)
-            or not allows(config, record)
-            or not presets.catalog.knows(record.preset, record.path)
-        ):
-            refused.append(record.path)
+        refusal = _record_refusal(presets, config, deny, home, record)
+        if refusal is not None:
+            refused.append(refusal)
             continue
         policy = presets.policy_for(record.path)
         if policy is not None and policy.stripped:
@@ -954,19 +963,25 @@ def _apply(
         # projection, and never the content this cycle will publish, which for a merged record is
         # not what the file holds.
         collect_baseline = seen.get(file_id)
-        cached = views.get(file_id) if live_bytes is not None and live_bytes == collect_baseline else None
+        # Collect's projection stands in for this one only when the file is byte-for-byte the one
+        # it was made from **and** the record names the format the policy uses: reusing it across a
+        # format mismatch would apply a record on the strength of the file not having been touched,
+        # while touching it would refuse it — the same input, two verdicts.
+        reusable = (
+            live_bytes is not None
+            and live_bytes == collect_baseline
+            and stripped_policy is not None
+            and stripped_policy.format == record.format
+        )
+        cached = views.get(file_id) if reusable else None
         if cached is not None:
-            # The file is byte-for-byte the one collect projected, so its projection is the same
-            # bytes; projecting it again would be work with no effect.
             live_view = cached
         elif live_bytes is not None and stripped_policy is not None:
             view = _project_file(presets, live_bytes, record.path, record.format)
-            if view.failed:
-                unprojectable.append(_refusal(record.path, view))
+            if view.failure is not None:
+                unprojectable.append(_refusal(record.path, view.failure))
                 continue
             live_view = view.view
-        if live_view is not None:
-            digests[file_id] = _sha256(live_view)
         changed = live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline
         decision = _decision(
             record,
@@ -1008,9 +1023,6 @@ def _apply(
             invalid.append(Refusal(record.path, "the file would not pass its syntax check"))
             continue
         live.write(live_path, data)
-        # The bytes just written project back to the record's object — `restore_text` verified it,
-        # and a file written verbatim *is* the object — so settle has nothing to recompute.
-        digests[file_id] = record.sha256
         applied.append(record.path)
     return _Applied(
         applied=tuple(applied),
@@ -1020,7 +1032,6 @@ def _apply(
         refused=tuple(refused),
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
-        digests=MappingProxyType(digests),
     )
 
 
@@ -1067,7 +1078,6 @@ def _settle_ledger(
     live: LiveFiles,
     deny: DenyList,
     presets: _Presets,
-    digests: Mapping[str, str],
     config: SyncConfig,
     home: str,
 ) -> dict[str, LedgerEntry]:
@@ -1102,11 +1112,7 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = LedgerEntry(sha256=old.sha256, commit=old.commit, suppressed=True)
             continue
-        # Apply already knows what the file projects to when it left it alone or wrote it; only a
-        # file apply never reached needs the projection computed here.
-        digest = digests.get(file_id)
-        if digest is None:
-            digest = _ledger_digest(presets, live_bytes, record.path, record.format)
+        digest = _ledger_digest(presets, live_bytes, record.path, record.format)
         if digest is not None and digest == record.sha256:
             settled[file_id] = LedgerEntry(sha256=digest, commit=target_commit, suppressed=False)
         else:
@@ -1119,7 +1125,7 @@ def _settle_ledger(
 def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat) -> str | None:
     """The digest the ledger should hold for a live file, or `None` when it cannot be projected."""
     projected = _project_file(presets, live_bytes, path, fmt)
-    if projected.failed or projected.view is None:
+    if projected.failure is not None or projected.view is None:
         return None
     return _sha256(projected.view)
 
@@ -1332,7 +1338,6 @@ def _cycle(
             live=live,
             deny=deny,
             presets=presets,
-            digests=applied.digests,
             config=config,
             home=home,
         )

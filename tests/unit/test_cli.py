@@ -8,9 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.services import Refusal, SyncReport
 
 runner = CliRunner()
 
@@ -134,10 +136,20 @@ def test_importing_the_cli_does_not_import_the_jsonc_adapter() -> None:
     assert result.stdout.strip() == "False"
 
 
-def test_sync_exits_1_when_a_file_could_not_be_projected(tmp_path, monkeypatch) -> None:
-    # given — the service reports a file it could not reduce to its synced form
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        (
+            SyncReport(unprojectable=(Refusal(".zshrc", "the file could not be reduced to its synced form"),)),
+            "unprojectable (the file could not be reduced to its synced form): .zshrc",
+        ),
+        (SyncReport(invalid=(Refusal(".zshrc", "the file would not pass its syntax check"),)), "invalid ("),
+        (SyncReport(refused=(Refusal(".zshrc", "the path's preset does not own it"),)), "refused ("),
+    ],
+)
+def test_sync_exits_1_for_a_path_it_could_not_write(report, expected, tmp_path, monkeypatch) -> None:
+    # given — the service reports a path it refused, could not project, or would not write
     from syncintosh.core.config import LocalItem, SyncConfig
-    from syncintosh.services import Refusal, SyncReport
     from syncintosh.system.config import save_config
     from syncintosh.system.paths import MachinePaths
 
@@ -148,15 +160,11 @@ def test_sync_exits_1_when_a_file_could_not_be_projected(tmp_path, monkeypatch) 
         paths.config_file,
     )
     monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
-    monkeypatch.setattr(
-        main_module,
-        "sync_service",
-        lambda **_kwargs: SyncReport(unprojectable=(Refusal(".zshrc", "not valid JSONC"),)),
-    )
+    monkeypatch.setattr(main_module, "sync_service", lambda **_kwargs: report)
 
     # when
     result = runner.invoke(main_module.app, ["sync"])
 
     # then — the exit code says "not applied", and the reason is named rather than left to guess
     assert result.exit_code == 1
-    assert "unprojectable (not valid JSONC): .zshrc" in _combined(result)
+    assert expected in _combined(result)
