@@ -117,10 +117,21 @@ def test_a_url_that_only_references_its_credentials_passes(payload: bytes) -> No
     assert scanner.scan(payload, subject=".zshrc") is None
 
 
-def test_a_literal_password_in_a_url_is_still_refused() -> None:
-    # given — excluding `$` and `{` must not have blinded the pattern to an actual value
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"http://user:pa$$w0rd@proxy.example.test",  # a `$` inside a literal password
+        b"https://user:abc{123}@host",  # and a `{` — both are ordinary characters in a value
+        b"'postgres://app:pass$word@db'",
+        b"postgres://app:s3cret-placeholder@db.internal:5432",
+        b"http:\\/\\/user:pa$$w0rd@proxy.example.test",  # the JSON-escaped spelling too
+    ],
+)
+def test_a_literal_password_in_a_url_is_refused(payload: bytes) -> None:
+    # given — the whole point of the pattern is a value in the file, and skipping a *reference* must
+    # not skip anything else: a password containing `$` or `{` is still a credential leaving the
+    # machine (the review found this regression in an earlier revision of the pattern)
     scanner = PatternSecretScanner()
-    payload = b"postgres://" + b"app" + b":" + b"s3cret-placeholder" + b"@" + b"db.internal:5432"
 
     # when & then
     with pytest.raises(SecretScanError):

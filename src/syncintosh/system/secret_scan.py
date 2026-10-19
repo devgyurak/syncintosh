@@ -34,13 +34,15 @@ PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # the patterns above would notice (decision V2). The slashes may be JSON-escaped (`\/`), which
     # the JSONC projection preserves verbatim for an unchanged value, so both spellings are matched.
     #
-    # `$` and `{` are excluded from the password, so a URL that *references* a credential
-    # (`http://$USER:$PASS@proxy`) is not a match. That is the recommended way to keep a secret out
-    # of the file; refusing it would block the file precisely when its owner did the right thing,
-    # and a variable name is not a value.
+    # The password must be a **literal**. One that is entirely a variable reference
+    # (`$PASS`, `${PGPASSWORD}`) is skipped: that is the recommended way to keep a secret out of
+    # the file, and refusing it would block the file precisely when its owner did the right thing —
+    # a variable name is not a value. Excluding `$` and `{` from the characters matched instead
+    # would have hidden a real password that happens to contain them (`pa$$w0rd`, `abc{123}`),
+    # which is a credential leaving the machine; the lookahead skips only the reference itself.
     (
         "URL with credentials",
-        re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:[^/@\s\\${]+@"),
+        re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:(?!\$\{?[A-Za-z_]\w*\}?@)[^/@\s\\]+@"),
     ),
 )
 
