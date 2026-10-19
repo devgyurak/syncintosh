@@ -70,7 +70,7 @@ class RecordingScanner:
         self.scanned: list[str] = []
         self._refuse = refuse
 
-    def scan(self, plaintext: bytes, *, subject: str) -> None:
+    def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
         self.scanned.append(subject)
         if subject == self._refuse:
             raise SecretScanError(f"secret found in {subject}")

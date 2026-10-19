@@ -46,7 +46,7 @@ ALLOWED = re.compile(r"objects/[0-9a-f]{32}\.enc")
 class PassthroughScanner:
     """A clean scanner: the real implementation lands with #7 (decision 3 of the #3 plan)."""
 
-    def scan(self, plaintext: bytes, *, subject: str) -> None:
+    def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
         return None
 
 

@@ -185,7 +185,7 @@ def test_a_repo_without_list_paths_does_not_conform() -> None:
 def test_secret_scanner_port_is_structural() -> None:
     # given
     class FakeScanner:
-        def scan(self, plaintext: bytes, *, subject: str) -> None:
+        def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
             return None
 
     # when

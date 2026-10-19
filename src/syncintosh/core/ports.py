@@ -17,6 +17,7 @@ from syncintosh.core.tree import Tree
 if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
     # runtime import here would close the cycle (``AGENTS.md`` §4).
+    from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
@@ -215,8 +216,13 @@ class SecretScanner(Protocol):
     (``AGENTS.md`` §4).
     """
 
-    def scan(self, plaintext: bytes, *, subject: str) -> None:
-        """Raise `SecretScanError` when a secret is found; return `None` when clean."""
+    def scan(self, plaintext: bytes, *, subject: str, format: FileFormat) -> None:
+        """Raise `SecretScanError` when a secret is found; return `None` when clean.
+
+        `format` is the record's adapter key, and it decides how a URL is read: a shell file may
+        reference a credential (`http://$USER:$PASS@proxy`), while a structured file has no
+        interpolation, so `$` there is an ordinary character of a value.
+        """
         ...
 
 
