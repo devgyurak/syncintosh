@@ -322,11 +322,11 @@ def test_a_key_added_after_a_block_comment_does_not_double_the_comma() -> None:
     [
         '{\n  "a": 1 }',  # closing brace shares the member's line
         '{\n  "a": 1, "b": 2\n}\n',  # two members on one line
-        '{"a": 1}',  # a single-line object
     ],
 )
 def test_an_irregular_object_layout_is_rewritten_whole(base) -> None:
-    # given — a new key `c` arrives, but the layout has no per-member line to splice
+    # given — a new key `c` arrives, but the layout has no per-member line to splice, and the
+    # object cannot be spliced in place either (a shared line, or a comment inside it)
     adapter = JsoncAdapter()
     remote = '{"a": 1, "b": 2, "c": 3}'
 
@@ -492,3 +492,60 @@ def test_a_key_added_as_the_first_member_opens_the_object_with_a_comma_after_it(
     # then — reaching for the closing brace instead would leave the last member without its comma
     assert rendered == expected
     assert adapter.parse(rendered) == tree
+
+
+def test_a_single_line_object_is_spliced_in_place() -> None:
+    # given — a one-line object, the shape a re-attached machine-local key meets
+    adapter = JsoncAdapter()
+
+    # when — a key arrives
+    added = adapter.render(tree_from_value({"a": 1, "b": 2}), '{"a": 1}')
+
+    # then — the layout is kept, not re-flowed to member-per-line
+    assert added == '{"a": 1, "b": 2}'
+
+
+@pytest.mark.parametrize(
+    ("template", "tree", "expected"),
+    [
+        ('{"a": 1, "auths": {"x": 1}}', {"a": 1}, '{"a": 1}'),  # a middle member goes
+        ('{"auths": {"x": 1}, "a": 1}', {"a": 1}, '{"a": 1}'),  # the first member goes
+        ('{"a": 1,"auths": {"x": 1}}', {"a": 1}, '{"a": 1}'),  # a tight separator goes with it
+        ('{"auths": {"x": 1}}', {}, "{}"),  # the only member goes
+        ("{ }", {}, "{ }"),  # and the padding survives
+    ],
+)
+def test_a_member_leaving_a_single_line_object_keeps_the_layout(template, tree, expected) -> None:
+    # when
+    rendered = JsoncAdapter().render(tree_from_value(tree), template)
+
+    # then
+    assert rendered == expected
+
+
+def test_a_single_line_object_with_a_comment_cannot_be_spliced() -> None:
+    # given — a splice would have to move or swallow the comment inside the object
+    # when & then — refusing is the verdict, so the caller reports it instead of dropping it
+    with pytest.raises(ContentParseError):
+        JsoncAdapter().render(tree_from_value({"a": 1, "b": 2}), '{"a": 1 /* note */}')
+
+
+@pytest.mark.parametrize(
+    ("template", "repo", "worked"),
+    [
+        ('{"a": 1}', {"a": 1}, {"a": 1, "noise": 5}),
+        ('{"a": 1,"b": 2}', {"a": 1, "b": 2}, {"a": 1, "b": 2, "noise": 5}),
+        ('{ "a": 1 }', {"a": 1}, {"a": 1, "noise": 5}),
+        ("{ }", {}, {"noise": 5}),
+    ],
+)
+def test_splicing_a_single_line_object_is_a_byte_exact_round_trip(template, repo, worked) -> None:
+    # given — the projection re-attaches a stripped key and then strips it again
+    adapter = JsoncAdapter()
+
+    # when
+    restored = adapter.render(tree_from_value(worked), template)
+    projected = adapter.render(tree_from_value(repo), restored)
+
+    # then — anything else would make the apply ledger's digest drift forever
+    assert projected == template

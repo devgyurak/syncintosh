@@ -226,35 +226,41 @@ _OBJECTS = st.dictionaries(st.text(min_size=1, max_size=6), _LEAVES, max_size=4)
 _STRIPPED = _policy(noise={("noise",)}, excluded={("secret",)})
 
 
-def _document(value: dict, noise: object, secret: object) -> str:
-    return json.dumps({**value, "noise": noise, "secret": secret}, indent=2, ensure_ascii=False)
+# A document on disk is laid out however its owner wrote it: member-per-line, or all on one line
+# (an `echo '{...}' > file` edit). Both are ordinary, and only the second is where a naive render
+# would re-flow the file and break the round-trip the apply ledger depends on.
+_INDENT = st.sampled_from([None, 2])
 
 
-@given(value=_OBJECTS)
-def test_a_projection_is_idempotent(value) -> None:
+def _document(value: dict, noise: object, secret: object, indent: int | None = None) -> str:
+    return json.dumps({**value, "noise": noise, "secret": secret}, indent=indent, ensure_ascii=False)
+
+
+@given(value=_OBJECTS, indent=_INDENT)
+def test_a_projection_is_idempotent(value, indent) -> None:
     # when
-    once = _project(json.dumps(value, indent=2), _STRIPPED)
+    once = _project(json.dumps(value, indent=indent), _STRIPPED)
     twice = _project(once, _STRIPPED)
 
     # then
     assert twice == once
 
 
-@given(value=_OBJECTS, before=st.integers(), after=st.integers())
-def test_a_change_to_a_stripped_key_does_not_change_the_projection(value, before, after) -> None:
+@given(value=_OBJECTS, before=st.integers(), after=st.integers(), indent=_INDENT)
+def test_a_change_to_a_stripped_key_does_not_change_the_projection(value, before, after, indent) -> None:
     # when — the two documents differ only in the values of stripped keys
-    first = _project(_document(value, before, "one"), _STRIPPED)
-    second = _project(_document(value, after, "two"), _STRIPPED)
+    first = _project(_document(value, before, "one", indent), _STRIPPED)
+    second = _project(_document(value, after, "two", indent), _STRIPPED)
 
     # then — no digest changes, so no diff and no conflict
     assert first == second
 
 
-@given(value=_OBJECTS, local_noise=st.integers())
-def test_restore_always_projects_back_to_the_repo_text(value, local_noise) -> None:
+@given(value=_OBJECTS, local_noise=st.integers(), indent=_INDENT)
+def test_restore_always_projects_back_to_the_repo_text(value, local_noise, indent) -> None:
     # given — the repo holds the projection; this machine's file is the fuller document
-    repo_text = _project(_document(value, 1, "SEALED"), _STRIPPED)
-    live_text = _document(value, local_noise, "LOCAL")
+    repo_text = _project(_document(value, 1, "SEALED", indent), _STRIPPED)
+    live_text = _document(value, local_noise, "LOCAL", indent)
 
     # when
     restored = restore_text(ADAPTER, repo_text, live_text, _STRIPPED)
@@ -262,3 +268,31 @@ def test_restore_always_projects_back_to_the_repo_text(value, local_noise) -> No
     # then
     assert _project(restored, _STRIPPED) == repo_text
     assert '"LOCAL"' in restored
+
+
+def test_a_one_line_repo_text_still_re_attaches_the_local_key() -> None:
+    # given — the published object is one line, and this machine's file has a stripped key inline
+    policy = _policy(noise={NOISE}, excluded={EXCLUDED})
+    repo_text = '{"editor.fontSize": 13}\n'
+    live_text = '{"editor.fontSize": 13, "window": {"zoomLevel": 9}}\n'
+
+    # when
+    restored = restore_text(ADAPTER, repo_text, live_text, policy)
+
+    # then — the key is spliced in rather than re-flowing the object, so the reprojection is
+    # byte-exact and the file is not reported unprojectable on every later cycle
+    assert restored == '{"editor.fontSize": 13, "window": {"zoomLevel": 9}}\n'
+    assert _project(restored, policy) == repo_text
+
+
+def test_an_empty_one_line_repo_text_still_re_attaches_the_local_key() -> None:
+    # given — `{}`, what an untouched `daemon.json` or a freshly created settings file is
+    policy = _policy(excluded={EXCLUDED})
+    live_text = '{"auth": {"token": "SECRET"}}\n'
+
+    # when
+    restored = restore_text(ADAPTER, "{}\n", live_text, policy)
+
+    # then
+    assert restored == '{"auth": {"token": "SECRET"}}\n'
+    assert _project(restored, policy) == "{}\n"

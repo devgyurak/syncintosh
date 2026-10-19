@@ -135,3 +135,22 @@ with the projected tree, so a renderer that half-applied an edit cannot seal a f
 neither the original nor the projection. A path the local catalog cannot project — no adapter for
 its format, a file that is not UTF-8, a value that cannot be rewritten without dropping a comment
 — is **refused and reported**, never sealed raw ([03-manifest.md](03-manifest.md)).
+
+### What a render is allowed to change
+
+The renderer edits the original text at the spans it must, so the layout of everything it did not
+decide about survives:
+
+- **A one-line object stays on one line.** A member is added or removed *in place* — appended
+  before the closing brace with the separator its own removal takes back — because re-flowing the
+  object to member-per-line would change the file far beyond what the merge decided, and then
+  `project_text(restore(...))` could not reproduce the repo text at all. That byte-exactness is
+  not cosmetic: a projection that did not round-trip would leave the file reported
+  `unprojectable` on **every** later sync, so the machine would stop receiving the other
+  machine's changes.
+- **A comment above the first member stays with it.** A key inserted at the top of a multi-line
+  object goes above that comment, not between the comment and the member it documents.
+- **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
+  comes back from the tree rather than from the live file's own text, so a nested object's
+  internal layout may differ from what the file had. A scalar value — the usual noise or excluded
+  key — is byte-identical.

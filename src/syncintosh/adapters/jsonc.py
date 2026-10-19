@@ -328,26 +328,155 @@ class _Diff:
         children = self._children(path)
         if not children:
             leaf = self._leaves.get(path)
-            if (
-                isinstance(leaf, EmptyObject)
-                and isinstance(node, _ObjectNode)
-                and node.members
-                and _clean_multiline_object(self._source, node)
-            ):
-                # The tree says this object is empty but the template still has members. Take
-                # them out line by line rather than rewriting the span, so a comment that sits
-                # above a member — and the keys' layout — survives (`_rewrite` would refuse it).
-                self._object(node, path, edits)
-                return
+            if isinstance(leaf, EmptyObject) and isinstance(node, _ObjectNode) and node.members:
+                # The tree says this object is empty but the template still has members. Take them
+                # out in place — line by line, or by splice — rather than rewriting the span, so a
+                # comment above a member and the object's own layout survive (`_rewrite` would
+                # refuse the comment anyway).
+                if _clean_multiline_object(self._source, node):
+                    self._object(node, path, edits)
+                    return
+                if self._splice_inline(node, path, edits):
+                    return
             if leaf is not None:
                 self._rewrite(node, _leaf_text(leaf), edits)
             return
-        if not isinstance(node, _ObjectNode) or not _clean_multiline_object(self._source, node):
-            # The tree wants an object here, or the object is not laid out member-per-line
-            # (one-line, or the closing brace shares a line): rewrite the whole value.
+        if not isinstance(node, _ObjectNode):
+            # The tree wants an object here but the template has something else: rewrite it.
             self._rewrite(node, self._subtree(path, len(path)), edits)
             return
-        self._object(node, path, edits)
+        if _clean_multiline_object(self._source, node):
+            self._object(node, path, edits)
+            return
+        if self._splice_inline(node, path, edits):
+            return
+        # A one-line object with a comment inside it cannot be spliced member by member, and
+        # re-flowing it would move that comment; rewrite the whole value (which refuses when the
+        # span holds a comment, so a comment is never silently dropped).
+        self._rewrite(node, self._subtree(path, len(path)), edits)
+
+    def _inline_inner(self, node: _ObjectNode) -> str | None:
+        """The text between a one-line object's braces when it can be spliced, else `None`.
+
+        A splice is only safe when nothing but members, commas, and whitespace sits between the
+        braces. A newline means the member-per-line path applies instead; a comment inside would
+        be moved or swallowed by a splice, so the caller falls back to a whole-value rewrite (and
+        the comment guard refuses that rather than dropping the comment).
+        """
+        if "\n" in self._source[node.span.start : node.span.end]:
+            return None
+        if node.span.end - node.span.start < 2:
+            # An empty or comment-only template parses as a synthetic object with no braces at
+            # all; nothing can be spliced, and the caller's whole-value rewrite builds a document.
+            return None
+        if self._source[node.span.start] != "{" or self._source[node.span.end - 1] != "}":
+            return None
+        if _has_comment(self._source, node.span.start + 1, node.span.end - 1):
+            return None
+        return self._source[node.span.start + 1 : node.span.end - 1]
+
+    def _splice_inline(self, node: _ObjectNode, path: KeyPath, edits: list[_Edit]) -> bool:
+        """Add and remove members of a **one-line** object in place; False when it splices nothing.
+
+        Re-flowing a one-line object to member-per-line changes the file far beyond what the merge
+        decided: a projection that re-attaches a stripped key would rewrite the object's layout,
+        and a round-trip check that compares bytes would then never agree again. Splicing keeps
+        the layout, and the two directions are inverse:
+
+        * an added member is appended just before the closing brace, carrying the separator its
+          own removal takes away again;
+        * a removed member takes the separator *before* it — or, when it is the first member, the
+          one after it — so no separator is left dangling and none is lost.
+        """
+        if self._inline_inner(node) is None:
+            return False
+        desired = self._children(path)
+        by_key = {member.key: member for member in node.members}
+        kept = [member for member in node.members if member.key in desired]
+        for member in node.members:
+            if member.key in desired:
+                self._render(member.value, (*path, member.key), edits)
+        self._splice_removals(node, desired, edits)
+        added = [key for key in desired if key not in by_key]
+        if added:
+            lead = self._inline_gap(node, kept)
+            # With no survivor to take a style from (`{}`, or every member removed) the lead is
+            # empty and the members still need a separator between them.
+            join = lead or ", "
+            members = [self._inline_member((*path, key)) for key in added]
+            position = node.span.end - 1 if not node.members else node.members[-1].value.span.end
+            edits.append(_Edit(position, position, lead + join.join(members)))
+        return True
+
+    def _splice_removals(self, node: _ObjectNode, desired: list[str], edits: list[_Edit]) -> None:
+        """Delete every member the tree no longer has, one contiguous run at a time."""
+        runs: list[list[int]] = []
+        for index, member in enumerate(node.members):
+            if member.key in desired:
+                continue
+            if runs and runs[-1][-1] == index - 1:
+                runs[-1].append(index)
+                continue
+            runs.append([index])
+        for run in runs:
+            first, last = node.members[run[0]], node.members[run[-1]]
+            if run[0] == 0:
+                # The object opened with the run: keep the padding after `{`, drop the run, and
+                # drop the separator that used to follow it.
+                edits.append(_Edit(first.span.start, last.value.span.end, ""))
+                if len(node.members) > run[-1] + 1:
+                    edits.append(_Edit(last.value.span.end, node.members[run[-1] + 1].span.start, ""))
+                continue
+            # The run sits between members: drop the separator before it plus the run itself, so
+            # the members on either side end up adjacent.
+            edits.append(_Edit(node.members[run[0] - 1].value.span.end, last.value.span.end, ""))
+
+    def _inline_gap(self, node: _ObjectNode, kept: list[_MemberNode]) -> str:
+        """The separator to put before a member appended to a one-line object.
+
+        Taken from the object's own spacing so `{"a": 1,"b": 2}` stays tight; the removal of the
+        member takes this separator with it, so the choice never has to be undone exactly.
+        """
+        if not node.members:
+            return ""
+        if not kept:
+            # Every original member is being removed, so the object is left empty and the added
+            # member must not carry a separator: `{}, "a": 1}` would not parse.
+            return ""
+        if len(kept) >= 2:
+            return self._source[kept[0].value.span.end : kept[1].span.start]
+        return ", "
+
+    def _inline_member(self, path: KeyPath) -> str:
+        return json.dumps(path[-1], ensure_ascii=False) + ": " + self._inline_subtree(path)
+
+    def _inline_subtree(self, path: KeyPath) -> str:
+        children = self._children(path)
+        if not children:
+            leaf = self._leaves.get(path)
+            return "{}" if leaf is None else _leaf_text(leaf)
+        entries = ", ".join(self._inline_member((*path, key)) for key in children)
+        return "{" + entries + "}"
+
+    def _open_position(self, node: _ObjectNode) -> int:
+        """Where a block that opens the object goes: above the first member's own comment.
+
+        A comment on the line directly above the first member documents *that* member, so inserting
+        between the two would move the comment onto the inserted key. Walking up over `//` lines
+        keeps it attached to what it describes. A blank line, or any other line, stops the walk —
+        and so does a block comment, which the walk cannot count lines within: splicing inside one
+        would produce a file that does not parse, and refusing the insert is worse than leaving the
+        layout alone.
+        """
+        if not node.members:
+            return _line_start(self._source, node.span.end - 1)
+        position = _line_start(self._source, node.members[0].span.start)
+        while position > 0:
+            previous = _line_start(self._source, position - 1)
+            if not self._source[previous : position - 1].strip().startswith("//"):
+                break
+            position = previous
+        return position
 
     def _rewrite(self, node: _AstNode, text: str, edits: list[_Edit]) -> None:
         """Replace a whole value, refusing when that would silently drop a comment.
@@ -422,11 +551,7 @@ class _Diff:
             # JSONC, because the member before it would then lack the comma the block's own
             # trailing comma was meant to complete. An object with no members has no first line,
             # so a genuinely empty `{ ... }` still takes the block just above its brace.
-            position = (
-                _line_start(self._source, node.members[0].span.start)
-                if node.members
-                else _line_start(self._source, node.span.end - 1)
-            )
+            position = self._open_position(node)
         else:
             if _comma_after(self._source, anchor) is None:
                 # The anchor is now followed by a member: it needs the comma it never had.
