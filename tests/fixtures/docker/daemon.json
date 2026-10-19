@@ -1,0 +1,14 @@
+{
+  "builder": {
+    "gc": {
+      "defaultKeepStorage": "10GB",
+      "enabled": true
+    }
+  },
+  "experimental": false,
+  "proxies": {
+    "http-proxy": "http://builder:PROXY-PW-MARKER@proxy.example.test:3128",
+    "https-proxy": "http://builder:PROXY-PW-MARKER@proxy.example.test:3128",
+    "no-proxy": "*.internal.example.test"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "auths": {
+    "https://index.docker.io/v1/": {
+      "auth": "dXNlcjpwYXNzd29yZA=="
+    },
+    "https://registry.example.test": {
+      "auth": "ZGV2OnNlY3JldA=="
+    }
+  },
+  "credsStore": "desktop",
+  "currentContext": "desktop-linux",
+  "HttpHeaders": {
+    "Authorization": "Bearer HEADER-TOKEN-MARKER"
+  },
+  "plugins": {
+    "-x-cli-hints": {
+      "enabled": "true"
+    },
+    "compose": {
+      "hooks": "true"
+    }
+  },
+  "features": {
+    "hooks": "true"
+  }
+}
