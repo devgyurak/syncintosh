@@ -15,6 +15,7 @@ the comparison is folded (``docs/design/02-base-and-merge.md``). Standard librar
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Iterable
 
 
 def collision_key(path: str) -> str:
@@ -22,4 +23,16 @@ def collision_key(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
-__all__ = ["collision_key"]
+def duplicate_paths(paths: Iterable[str]) -> tuple[str, ...]:
+    """The folded paths that appear more than once, sorted.
+
+    Two entries for one file would carry two records and write it twice, which the manifest's
+    path-collision rule then reports as a conflict on every sync. The check is the same fold
+    :func:`collision_key` defines, so `.zshrc` and `.Zshrc` are one path here too. It lives here
+    so the preset catalog, the crate-level catalog, and `init` cannot drift on the rule.
+    """
+    keys = [collision_key(path) for path in paths]
+    return tuple(sorted({key for key in keys if keys.count(key) > 1}))
+
+
+__all__ = ["collision_key", "duplicate_paths"]

@@ -16,11 +16,14 @@ from syncintosh.core.ports import (
     LiveFiles,
     MergeDriver,
     PendingStore,
+    PresetCatalog,
     RepoFiles,
     RingCodec,
     SecretScanner,
     SyncLock,
+    SyntaxValidator,
 )
+from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.tree import Tree
 
 
@@ -367,6 +370,54 @@ def test_ring_codec_port_is_structural() -> None:
 
     # when
     matches = isinstance(FakeCodec(), RingCodec)
+
+    # then
+    assert matches is True
+
+
+def test_preset_catalog_port_is_structural() -> None:
+    # given
+    class FakeCatalog:
+        def policy_for(self, path: str) -> PresetFile | None:
+            return None
+
+        def knows(self, preset: str, path: str) -> bool:
+            return True
+
+        def get(self, name: str) -> Preset | None:
+            return None
+
+    # when
+    matches = isinstance(FakeCatalog(), PresetCatalog)
+
+    # then
+    assert matches is True
+
+
+def test_a_catalog_without_knows_does_not_conform() -> None:
+    # given — the apply-side provenance check is part of the port, not optional
+    class PolicyOnly:
+        def policy_for(self, path: str) -> PresetFile | None:
+            return None
+
+        def get(self, name: str) -> Preset | None:
+            return None
+
+    # when
+    matches = isinstance(PolicyOnly(), PresetCatalog)
+
+    # then
+    assert matches is False
+
+
+def test_syntax_validator_port_is_structural() -> None:
+    # given
+    class FakeValidator:
+        def check(self, text: str, *, subject: str) -> None:
+            return None
+
+    # when
+    matches = isinstance(FakeValidator(), SyntaxValidator)
 
     # then
     assert matches is True

@@ -56,7 +56,7 @@ def test_init_then_sync_on_a_second_machine(tmp_path, monkeypatch, memory_key_st
     # when — A initializes and publishes its file
     _activate(monkeypatch, home_a)
     _write(home_a / ".zshrc", b"from A\n")
-    init_a = runner.invoke(main_module.app, ["init", "--remote", remote, "--path", ".zshrc"])
+    init_a = runner.invoke(main_module.app, ["init", "--remote", remote])
     sync_a = runner.invoke(main_module.app, ["sync"])
 
     # then

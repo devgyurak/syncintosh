@@ -9,10 +9,15 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.tree import Tree
+
+if TYPE_CHECKING:
+    # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
+    # runtime import here would close the cycle (``AGENTS.md`` §4).
+    from syncintosh.core.presets import Preset, PresetFile
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
 # (`docs/design/04-envelope-v1.md`). A value is serialized verbatim in the HKDF `info`, so it
@@ -77,6 +82,51 @@ class ContentAdapter(Protocol):
 
     def render(self, tree: Tree, template: str) -> str:
         """Render `tree` into text, using `template` as the unchanged baseline to edit."""
+        ...
+
+
+@runtime_checkable
+class PresetCatalog(Protocol):
+    """The **local** preset catalog: which paths a built-in preset owns, and their policy.
+
+    The lookup is by **path**, never by the preset name a record carries: a record's `preset`
+    arrives from the repo and is untrusted, so it may not be used to select a policy
+    (``docs/design/03-manifest.md``). `preset` only *provenance* is checked, through `knows`.
+
+    Implementations live in ``presets``; ``core`` and ``services`` depend only on this port
+    (``AGENTS.md`` §2.2).
+    """
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        """The strip/validate policy for `path`, or `None` when no built-in preset owns it."""
+        ...
+
+    def knows(self, preset: str, path: str) -> bool:
+        """True when `path` is one `preset` is allowed to name on this machine.
+
+        A `preset` that is not a built-in makes no claim to check, so it passes and the local
+        allowlist alone decides; a built-in preset must name one of its own paths, so a synced
+        record cannot use a known preset name to reach an arbitrary file ([03-manifest]).
+        """
+        ...
+
+    def get(self, name: str) -> Preset | None:
+        """The built-in preset called `name`, or `None` when there is no such preset."""
+        ...
+
+
+@runtime_checkable
+class SyntaxValidator(Protocol):
+    """Checks that a prepared result is still valid for its language, before it is used.
+
+    A validator runs on a **merged** result (a structural merge can produce text that is valid
+    JSONC but broken shell) and again before apply writes. It raises `SyntaxInvalid` on failure
+    and names the location only — the text is the user's settings and may hold a secret
+    (``AGENTS.md`` §4). `system` implements this; `services` only asks.
+    """
+
+    def check(self, text: str, *, subject: str) -> None:
+        """Raise `SyntaxInvalid` when `text` is not valid; return `None` when it is."""
         ...
 
 

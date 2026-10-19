@@ -93,17 +93,20 @@ def init(
     remote: str = typer.Option(..., "--remote", help="the encrypted settings repo's git URL"),
     import_file: Path | None = typer.Option(None, "--import", help="a recovery export to import a ring from"),
     recovery: Path | None = typer.Option(None, "--recovery", help="where to write the recovery export"),
-    path: str = typer.Option(".zshrc", "--path", help="the tracked path, relative to $HOME"),
-    preset: str = typer.Option("zsh", "--preset", help="the preset that owns the tracked path"),
+    preset: list[str] | None = typer.Option(
+        None, "--preset", help="a built-in preset to track; repeat for more than one (default: zsh)"
+    ),
 ) -> None:
     """Create a repo and its first key generation, or import a ring onto a second Mac.
 
-    `--path`/`--preset` name the single tracked text file. The real preset catalog is #6; until
-    then the configuration carries one local item (``docs/design/presets.md``).
+    Every file of every named built-in preset is tracked (`zsh` when none is named). The paths,
+    formats, and strip policies come from the catalog, so a typo in a preset name is refused here
+    rather than silently tracking nothing (``docs/design/presets.md``).
     """
     from syncintosh.core.config import SyncConfig
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.presets import BuiltinCatalog
     from syncintosh.services import import_ring, init_new_repo
     from syncintosh.services.keys import published_commitments
     from syncintosh.services.setup import mint_machine_id, new_machine_config
@@ -119,8 +122,8 @@ def init(
         config: SyncConfig = new_machine_config(
             remote=remote,
             machine_id=mint_machine_id(SecureFileIdSource()),
-            path=path,
-            preset=preset,
+            preset_names=tuple(preset) if preset else ("zsh",),
+            catalog=BuiltinCatalog.default(),
         )
         transport = GitCLITransport(paths.repo_dir)
         store = _key_store(remote)
@@ -159,6 +162,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.presets import BuiltinCatalog
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.ledger import JsonLedgerStore
@@ -168,6 +172,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.system.secret_scan import PatternSecretScanner
+    from syncintosh.system.zsh_check import ZshSyntaxValidator
     from syncintosh.vcs.git import GitCLITransport
 
     if adopt not in (None, "local", "remote"):
@@ -186,6 +191,8 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             codec=KeyMaterial(),
             driver=TextMergeDriver(),
             adapters={"jsonc": JsoncAdapter()},
+            catalog=BuiltinCatalog.default(),
+            validators={"zsh": ZshSyntaxValidator()},
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
             pending_store=DirectoryPendingStore(paths.pending_dir),
@@ -225,6 +232,8 @@ def _render(report: SyncReport, config) -> None:
         ("skipped (dangerous path)", report.skipped),
         ("refused (not a tracked path here)", report.refused),
         ("skipped (symbolic link)", report.symlinks),
+        ("unprojectable (preset keys could not be stripped or restored)", report.unprojectable),
+        ("invalid (would not pass its syntax check)", report.invalid),
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:

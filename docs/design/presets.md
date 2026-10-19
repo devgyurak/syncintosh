@@ -5,9 +5,25 @@
 Mac that actually has the app. Filled in by
 [#6](https://github.com/devgyurak/syncintosh/issues/6).
 
+A preset's `noise` and `excluded` keys are cut on the **collect** side, before the object is
+sealed, and re-attached from the live file on apply — so a noise change is invisible to the diff
+and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and-merge.md),
+"Projection").
+
 | Preset | Paths (relative to `$HOME`) | Format | Noise keys | Excluded in code | Bundle ID | Download URL | Cask |
 |---|---|---|---|---|---|---|---|
-| *(none verified yet)* | — | — | — | — | — | — | — |
+| `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
+
+### `zsh` notes
+
+- The five files zsh reads at startup, verified on a Mac (zsh 5.9, 2026-10). `ZDOTDIR` is **not**
+  honoured: a user who moves the startup files names paths this preset does not know, and the
+  apply-side catalog check refuses them rather than guessing.
+- `noise`/`excluded` are empty because `text` has no key paths to strip. A line-level merge of two
+  changed regions can still produce a file that does not parse, so the merge result and every
+  write are checked with `zsh -fn` (parse only, `-f` so no rc file runs).
+- A `~/.zshrc` that is a symlink is reported, never written through
+  ([03-manifest.md](03-manifest.md), "`~/.zshrc` that is a symlink").
 
 ## How a row gets filled
 

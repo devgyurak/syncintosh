@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Unit tests for the `init` configuration use-case."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+import pytest
+
+from syncintosh.core.errors import ConfigError
+from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.presets import BuiltinCatalog, zsh
+from syncintosh.services.setup import mint_machine_id, new_machine_config
+
+
+class _StubCatalog:
+    """A minimal `PresetCatalog` over an explicit preset list, for the error paths."""
+
+    def __init__(self, presets: Iterable[Preset]) -> None:
+        self._presets = tuple(presets)
+
+    def get(self, name: str) -> Preset | None:
+        return next((preset for preset in self._presets if preset.name == name), None)
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        return None
+
+    def knows(self, preset: str, path: str) -> bool:
+        return True
+
+
+def test_mint_machine_id_is_a_file_id() -> None:
+    # given
+    class Source:
+        def new_file_id(self) -> str:
+            return "a" * 32
+
+    # when
+    machine_id = mint_machine_id(Source())
+
+    # then
+    assert machine_id == "a" * 32
+
+
+def test_a_named_preset_expands_to_every_file_it_owns() -> None:
+    # when
+    config = new_machine_config(
+        remote="git@example.test:settings.git",
+        machine_id="machine-a",
+        preset_names=("zsh",),
+        catalog=BuiltinCatalog.default(),
+    )
+
+    # then
+    assert [item.path for item in config.items] == list(zsh.STARTUP_FILES)
+    assert {item.preset for item in config.items} == {"zsh"}
+    assert {item.format for item in config.items} == {"text"}
+    assert {item.scope for item in config.items} == {"common"}
+
+
+def test_an_unknown_preset_name_is_refused() -> None:
+    # when & then — tracking nothing looks exactly like a successful setup
+    with pytest.raises(ConfigError):
+        new_machine_config(
+            remote="git@example.test:settings.git",
+            machine_id="machine-a",
+            preset_names=("nonesuch",),
+            catalog=BuiltinCatalog.default(),
+        )
+
+
+def test_two_names_for_one_preset_are_refused() -> None:
+    # given
+    catalog = _StubCatalog((zsh.ZSH,))
+
+    # when & then — two items for one file would collide on every sync
+    with pytest.raises(ConfigError):
+        new_machine_config(
+            remote="git@example.test:settings.git",
+            machine_id="machine-a",
+            preset_names=("zsh", "zsh"),
+            catalog=catalog,
+        )

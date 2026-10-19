@@ -328,6 +328,17 @@ class _Diff:
         children = self._children(path)
         if not children:
             leaf = self._leaves.get(path)
+            if (
+                isinstance(leaf, EmptyObject)
+                and isinstance(node, _ObjectNode)
+                and node.members
+                and _clean_multiline_object(self._source, node)
+            ):
+                # The tree says this object is empty but the template still has members. Take
+                # them out line by line rather than rewriting the span, so a comment that sits
+                # above a member — and the keys' layout — survives (`_rewrite` would refuse it).
+                self._object(node, path, edits)
+                return
             if leaf is not None:
                 self._rewrite(node, _leaf_text(leaf), edits)
             return
