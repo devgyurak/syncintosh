@@ -7,11 +7,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.core.presets import ValidatorName
+from syncintosh.presets import BuiltinCatalog
 from syncintosh.services import Refusal, SyncReport
 
 runner = CliRunner()
@@ -205,3 +208,27 @@ def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeyp
     # code says the cycle did its job
     assert result.exit_code == 0
     assert "not tracked here: Library/Application Support/Code/User/settings.json" in _combined(result)
+
+
+def test_every_validator_name_is_wired_to_an_implementation() -> None:
+    # when — a preset names its syntax check by the string in `ValidatorName`
+    wired = main_module.validators()
+    declared = get_args(ValidatorName)
+
+    # then — each name this build declares has something to run it. A name with no implementation is
+    # **refused** at the write, so a missing entry here stops every file that names it from ever
+    # being applied, and nothing on the machine would say why.
+    assert sorted(wired) == sorted(declared)
+
+
+def test_every_preset_validator_is_wired() -> None:
+    # when — the checks the shipped presets actually ask for
+    used = {
+        file.validator
+        for preset in BuiltinCatalog.default().presets
+        for file in preset.files
+        if file.validator is not None
+    }
+
+    # then
+    assert used - set(main_module.validators()) == set()

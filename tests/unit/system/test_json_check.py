@@ -41,3 +41,19 @@ def test_a_refusal_names_the_subject_and_never_the_value() -> None:
     # then — the file is the user's configuration and may hold a credential (AGENTS.md §4)
     assert ".docker/config.json" in str(refusal.value)
     assert "MARKER-abc123" not in str(refusal.value)
+
+
+def test_a_byte_order_mark_does_not_make_a_valid_file_unwritable() -> None:
+    # given — an editor that saves a BOM, which `json.loads` refuses at column 1
+    text = "\ufeff" + VALID
+
+    # when & then — the mark is not content, so the document passes
+    JsonSyntaxValidator().check(text, subject=".docker/daemon.json")
+
+
+@pytest.mark.parametrize("text", ['{\n  "gc": NaN\n}', '{\n  "gc": Infinity\n}', '{\n  "gc": -Infinity\n}'])
+def test_a_json_extension_python_allows_and_go_refuses_is_refused(text: str) -> None:
+    # given — `json.loads` takes `NaN` and `Infinity` as an extension, and Docker's Go decoder does not
+    # when & then
+    with pytest.raises(SyntaxInvalid):
+        JsonSyntaxValidator().check(text, subject=".docker/daemon.json")

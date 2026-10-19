@@ -9,6 +9,7 @@ span that changed.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -624,9 +625,6 @@ _FUZZ_VALUES = st.recursive(
 
 _MUTATIONS = st.sampled_from(["reorder", "add", "drop", "change", "nested", "independent"])
 
-# Comments that sit *between* members, where a member edit never has to rewrite one, so a render is
-# always expected to succeed. This is the strict gate; the tolerant one below also allows comments in
-# positions a rewrite can legitimately refuse.
 # Where a comment can sit, and what it can say. The *text* matters as much as the position: a
 # settings file documents a path glob inside a line comment (`// hides **/*.map below`), which is a
 # `/*` and a `*/` and a `"` that must never be read as syntax.
@@ -680,6 +678,17 @@ _COMMENT_LISTS_AT_LEAST_ONE = st.lists(
     st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), min_size=1, max_size=2, unique_by=lambda pair: pair[0]
 )
 _LAYOUT = st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comments": _COMMENT_LISTS})
+
+# A trailing comma anywhere the file did not have one: a `,`, then only whitespace, then a closing
+# brace — whatever the newline style and however deep the object. A *string* may hold the same bytes
+# (`"a": ", }"`), so the string literals are masked out before the search.
+_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
+_TRAILING_COMMA = re.compile(r",\s*}")
+
+
+def _has_a_trailing_comma(text: str) -> bool:
+    """True when a `,` with only whitespace after it runs into a closing brace."""
+    return _TRAILING_COMMA.search(_STRING_LITERAL.sub('""', text)) is not None
 
 
 def _mutated(value, how):
@@ -740,22 +749,26 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
 @settings(max_examples=500, deadline=None)
 @given(value=_FUZZ_VALUES, how=_MUTATIONS, layout=_LAYOUT)
 def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout) -> None:
-    # given — a file laid out however an editor might have written it, and a tree derived from it
+    # given — a file laid out however an editor might have written it, commented wherever a comment
+    # can sit, and a tree a merge could hand back
     adapter = JsoncAdapter()
     template = _fuzz_template(value, **layout)
     tree = tree_from_value(_mutated(value, how))
 
-    # when
-    try:
-        rendered = adapter.render(tree, template)
-    except ContentParseError:
-        # A rewrite that would drop a comment is the only legitimate refusal, so the template has to
-        # be one that holds a comment; any other refusal is a bug this test exists to catch.
-        assert "//" in template or "/*" in template
-        return
+    # given again — the template has to be the document this case means to fuzz, or a failure below
+    # would be about the generator rather than the renderer
+    assert adapter.parse(template) == tree_from_value(value)
 
-    # then — the render must be the tree it was handed, or the merge publishes what no one decided
+    # when — nothing here may refuse. The comments sit between root members, where a member edit
+    # never needs to rewrite one, so a refusal is a bug and not a verdict — and a tolerated one would
+    # hide the very failures this property exists to catch.
+    rendered = adapter.render(tree, template)
+
+    # then — the render must be the tree it was handed, or the merge publishes what no one decided,
+    # and it must not invent layout the file did not have: a trailing comma, in the file's own
+    # newline style and at any depth, is the one that broke Docker's `config.json`
     assert adapter.parse(rendered) == tree
+    assert layout["trailing"] or not _has_a_trailing_comma(rendered)
 
 
 def test_a_block_comment_that_closes_below_a_member_keeps_the_next_member_out_of_it() -> None:
@@ -855,3 +868,18 @@ def test_deleting_the_last_member_does_not_invent_a_trailing_comma() -> None:
     assert rendered == '{\n  "psFormat": "b",\n  "detachKeys": "ctrl-e,e"\n}\n'
     assert adapter.parse(rendered) == tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"})
     assert tree != tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"})
+
+
+def test_a_carriage_return_inside_a_comment_does_not_make_the_file_crlf() -> None:
+    # given — an LF file whose comment quotes a Windows line ending
+    adapter = JsoncAdapter()
+    text = '{\n  "a": 1, // pasted from Windows\r\n  "b": 2\n}\n'
+    tree = tree_from_value({"a": 1, "b": 2, "c": 3})
+
+    # when
+    rendered = adapter.render(tree, text)
+
+    # then — the inserted line ends the way the file's own lines do, instead of splitting the file
+    # between two line-ending styles
+    assert rendered == '{\n  "a": 1, // pasted from Windows\r\n  "b": 2,\n  "c": 3\n}\n'
+    assert adapter.parse(rendered) == tree

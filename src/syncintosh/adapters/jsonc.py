@@ -321,7 +321,7 @@ class _Diff:
                 keys = self._kids.setdefault(path[:index], [])
                 if path[index] not in keys:
                     keys.append(path[index])
-        self._indent, self._newline = _detect_style(text, root)
+        self._indent, self._newline = _detect_style(text, root, comments)
 
     def apply(self) -> str:
         edits: list[_Edit] = []
@@ -694,14 +694,21 @@ def _leaf_text(node: Node) -> str:
     return "{}"
 
 
-def _detect_style(text: str, root: _AstNode) -> tuple[str, str]:
-    """The indent unit and newline style, read from the first indented member if there is one."""
-    newline = "\r\n" if "\r\n" in text else "\n"
+def _detect_style(text: str, root: _AstNode, comments: _Comments) -> tuple[str, str]:
+    """The indent unit and newline style, read from the file's own lines.
+
+    The newline is read from the text *outside* the comments. A raw `\\r\\n` cannot be inside a JSON
+    string (a JSON string cannot hold a raw newline at all), so a comment is where a pasted Windows
+    snippet lands — and reading it there made the whole file CRLF, so every inserted line was
+    terminated the other way from the lines around it.
+    """
+    outside = comments.without_comments(0, len(text))
+    newline = "\r\n" if "\r\n" in outside else "\n"
     indent = "  "
     if isinstance(root, _ObjectNode) and root.members:
         leading = text[_line_start(text, root.members[0].span.start) : root.members[0].span.start]
         if leading and leading.strip() == "":
-            indent = leading
+            indent = leading.strip("\r\n")
     return indent, newline
 
 
@@ -734,12 +741,6 @@ def _member_tail_clean(comments: _Comments, value_end: int) -> bool:
     # The comments are masked out with the parse's own spans, so a `, // hides **/*.map` tail reads
     # as a comma rather than as text that only looks like syntax.
     return comments.without_comments(value_end, line_end).strip() in ("", ",")
-
-
-def _skip_spaces(text: str, pos: int) -> int:
-    while pos < len(text) and text[pos] in _SPACES:
-        pos += 1
-    return pos
 
 
 @dataclass(frozen=True)

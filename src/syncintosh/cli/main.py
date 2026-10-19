@@ -16,6 +16,8 @@ from pathlib import Path
 import typer
 
 from syncintosh.core.errors import DomainError
+from syncintosh.core.ports import SyntaxValidator
+from syncintosh.core.presets import ValidatorName
 from syncintosh.services import SyncReport
 from syncintosh.services import sync as sync_service
 
@@ -60,6 +62,20 @@ def _key_store(remote: str):
 def _fail(exc: DomainError) -> None:
     typer.echo(f"error: {exc}", err=True)
     raise typer.Exit(code=1)
+
+
+def validators() -> dict[ValidatorName, SyntaxValidator]:
+    """Every syntax check a preset may name, wired to its implementation.
+
+    A preset names a check by the string in `ValidatorName`; a name with no implementation is
+    **refused** at the write, so a missing entry here stops the file from ever being applied on this
+    machine. `tests/unit/test_cli.py` compares this map against the literal, so adding a name without
+    wiring it fails in CI rather than on a user's machine.
+    """
+    from syncintosh.system.json_check import JsonSyntaxValidator
+    from syncintosh.system.zsh_check import ZshSyntaxValidator
+
+    return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()}
 
 
 @app.command()
@@ -165,7 +181,6 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.presets import BuiltinCatalog
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.json_check import JsonSyntaxValidator
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
@@ -173,7 +188,6 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.system.secret_scan import PatternSecretScanner
-    from syncintosh.system.zsh_check import ZshSyntaxValidator
     from syncintosh.vcs.git import GitCLITransport
 
     if adopt not in (None, "local", "remote"):
@@ -193,7 +207,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             driver=TextMergeDriver(),
             adapters={"jsonc": JsoncAdapter()},
             catalog=BuiltinCatalog.default(),
-            validators={"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()},
+            validators=validators(),
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
             pending_store=DirectoryPendingStore(paths.pending_dir),
