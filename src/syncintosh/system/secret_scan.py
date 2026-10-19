@@ -51,21 +51,25 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 #   (`proxy='http://u:$PASS@h'`) or behind a backslash is *not* expanded by the shell, so the text
 #   itself is the credential — hence a second pattern for that case rather than a wider skip.
 #
-# What a literal password may hold is a **fail-closed** choice, not a grammar one. `,`, `?`, `#`, and
-# `"` all appear *between* values or *end* a URL — a settings line
-# `{"proxy":"http://h:3128","email":"a@b.c"}`, a `NO_PROXY` list, a query, a fragment — where matching
-# across them reads text between a port and a later `@` as a credential and stops **every** tracked
-# file on the machine from syncing. `;` is different, and stays *in*: RFC 3986 allows it in a userinfo,
-# so `http://me:s3cr;t@proxy` is a real credential, and the same bytes in a `;`-separated list are a
-# false positive with no way to tell the two apart from the text. A refusal is visible and names its
-# reason; a leak is neither, so the ambiguous one fails closed. Issue #25 narrows it with a
-# user-defined allowlist rather than by loosening the pattern.
-_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,?#\"]+@"
+# What a literal password may hold is a **fail-closed** choice, not a grammar one. RFC 3986 allows
+# `,` and `;` in a userinfo, so `http://me:pa,ss@proxy` and `http://me:s3cr;t@proxy` are real
+# credentials — and the same bytes are what separates entries in a list, where they are not
+# (`{"proxy":"http://h:3128","email":"a@b.c"}`, `NO_PROXY=http://h:80,user@x.example.test`). No
+# pattern can tell the two apart from the text, and of the two mistakes a refusal is visible and
+# names its reason while a leak is neither, so both stay **in** the password.
+#
+# `?`, `#`, and `"` stay *out*, and that is what keeps the false positives away rather than luck: a
+# URL's authority ends at the first `?` or `#`, so no unencoded password can contain one, and a `"`
+# is what ends a JSON string — without it, `{"proxy":"http://h:3128","email":"a@b.c"}` matched from
+# the port to the later `@`. A space or a `/` ends the match for the same reason.
+#
+# Issue #25 is where a user-defined allowlist would let a legitimate list through again.
+_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s?#\"]+@"
 
 # A URL the shell passes through verbatim, so its password is a literal and may hold anything a URL
-# may — `,`, `?`, `#`, and `"` included. `;` and `'` stay out: they end the quoted string, and
+# may — `,`, `;`, `?`, `#`, and `"` included. `'` stays out: it is what ends the quoted string, and
 # `m='http://h:3128';me@x.com` would otherwise read `3128';me` as the password.
-_URL_QUOTED_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:[^/@\s;']+@"
+_URL_QUOTED_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:[^/@\s']+@"
 
 # A password that is only a reference, in a file where the shell would expand it.
 _REFERENCE_PASSWORD = rb"(?!\$\{?[A-Za-z_]\w*\}?@)"
@@ -79,6 +83,17 @@ _SHELL_FORMATS = ("text",)
 STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     *COMMON_PATTERNS,
     ("URL with credentials", re.compile(_URL_CREDENTIALS % rb"")),
+    # An `Authorization` header value — `Basic <base64>` — which is how a credential is spelled when
+    # it is **not** under a key a preset excludes: commented out, or under a key this build has never
+    # heard of. Excluding a key is a promise about the key, and the scan is what keeps the promise
+    # when the value is somewhere else in the same file (a VS Code settings comment, for one).
+    #
+    # The token has to be 16 base64 characters or more, and that threshold is deliberate rather than
+    # tidy: a word of 16+ letters is what a *comment* holds immediately after `Basic` in prose
+    # (`// Basic authentication is configured below` is 14, and a refusal there would stop every
+    # tracked file for nothing). It is a heuristic in front of the real gate (``AGENTS.md`` §6), so a
+    # shorter token than that is left to the key exclusion and to the user's own review.
+    ("HTTP Basic credential", re.compile(rb"\bBasic\s+[A-Za-z0-9+/]{16,}={0,2}")),
 )
 
 # A shell file. Two spellings, because the shell decides what a `$` means by the quoting around it:
