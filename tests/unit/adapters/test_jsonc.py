@@ -669,11 +669,17 @@ _LAYOUT_FIELDS_INDENTED = {**_LAYOUT_FIELDS, "indent": st.sampled_from(["  ", "\
 # The same fields as a strategy, for a property that draws its comments separately.
 _LAYOUT_INDENTED = st.fixed_dictionaries(_LAYOUT_FIELDS_INDENTED)
 
-# Up to two comments: the shapes that broke the renderer need one whose text holds `/*` and a later
-# one that closes it, which is a document a person writes and a single comment cannot express.
-_LAYOUT = st.fixed_dictionaries(
-    {**_LAYOUT_FIELDS_INDENTED, "comments": st.lists(st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), max_size=2)}
+# Up to two comments at *different* places: the shapes that broke the renderer need one whose text
+# holds `/*` and a later one that closes it, which is a document a person writes and a single comment
+# cannot express. Two at the same place would put one comment inside the other's text — text the
+# parser would read as a member, which is not a document anyone has.
+_COMMENT_LISTS = st.lists(st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), max_size=2, unique_by=lambda pair: pair[0])
+
+# The same, with at least one comment: every example of the edit property has to exercise one.
+_COMMENT_LISTS_AT_LEAST_ONE = st.lists(
+    st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), min_size=1, max_size=2, unique_by=lambda pair: pair[0]
 )
+_LAYOUT = st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comments": _COMMENT_LISTS})
 
 
 def _mutated(value, how):
@@ -813,7 +819,7 @@ def test_a_member_added_between_reordered_members_gets_its_comma() -> None:
 @given(
     value=_FUZZ_VALUES,
     how=st.sampled_from(["drop", "add"]),
-    comments=st.lists(st.tuples(_COMMENT_PLACEMENTS, _COMMENT_TEXTS), min_size=1, max_size=2),
+    comments=_COMMENT_LISTS_AT_LEAST_ONE,
     layout=_LAYOUT_INDENTED,
 )
 def test_a_commented_document_renders_a_member_edit_cleanly(value, how, comments, layout) -> None:
@@ -823,6 +829,10 @@ def test_a_commented_document_renders_a_member_edit_cleanly(value, how, comments
     adapter = JsoncAdapter()
     template = _fuzz_template(value, comments=comments, **layout)
     tree = tree_from_value(_mutated(value, how))
+
+    # given again — the template has to be the document this case means to fuzz, or a refusal below
+    # would be about the generator rather than the renderer
+    assert adapter.parse(template) == tree_from_value(value)
 
     # when
     rendered = adapter.render(tree, template)

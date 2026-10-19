@@ -790,11 +790,17 @@ class _Comments:
         return "".join(pieces)
 
     def is_own_line_comment(self, line_start: int, line_end: int) -> bool:
-        """True when the line holds nothing but whitespace and a `//` comment that ends it."""
-        if self.without_comments(line_start, line_end).strip():
-            return False
+        """True when the line holds nothing but whitespace and a `//` comment that ends it.
+
+        The comment has to *start* the line. A line can be the inside of a block comment and still
+        look like one — `/* fuzz` above, `still */ // note` here — and stepping the insertion over it
+        would put the new member inside the comment, where it parses as nothing.
+        """
+        first = line_start
+        while first < line_end and self.text[first] in _SPACES:
+            first += 1
         return any(
-            span.start >= line_start and span.end >= line_end - 1 and self.text.startswith("//", span.start)
+            span.start == first and span.end >= line_end - 1 and self.text.startswith("//", span.start)
             for span in self.spans
         )
 
