@@ -51,13 +51,13 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 #   (`proxy='http://u:$PASS@h'`) or behind a backslash is *not* expanded by the shell, so the text
 #   itself is the credential — hence a second pattern for that case rather than a wider skip.
 #
-# A password that is matched as a literal may not contain `,` or `"`: those are what sits between
-# two values in a settings file or a `NO_PROXY` list, and a line like
-# `{"proxy":"http://h:3128","email":"a@b.c"}` otherwise reads the text between the port and the
-# email's `@` as a credential — a false positive that would stop every tracked file on the machine
-# from syncing. `?` and `#` are not needed for that and stay matchable, since a query or a fragment
-# can be part of a real URL.
-_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,\"]+@"
+# A password may not contain `,`, `;`, `?`, `#`, or `"`. Those are what sits *between* values or
+# *ends* a URL: a settings line `{"proxy":"http://h:3128","email":"a@b.c"}`, a `NO_PROXY` list, a
+# query, a fragment. Matching across them reads the text between a port and a later `@` as a
+# credential — a false positive that stops **every** tracked file on the machine from syncing — and a
+# password cannot really contain them anyway: a URL's authority ends at the first `?` or `#`, and a
+# `;` in the environments where the false positive shows up separates two values.
+_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,;?#\"]+@"
 
 # A URL the shell passes through verbatim, so its password is a literal and may hold anything a URL
 # may — `,`, `?`, `#`, and `"` included. `;` and `'` stay out: they end the quoted string, and

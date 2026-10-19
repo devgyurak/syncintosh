@@ -157,6 +157,9 @@ def test_a_literal_password_in_a_shell_file_is_refused(payload: bytes) -> None:
         b"git@github.com:user/repo.git",
         b"redis://cache.example.test:6379/0",
         b"https://example.test/path?token=looks-secret",
+        b"http://h:3128;me@x.com",  # a `;`-separated list, not a credential
+        b'{"http.proxy": "http://u:pa?ss@h"}',  # `?` starts a query, so `pa` is the password
+        b'{"http.proxy": "http://u:pa#ss@h"}',  # `#` starts a fragment
     ],
 )
 def test_a_line_that_merely_carries_an_at_sign_passes(payload: bytes) -> None:
