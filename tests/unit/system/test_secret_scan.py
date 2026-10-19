@@ -19,6 +19,12 @@ AWS = b"AKIA" + b"ABCDEFGHIJKLMNOP"
 GITHUB = b"ghp_" + b"a" * 36
 GITHUB_PAT = b"github_pat_" + b"b" * 24
 SLACK = b"xoxb-" + b"0" * 12
+# A proxy URL with inline credentials — the shape an `http.proxy` setting or a `.zshrc` token
+# URL takes. Concatenated for the same reason as the others.
+PROXY_URL = b"http://" + b"builder" + b":" + b"pw-placeholder" + b"@" + b"proxy.example.test:3128"
+# JSON allows the slashes to be escaped (`\/`), and the projection preserves an unchanged
+# value verbatim, so the escaped spelling has to be matched too.
+ESCAPED_PROXY_URL = rb"http:\/\/" + b"builder" + b":" + b"pw-placeholder" + b"@" + b"proxy.example.test:3128"
 
 SECRETS = [
     ("private key", PEM),
@@ -26,6 +32,8 @@ SECRETS = [
     ("GitHub token", GITHUB),
     ("GitHub fine-grained token", GITHUB_PAT),
     ("Slack token", SLACK),
+    ("URL with credentials", PROXY_URL),
+    ("URL with credentials", ESCAPED_PROXY_URL),
 ]
 
 
@@ -73,3 +81,20 @@ def test_the_first_match_is_reported() -> None:
     with pytest.raises(SecretScanError) as caught:
         scanner.scan(payload, subject="settings.json")
     assert "line 1" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"http://proxy.example.test:3128",  # a host and a port, no userinfo
+        b"ssh://git@github.com/user/repo.git",  # a user, no password
+        b"https://example.test/path?token=looks-secret",  # a query parameter, not userinfo
+        b"redis://cache.example.test:6379/0",
+    ],
+)
+def test_a_url_without_inline_credentials_passes(payload: bytes) -> None:
+    # given — the `@` and the port alone are not a credential (decision V2: high signal only)
+    scanner = PatternSecretScanner()
+
+    # when & then
+    assert scanner.scan(payload, subject="settings.json") is None

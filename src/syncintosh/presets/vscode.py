@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The built-in `vscode` preset: `settings.json` and `keybindings.json`, source-verified.
+
+**Evidence: verified against the source; not inspected on a real machine** (the user approved
+that exception for this preset — decision V4 of issue #6). VS Code is not installed on the
+machine this was written on, so every value below comes from the code and the vendor's own
+documentation rather than from a local file:
+
+```
+App:       Visual Studio Code (stable)
+Bundle ID: com.microsoft.VSCode        (the Homebrew cask's zap paths)
+Paths:     ~/Library/Application Support/Code/User/settings.json    (JSONC object)
+           ~/Library/Application Support/Code/User/keybindings.json (JSONC array, compared whole)
+Format:    JSONC (comments and trailing commas; `setProperty` edits preserve both)
+Noise:     the keys `userDataSync` computes as "not synced" — see below
+Excluded:  http.proxyAuthorization
+Download:  https://code.visualstudio.com/download      cask: visual-studio-code
+```
+
+Sources:
+
+- `microsoft/vscode` `main`: `src/vs/platform/userDataSync/common/userDataSync.ts` —
+  `getIgnoredSettings`, which is what makes a setting "not synced":
+  `properties[key].ignoreSync || scope === MACHINE || scope === MACHINE_OVERRIDABLE`. There is no
+  hard-coded list any more; the set is computed from each setting's registration, which is why
+  this preset's list is the setting ids that registration marks.
+- `microsoft/vscode` `main`: `src/vs/workbench/services/configuration/common/configurationEditing.ts`
+  (`setProperty` rewrites only the value's span, so comments survive) and
+  `src/vs/platform/files/node/diskFileSystemProvider.ts` (an atomic `.vsctmp` + rename save, so a
+  copy-based collect never reads a half-written file).
+- `code.visualstudio.com/docs/configure/settings` and `brew info --cask visual-studio-code`.
+
+## What is noise, and why it is safe to name a key that never matches
+
+A `noise` entry is a **match** against the file: a key that is not there is simply not stripped.
+So a stale entry is a no-op, while a *missing* one is churn on every sync — the asymmetry is why
+the list errs towards completeness, and why the fixture only carries keys whose names the
+research confirmed. `terminal.integrated.*` is deliberately **absent**: upstream syncs it, so
+this preset does too (decision V1).
+
+**The same reasoning does not extend to `excluded`.** A `noise` typo costs nothing; an `excluded`
+typo means the credential is not cut, and `http.proxyAuthorization`'s value is a literal
+`Basic <base64>`, which the secret scan cannot classify. So both spellings are registered rather
+than the one that looks canonical today.
+
+`keybindings.json` has no strip list at all, which leaves the secret scan as the only gate for it:
+a credential shape the scan does not know would be sealed. That is the accepted limit of a
+heuristic backstop (``AGENTS.md`` §6), and the reason the `scheme://user:pass@` pattern was added
+with this preset.
+
+## What is out of scope
+
+- A non-default profile (`User/profiles/<id>/`) has its own `settings.json`; a local catalog
+  cannot tell which profile a path belongs to. Refused by the apply-side catalog check rather
+  than guessed at.
+- `settingsSync.ignoredSettings` is not consulted: reproducing VS Code's own ignore list would
+  mean reading a setting the sync never applies, and it is a follow-up (issue #6, V3).
+- `snippets/`, `tasks.json`, `mcp.json`, Insiders, portable mode, and `--user-data-dir` are not
+  tracked. `mcp.json` in particular holds server `env` and `headers`, which are credentials, and
+  it needs its own exclusion pass before it can be collected safely.
+"""
+
+from __future__ import annotations
+
+from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.core.tree import KeyPath
+
+SETTINGS = "Library/Application Support/Code/User/settings.json"
+KEYBINDINGS = "Library/Application Support/Code/User/keybindings.json"
+
+# Machine-local settings: the ones `userDataSync.getIgnoredSettings` excludes (a registration with
+# `ignoreSync`, or `scope: MACHINE` / `MACHINE_OVERRIDABLE`). They are cut on the collect side, so
+# a changed zoom level or editor path produces neither a diff nor a conflict, and each machine
+# keeps its own value.
+NOISE: frozenset[KeyPath] = frozenset(
+    {
+        # The window's own geometry: written per machine, and ignored by Settings Sync.
+        ("window.zoomLevel",),
+        ("keyboard.layout",),
+        # An absolute path to wherever this machine keeps its projects and dialogs.
+        ("files.dialog.defaultPath",),
+        ("workbench.welcomePage.walkthroughs.openOnInstall",),
+        ("http.useLocalProxyConfiguration",),
+        # A git binary and clone directory per machine, and two "don't warn me again" flags whose
+        # answer is a user's local choice.
+        ("git.path",),
+        ("git.defaultCloneDirectory",),
+        ("git.ignoreMissingGitWarning",),
+        ("git.ignoreLegacyWarning",),
+        # Package managers, tsserver plugin directories, and profiler output: absolute paths.
+        ("typescript.npm",),
+        ("typescript.tsserver.pluginPaths",),
+        ("js/ts.tsserver.npm.path",),
+        ("js/ts.tsserver.diagnosticDir",),
+        ("js/ts.tsserver.heapProfile",),
+        ("js/ts.tsserver.pluginPaths",),
+        ("php.validate.executablePath",),
+        ("emmet.extensionsPath",),
+    }
+)
+
+# Credentials. `http.proxyAuthorization` is how you hand VS Code a proxy's credentials, and the
+# value is typically a literal `Basic <base64>`. Registered in **both** shapes a file can spell it
+# in — the dotted key VS Code writes, and a nested object — so neither spelling can carry a
+# credential into the repo (decision V2).
+EXCLUDED: frozenset[KeyPath] = frozenset({("http.proxyAuthorization",), ("http", "proxyAuthorization")})
+
+VSCODE = Preset.create(
+    name="vscode",
+    files=(
+        PresetFile.create(path=SETTINGS, format="jsonc", noise=NOISE, excluded=EXCLUDED),
+        # No strip list: an array is compared whole by the merge engine, so there is no key to cut.
+        # A change to the same binding on both machines is therefore a whole-file conflict, which
+        # is correct — the array's order carries meaning (a later entry overrides an earlier one),
+        # so identifying entries by key would silently change behaviour (decision V6).
+        PresetFile.create(path=KEYBINDINGS, format="jsonc"),
+    ),
+    bundle_id="com.microsoft.VSCode",
+    download_url="https://code.visualstudio.com/download",
+    cask="visual-studio-code",
+)
+
+__all__ = ["EXCLUDED", "KEYBINDINGS", "NOISE", "SETTINGS", "VSCODE"]

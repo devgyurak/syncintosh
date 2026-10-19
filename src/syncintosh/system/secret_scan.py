@@ -28,6 +28,12 @@ PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("GitHub fine-grained token", re.compile(rb"\bgithub_pat_[0-9A-Za-z_]{22,}\b")),
     # Slack token, across the bot/user/app/refresh/workspace prefixes.
     ("Slack token", re.compile(rb"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
+    # A URL carrying credentials inline: `scheme://user:password@host`. The colon in the userinfo
+    # next to an `@` is rare outside an actual credential, and this is the shape a proxy URL takes
+    # in `http.proxy`, a proxy setting in `~/.zshrc`, or a git remote with a token — none of which
+    # the patterns above would notice (decision V2). The slashes may be JSON-escaped (`\/`), which
+    # the JSONC projection preserves verbatim for an unchanged value, so both spellings are matched.
+    ("URL with credentials", re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:[^/@\s\\]+@")),
 )
 
 

@@ -10,5 +10,21 @@
     // The Python formatter is not a built-in.
     "editor.formatOnSave": true,
     "editor.defaultFormatter": "charliermarsh.ruff",
-  }
+  },
+  // Machine-local values. VS Code's Settings Sync does not sync these, so neither does syncintosh.
+  "window.zoomLevel": 1,
+  "keyboard.layout": {
+    "osx": "com.apple.keylayout.ABC",
+  },
+  "files.dialog.defaultPath": "/Users/example/Documents",
+  "http.useLocalProxyConfiguration": false,
+  "git.path": "/usr/local/bin/git",
+  "git.defaultCloneDirectory": "/Users/example/Developer",
+  "git.ignoreMissingGitWarning": true,
+  "typescript.npm": "/usr/local/bin/npm",
+  "typescript.tsserver.pluginPaths": ["/Users/example/ts-plugins"],
+  "php.validate.executablePath": "/usr/local/bin/php",
+  "emmet.extensionsPath": ["/Users/example/emmet"],
+  // A proxy credential. Stripped before the file is sealed.
+  "http.proxyAuthorization": "Basic PROXY-AUTH-MARKER",
 }
