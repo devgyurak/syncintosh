@@ -165,6 +165,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.presets import BuiltinCatalog
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.json_check import JsonSyntaxValidator
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
@@ -192,7 +193,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             driver=TextMergeDriver(),
             adapters={"jsonc": JsoncAdapter()},
             catalog=BuiltinCatalog.default(),
-            validators={"zsh": ZshSyntaxValidator()},
+            validators={"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()},
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
             pending_store=DirectoryPendingStore(paths.pending_dir),
