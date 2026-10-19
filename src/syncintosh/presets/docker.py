@@ -43,6 +43,15 @@ Desktop's `/Applications/Docker.app`, and `brew info --cask docker-desktop`.
 - `~/.docker/certs.d/` and `~/.docker/tls/` (Docker's registry-CA locations) were absent, as was
   `~/.docker/contexts/tls/`. Only the last is denied today — see `system/deny_list.py`.
 
+## `credsStore` and `credHelpers` are machine-local, not portable
+
+Both name a **helper binary on this machine** (`docker-credential-<value>`), so they say where
+credentials live *here*, not what the user prefers. A Mac running Docker Desktop stores
+`credsStore: "desktop"`; one running colima or OrbStack stores `"osxkeychain"`. Syncing either would
+overwrite the other machine's helper name, and the next `docker pull` there would fail with
+`docker-credential-desktop: executable file not found` — with its already-stored logins
+unreachable. They are `noise`: each machine keeps its own.
+
 ## Why `auths` is cut rather than ignored
 
 The merge's `ignore` set keeps a key out of a *conflict* but still writes its value into the
@@ -65,15 +74,16 @@ DAEMON = ".docker/daemon.json"
 # documented places for a `user:pass@` URL and an arbitrary (possibly `Authorization:`) header.
 CREDENTIAL_KEYS: frozenset[tuple[str, ...]] = frozenset({("auths",), ("proxies",), ("HttpHeaders",)})
 
+# Machine-local by nature: a helper binary's name, and the endpoint this machine talks to.
+NOISE_KEYS: frozenset[tuple[str, ...]] = frozenset({("currentContext",), ("credsStore",), ("credHelpers",)})
+
 DOCKER = Preset.create(
     name="docker",
     files=(
         PresetFile.create(
             path=CONFIG,
             format="jsonc",
-            # The active context names an endpoint that can differ per machine (a laptop may point
-            # at a remote builder). Syncing it would silently flip the other Mac's context.
-            noise={("currentContext",)},
+            noise=NOISE_KEYS,
             excluded=CREDENTIAL_KEYS,
         ),
         # The daemon config's `proxies` is a `user:pass@` URL carrier. `HttpHeaders` is a CLI-only
@@ -85,4 +95,4 @@ DOCKER = Preset.create(
     cask="docker-desktop",
 )
 
-__all__ = ["CONFIG", "CREDENTIAL_KEYS", "DAEMON", "DOCKER"]
+__all__ = ["CONFIG", "CREDENTIAL_KEYS", "DAEMON", "DOCKER", "NOISE_KEYS"]

@@ -199,10 +199,14 @@ def test_a_collected_docker_config_never_carries_auths(tmp_path, memory_key_stor
     assert [blob for blob in plaintexts if b"dXNlcjpwYXNzd29yZA==" in blob] == []
     assert [blob for blob in plaintexts if b"ZGV2OnNlY3JldA==" in blob] == []
     # the parts that are settings do travel
-    assert any(b"credsStore" in blob for blob in plaintexts)
     assert any(b"defaultKeepStorage" in blob for blob in plaintexts)
-    # and this machine's own file keeps its credentials
+    # a helper binary's name is this machine's own, so it does not travel either
+    assert [blob for blob in plaintexts if b"credsStore" in blob] == []
+    # and this machine's own file keeps its credentials and its helper name
     assert b"auths" in _read(machine, CONFIG)
+    assert b'"credsStore": "osxkeychain"' in _read(machine, CONFIG) or b'"credsStore": "desktop"' in _read(
+        machine, CONFIG
+    )
 
 
 def test_documented_credential_carriers_never_reach_an_object(tmp_path, memory_key_store) -> None:
@@ -252,18 +256,19 @@ def test_apply_keeps_this_machines_docker_auths(tmp_path, memory_key_store) -> N
     local = (
         _fixture("config.json")
         .replace(b"dXNlcjpwYXNzd29yZA==", b"bG9jYWw6b25seQ==")
-        .replace(b'"desktop"', b'"osxkeychain"')
+        .replace(b'"credsStore": "desktop"', b'"credsStore": "osxkeychain"')
     )
     _write(b, CONFIG, local)
 
     # when — B takes the repo's side
     _run(b, adopt="remote")
 
-    # then — the repo's setting landed and B's credential survived untouched
+    # then — the repo's settings landed, and B's credential *and* its helper name survived: A runs
+    # Docker Desktop and B runs colima, so A's `desktop` helper binary does not exist on B
     merged = _read(b, CONFIG)
     assert b"bG9jYWw6b25seQ==" in merged
-    assert b'"credsStore": "desktop"' in merged
-    assert b'"osxkeychain"' not in merged
+    assert b'"credsStore": "osxkeychain"' in merged
+    assert b'"desktop"' not in merged
 
 
 def test_a_machine_without_a_docker_config_gets_one_without_auths(tmp_path, memory_key_store) -> None:
@@ -280,11 +285,13 @@ def test_a_machine_without_a_docker_config_gets_one_without_auths(tmp_path, memo
     # when
     report = _run(b)
 
-    # then — the file is created, and it carries no credential store at all
+    # then — the file is created with the shared settings, and neither a credential nor another
+    # machine's helper name is invented for it
     assert CONFIG in report.applied
     created = _read(b, CONFIG)
     assert b"auths" not in created
-    assert b"credsStore" in created
+    assert b"credsStore" not in created
+    assert b"currentContext" not in created
 
 
 def test_a_machine_without_the_docker_directory_defers(tmp_path, memory_key_store) -> None:
@@ -333,7 +340,7 @@ def test_a_corrupt_docker_config_is_refused_and_nothing_is_written(tmp_path, mem
     report = _run(machine)
 
     # then — fail-closed: reported, never sealed raw, and no object written
-    assert report.unprojectable == (CONFIG,)
+    assert [refusal.path for refusal in report.unprojectable] == [CONFIG]
     assert FileRepo(machine.repo).list_paths("objects") == ()
     assert _read(machine, CONFIG) == b'{\n  "auths": {\n'
 

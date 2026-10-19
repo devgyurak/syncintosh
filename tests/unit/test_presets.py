@@ -170,12 +170,15 @@ def test_the_docker_preset_excludes_its_credential_keys() -> None:
     excluded = config.excluded
     noise = config.noise
 
-    # then — a credential is cut before sealing; the active context is this machine's choice
+    # then — a credential is cut before sealing; a helper binary's name and the active context
+    # are this machine's own, so they stay here
     assert excluded == docker.CREDENTIAL_KEYS
     assert ("auths",) in excluded
     assert ("proxies",) in excluded
     assert ("HttpHeaders",) in excluded
-    assert ("currentContext",) in noise
+    assert noise == docker.NOISE_KEYS
+    assert ("credsStore",) in noise
+    assert ("credHelpers",) in noise
     assert excluded & noise == frozenset()
 
 

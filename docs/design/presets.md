@@ -13,7 +13,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | Preset | Paths (relative to `$HOME`) | Format | Noise keys | Excluded in code | Bundle ID | Download URL | Cask |
 |---|---|---|---|---|---|---|---|
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
-| `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
+| `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 
 ### `docker` notes
 
@@ -31,10 +31,14 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
     documented place for `Authorization: Bearer …`. The secret scan matches known token shapes, not
     "this value looks like a header", so nothing else would catch it. A custom header set must
     therefore be reproduced per machine.
-- `currentContext` is the endpoint this machine talks to; syncing it would silently flip the other
-  Mac's context. The `plugins` map is synced: Step 0 showed its `hooks` values are neither paths
-  nor booleans, so there is no evidence they are machine-local — a follow-up noise entry if they
-  ever churn.
+- `currentContext` is the endpoint this machine talks to, and `credsStore`/`credHelpers` name a
+  credential-helper binary that exists **on this machine** (`docker-credential-<value>`). Syncing
+  either would flip the other Mac's context, or point it at a helper it does not have — a Mac
+  running Docker Desktop stores `desktop` where colima or OrbStack stores `osxkeychain`, and the
+  next `docker pull` there would fail with `executable file not found` while its own stored logins
+  became unreachable. All three are `noise`, so each machine keeps its own.
+- The `plugins` map, by contrast, is synced: Step 0 showed its `hooks` values are neither paths nor
+  booleans, so there is no evidence they are machine-local — a follow-up noise entry if they churn.
 - `~/.docker/contexts/tls/` is in the deny-list (`system/deny_list.py`). `certs.d/`,
   `~/.docker/tls/`, and the `ca.pem`/`cert.pem`/`key.pem` defaults the CLI reference documents
   were absent on the inspected machine, so they are not denied yet: a user would have to add such
