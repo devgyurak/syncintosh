@@ -549,3 +549,53 @@ def test_splicing_a_single_line_object_is_a_byte_exact_round_trip(template, repo
 
     # then — anything else would make the apply ledger's digest drift forever
     assert projected == template
+
+
+def test_a_removed_member_is_not_copied_back_into_the_gap() -> None:
+    # given — a member in the middle goes, and a new one arrives
+    adapter = JsoncAdapter()
+    text = '{"a":1,"x":2,"b":3}'
+    remote = '{"a":1,"b":3,"c":4}'
+
+    # when
+    merged = _merged(text, text, remote)
+    rendered = adapter.render(merged, text)
+
+    # then — the separator between `a` and the new member must not be the slice that still holds
+    # `x`, or the removed member comes back and the render stops matching the tree
+    assert merged == _merged(text, text, remote)
+    assert "x" not in rendered
+    assert adapter.parse(rendered) == merged
+
+
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ('{"auths": {"x": 1},}', "{}"),  # a trailing comma goes with the last member
+        ('{"auths": {"x": 1}}', "{}"),
+        ('{ "auths": {"x": 1} , }', "{ }"),  # the padding after `{` stays
+    ],
+)
+def test_emptying_a_single_line_object_leaves_a_valid_object(template, expected) -> None:
+    # when — the tree says the object is empty
+    rendered = JsoncAdapter().render(tree_from_value({}), template)
+
+    # then — `{,}` would not parse, and the file would be unprojectable on every later sync
+    assert rendered == expected
+    assert JsoncAdapter().parse(rendered) == tree_from_value({})
+
+
+def test_a_block_comment_whose_last_line_starts_with_slashes_stops_the_walk() -> None:
+    # given — a block comment whose closing line starts with `//`, and a tree that adds a member
+    # before the commented member
+    adapter = JsoncAdapter()
+    text = '{\n  /* note\n  // still inside */\n  "a": 1\n}\n'
+    tree = tree_from_value({"b": 2, "a": 1})
+
+    # when
+    rendered = adapter.render(tree, text)
+
+    # then — the new member goes after the block comment, not inside it (where it would parse as
+    # part of the comment and the render would not match the tree)
+    assert rendered == '{\n  /* note\n  // still inside */\n  "b": 2,\n  "a": 1\n}\n'
+    assert adapter.parse(rendered) == tree

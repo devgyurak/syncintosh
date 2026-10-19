@@ -391,12 +391,13 @@ class _Diff:
         if self._inline_inner(node) is None:
             return False
         desired = self._children(path)
+        wanted = set(desired)
         by_key = {member.key: member for member in node.members}
-        kept = [member for member in node.members if member.key in desired]
+        kept = [member for member in node.members if member.key in wanted]
         for member in node.members:
-            if member.key in desired:
+            if member.key in wanted:
                 self._render(member.value, (*path, member.key), edits)
-        self._splice_removals(node, desired, edits)
+        self._splice_removals(node, wanted, edits)
         added = [key for key in desired if key not in by_key]
         if added:
             lead = self._inline_gap(node, kept)
@@ -408,11 +409,11 @@ class _Diff:
             edits.append(_Edit(position, position, lead + join.join(members)))
         return True
 
-    def _splice_removals(self, node: _ObjectNode, desired: list[str], edits: list[_Edit]) -> None:
+    def _splice_removals(self, node: _ObjectNode, wanted: set[str], edits: list[_Edit]) -> None:
         """Delete every member the tree no longer has, one contiguous run at a time."""
         runs: list[list[int]] = []
         for index, member in enumerate(node.members):
-            if member.key in desired:
+            if member.key in wanted:
                 continue
             if runs and runs[-1][-1] == index - 1:
                 runs[-1].append(index)
@@ -420,12 +421,17 @@ class _Diff:
             runs.append([index])
         for run in runs:
             first, last = node.members[run[0]], node.members[run[-1]]
+            if run[0] == 0 and run[-1] == len(node.members) - 1:
+                # The run is the whole object: take the padding and any trailing comma with it, so
+                # `{"a": 1,}` becomes `{}` rather than `{,}` — which does not parse, and would make
+                # the file `unprojectable` on every sync from then on.
+                edits.append(_Edit(first.span.start, node.span.end - 1, ""))
+                continue
             if run[0] == 0:
                 # The object opened with the run: keep the padding after `{`, drop the run, and
                 # drop the separator that used to follow it.
                 edits.append(_Edit(first.span.start, last.value.span.end, ""))
-                if len(node.members) > run[-1] + 1:
-                    edits.append(_Edit(last.value.span.end, node.members[run[-1] + 1].span.start, ""))
+                edits.append(_Edit(last.value.span.end, node.members[run[-1] + 1].span.start, ""))
                 continue
             # The run sits between members: drop the separator before it plus the run itself, so
             # the members on either side end up adjacent.
@@ -434,18 +440,22 @@ class _Diff:
     def _inline_gap(self, node: _ObjectNode, kept: list[_MemberNode]) -> str:
         """The separator to put before a member appended to a one-line object.
 
-        Taken from the object's own spacing so `{"a": 1,"b": 2}` stays tight; the removal of the
-        member takes this separator with it, so the choice never has to be undone exactly.
+        Taken from two members that are **adjacent in the original**, so what sits between them is
+        a separator and nothing else (a comment inside a one-line object is refused outright, so the
+        only other thing it could hold is whitespace). Slicing between the first two *survivors*
+        instead copies whatever was removed between them back into the file — the member comes back
+        to life and the render stops matching the tree. The removal takes this separator away with
+        it, so the choice never has to be undone exactly.
         """
-        if not node.members:
-            return ""
         if not kept:
-            # Every original member is being removed, so the object is left empty and the added
-            # member must not carry a separator: `{}, "a": 1}` would not parse.
+            # Every member is being removed, so the object is left empty and the added member must
+            # not carry a separator: `{}, "a": 1}` would not parse.
             return ""
-        if len(kept) >= 2:
-            return self._source[kept[0].value.span.end : kept[1].span.start]
-        return ", "
+        if len(node.members) < 2:
+            # A single member leaves no gap to copy the file's spacing from, but the added member
+            # still needs a separator between it and what is already there.
+            return ", "
+        return self._source[node.members[0].value.span.end : node.members[1].span.start]
 
     def _inline_member(self, path: KeyPath) -> str:
         return json.dumps(path[-1], ensure_ascii=False) + ": " + self._inline_subtree(path)
@@ -473,7 +483,11 @@ class _Diff:
         position = _line_start(self._source, node.members[0].span.start)
         while position > 0:
             previous = _line_start(self._source, position - 1)
-            if not self._source[previous : position - 1].strip().startswith("//"):
+            line = self._source[previous : position - 1]
+            # A line inside a block comment can start with `//`, so a line that carries a block
+            # marker stops the walk: stepping over it would put the block inside the comment, where
+            # it parses as nothing and the render stops matching the tree.
+            if not line.strip().startswith("//") or "/*" in line or "*/" in line:
                 break
             position = previous
         return position
