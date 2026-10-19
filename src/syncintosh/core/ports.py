@@ -219,9 +219,10 @@ class SecretScanner(Protocol):
     def scan(self, plaintext: bytes, *, subject: str, format: FileFormat) -> None:
         """Raise `SecretScanError` when a secret is found; return `None` when clean.
 
-        `format` is the record's adapter key, and it decides how a URL is read: a shell file may
-        reference a credential (`http://$USER:$PASS@proxy`), while a structured file has no
-        interpolation, so `$` there is an ordinary character of a value.
+        `format` is the record's adapter key, and it decides how a URL is read: only `text` is read
+        by a shell, where a credential may be a reference (`http://$USER:$PASS@proxy`); every other
+        format has no interpolation, so `$` there is an ordinary character of a value and the scan
+        is stricter.
         """
         ...
 

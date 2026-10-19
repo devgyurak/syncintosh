@@ -51,16 +51,25 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 #   (`proxy='http://u:$PASS@h'`) or behind a backslash is *not* expanded by the shell, so the text
 #   itself is the credential — hence a second pattern for that case rather than a wider skip.
 #
-# The password may not contain `,`, `?`, `#`, or `"`: those are what sits between two values in a
-# settings file or a `NO_PROXY` list, and a line like `{"proxy":"http://h:3128","email":"a@b.c"}`
-# otherwise reads the text between the port and the email's `@` as a credential — a false positive
-# that would stop every tracked file on the machine from syncing.
-_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,?#\"]+@"
+# A password that is matched as a literal may not contain `,` or `"`: those are what sits between
+# two values in a settings file or a `NO_PROXY` list, and a line like
+# `{"proxy":"http://h:3128","email":"a@b.c"}` otherwise reads the text between the port and the
+# email's `@` as a credential — a false positive that would stop every tracked file on the machine
+# from syncing. `?` and `#` are not needed for that and stay matchable, since a query or a fragment
+# can be part of a real URL.
+_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,\"]+@"
+
+# A URL the shell passes through verbatim, so its password is a literal and may hold anything a URL
+# may — `,`, `?`, `#`, and `"` included. `;` and `'` stay out: they end the quoted string, and
+# `m='http://h:3128';me@x.com` would otherwise read `3128';me` as the password.
+_URL_QUOTED_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:[^/@\s;']+@"
 
 # A password that is only a reference, in a file where the shell would expand it.
 _REFERENCE_PASSWORD = rb"(?!\$\{?[A-Za-z_]\w*\}?@)"
 
-# The formats whose text the shell interpreter never sees. Anything else may hold a reference.
+# Only `text` is read by a shell, and only there does a `$` in a URL mean a reference rather than a
+# character of a value. Every other format — including one this build has never heard of — gets the
+# strict table, which is the fail-closed direction: a literal credential is refused, not skipped.
 _SHELL_FORMATS = ("text",)
 
 # A structured file: any password, `$` and `{` included.
@@ -74,13 +83,15 @@ STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 # the literal it is.
 SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     *COMMON_PATTERNS,
-    ("URL with credentials", re.compile(rb"(?<![\\'])" + _URL_CREDENTIALS % _REFERENCE_PASSWORD)),
-    ("URL with credentials", re.compile(rb"(?<=[\\'])" + _URL_CREDENTIALS % rb"")),
+    # The lookbehind also rules out a start *inside* a scheme: without the `[A-Za-z0-9+.\-]` there,
+    # `m='http://h:3128';me@x` matched from `ttp`, where the preceding character is `h` and the quote
+    # rule no longer applied.
+    (
+        "URL with credentials",
+        re.compile(rb"(?<![A-Za-z0-9+.\-\\'])" + _URL_CREDENTIALS % _REFERENCE_PASSWORD),
+    ),
+    ("URL with credentials", re.compile(rb"(?<=[\\'])" + _URL_QUOTED_CREDENTIALS)),
 )
-
-# Kept as a name because the tests and the design notes refer to "the pattern table": it is the
-# strict set, the one that applies to every format a shell does not read.
-PATTERNS = STRUCTURED_PATTERNS
 
 
 def patterns_for(format: str) -> tuple[tuple[str, re.Pattern[bytes]], ...]:
@@ -109,4 +120,4 @@ class PatternSecretScanner:
                 raise SecretScanError(f"{subject}: possible {label} at line {line}")
 
 
-__all__ = ["COMMON_PATTERNS", "PATTERNS", "PatternSecretScanner", "patterns_for"]
+__all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for"]

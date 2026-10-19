@@ -132,6 +132,10 @@ def test_a_reference_in_a_shell_file_passes(payload: bytes) -> None:
         b"postgres://app:pass$word@db",
         b"http://user:abc{123}@host",
         b"proxy='http://user:pa$$w0rd@host'",
+        b"proxy='http://user:pa,ss@host'",  # inside quotes, `,` is part of the value
+        b"proxy='http://user:pa?ss@host'",
+        b"proxy='http://user:pa#ss@host'",
+        b"proxy='http://user:pa\"ss@host'",
     ],
 )
 def test_a_literal_password_in_a_shell_file_is_refused(payload: bytes) -> None:
@@ -172,6 +176,16 @@ def test_a_url_split_across_a_line_continuation_passes() -> None:
     # patterns and the user's own review are for.
     scanner = PatternSecretScanner()
     payload = b"http://user:pa\\" + b"\n" + b"ssw0rd-placeholder@host"
+
+    # when & then
+    assert scanner.scan(payload, subject=".zshrc", format="text") is None
+
+
+def test_a_quoted_url_followed_by_an_address_is_not_a_credential() -> None:
+    # given — a shell line where a quoted URL is followed by an email address; the `;` and the quote
+    # are what separates them, not part of a password
+    scanner = PatternSecretScanner()
+    payload = b"m='http://h:3128';me@x.com"
 
     # when & then
     assert scanner.scan(payload, subject=".zshrc", format="text") is None
