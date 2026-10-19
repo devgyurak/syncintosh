@@ -41,6 +41,9 @@ uv run ty check                                 # type check
 uv run pytest                                   # unit + integration, 90% floor
 ```
 
+`zsh` must be on `PATH` for the test suite: the `zsh` preset's syntax check runs `zsh -fn`, and the
+tests exercise the real checker rather than a stub. macOS has it; on Linux, `apt-get install zsh`.
+
 Run the four gates before considering a change done — see AGENTS.md §1.
 
 ## License
