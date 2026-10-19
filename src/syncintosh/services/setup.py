@@ -40,10 +40,12 @@ def new_machine_config(
     """The configuration for a first `init`: every file of every named preset, common scope.
 
     An unknown preset name is refused rather than skipped — silently tracking nothing looks
-    exactly like a successful setup, and the user would only find out at the first sync.
+    exactly like a successful setup, and the user would only find out at the first sync. A name
+    given twice is deduplicated rather than refused: `--preset zsh --preset zsh` is a
+    repetition, not a second file, and the paths it expands to are the same either way.
     """
     items: list[LocalItem] = []
-    for name in preset_names:
+    for name in dict.fromkeys(preset_names):
         preset = catalog.get(name)
         if preset is None:
             raise ConfigError(f"unknown preset {name!r}")

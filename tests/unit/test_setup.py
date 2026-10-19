@@ -69,15 +69,17 @@ def test_an_unknown_preset_name_is_refused() -> None:
         )
 
 
-def test_two_names_for_one_preset_are_refused() -> None:
-    # given
+def test_a_repeated_preset_name_is_deduplicated() -> None:
+    # given — `--preset zsh --preset zsh` names one preset, not two
     catalog = _StubCatalog((zsh.ZSH,))
 
-    # when & then — two items for one file would collide on every sync
-    with pytest.raises(ConfigError):
-        new_machine_config(
-            remote="git@example.test:settings.git",
-            machine_id="machine-a",
-            preset_names=("zsh", "zsh"),
-            catalog=catalog,
-        )
+    # when
+    config = new_machine_config(
+        remote="git@example.test:settings.git",
+        machine_id="machine-a",
+        preset_names=("zsh", "zsh"),
+        catalog=catalog,
+    )
+
+    # then — expanding it twice would collide on every sync, so the repeat is dropped
+    assert [item.path for item in config.items] == list(zsh.STARTUP_FILES)
