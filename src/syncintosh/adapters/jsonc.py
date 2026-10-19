@@ -397,7 +397,9 @@ class _Diff:
         for member in node.members:
             if member.key in wanted:
                 self._render(member.value, (*path, member.key), edits)
-        self._splice_removals(node, wanted, edits)
+        removals: list[_Edit] = []
+        self._splice_removals(node, wanted, removals)
+        edits.extend(removals)
         added = [key for key in desired if key not in by_key]
         if added:
             lead = self._inline_gap(node, kept)
@@ -405,7 +407,13 @@ class _Diff:
             # empty and the members still need a separator between them.
             join = lead or ", "
             members = [self._inline_member((*path, key)) for key in added]
-            position = node.span.end - 1 if not node.members else node.members[-1].value.span.end
+            # The block goes after everything that survives — and after any removal, never inside
+            # one. The padding before `}` sits between the last member and the brace, so a run that
+            # emptied the object ends past that member's value; an insert placed there would be
+            # inside the deleted range, and the edit merge drops an edit that starts before the
+            # cursor. `{"a": 1, "b": 2}` handed `{c}` would then render as `{}` with no `c` in it.
+            natural = node.members[-1].value.span.end if node.members else node.span.end - 1
+            position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
         return True
 
@@ -467,6 +475,30 @@ class _Diff:
             return "{}" if leaf is None else _leaf_text(leaf)
         entries = ", ".join(self._inline_member((*path, key)) for key in children)
         return "{" + entries + "}"
+
+    def _past_block_comment(self, after: int, position: int) -> int:
+        """A position that is not inside a block comment opened after `after`.
+
+        A block comment can open on a member's line and close on a later one, so the next line after
+        that member is still inside it: splicing a member there puts it inside the comment, where it
+        parses as nothing — or, if the text after the comment is what closes it, as a broken file.
+        Either way the render stops matching the tree, and a merge reports a conflict it had already
+        resolved. The block goes after the comment instead, which leaves the comment where it was,
+        attached to the member it documents.
+        """
+        text = self._source
+        cursor = after
+        while True:
+            opening = text.find("/*", cursor)
+            if opening == -1 or opening >= position:
+                return position
+            closing = text.find("*/", opening + 2)
+            if closing == -1:
+                # An unterminated comment means the text never parsed, so this cannot be reached.
+                return position
+            if closing + 2 > position:
+                return _next_line_start(text, closing + 2)
+            cursor = closing + 2
 
     def _open_position(self, node: _ObjectNode) -> int:
         """Where a block that opens the object goes: above the first member's own comment.
@@ -541,7 +573,7 @@ class _Diff:
             if anchor_index is not None:
                 insert_anchors.add(anchor_index)
 
-        self._remove_deleted(node, desired, insert_anchors, trailing, edits)
+        self._remove_deleted(node, set(desired), insert_anchors, trailing, edits)
 
     def _insert(
         self,
@@ -570,20 +602,22 @@ class _Diff:
             if _comma_after(self._source, anchor) is None:
                 # The anchor is now followed by a member: it needs the comma it never had.
                 edits.append(_Edit(anchor.value.span.end, anchor.value.span.end, ","))
-            position = _next_line_start(self._source, anchor.value.span.end)
+            position = self._past_block_comment(
+                anchor.value.span.end, _next_line_start(self._source, anchor.value.span.end)
+            )
         edits.append(_Edit(position, position, block))
 
     def _remove_deleted(
         self,
         node: _ObjectNode,
-        desired: list[str],
+        wanted: set[str],
         insert_anchors: set[int],
         trailing: bool,
         edits: list[_Edit],
     ) -> None:
         """Delete each removed member's line, and the dangling comma a tail deletion leaves."""
         text = self._source
-        deleted = [index for index, member in enumerate(node.members) if member.key not in desired]
+        deleted = [index for index, member in enumerate(node.members) if member.key not in wanted]
         if not deleted:
             return
         survivors = [index for index in range(len(node.members)) if index not in deleted]
@@ -595,7 +629,9 @@ class _Diff:
         drop_comma = tail_deleted and not trailing and last_survivor is not None and last_survivor not in insert_anchors
         for index in deleted:
             member = node.members[index]
-            edits.append(_Edit(_line_start(text, member.span.start), _next_line_start(text, member.value.span.end), ""))
+            start = _line_start(text, member.span.start)
+            end = _line_end_outside_comment(text, start, _next_line_start(text, member.value.span.end))
+            edits.append(_Edit(start, end, ""))
         if drop_comma and last_survivor is not None:
             comma = _comma_after(text, node.members[last_survivor])
             if comma is not None:
@@ -754,6 +790,29 @@ def _line_start(text: str, pos: int) -> int:
 def _next_line_start(text: str, pos: int) -> int:
     newline = text.find("\n", pos)
     return len(text) if newline == -1 else newline + 1
+
+
+def _line_end_outside_comment(text: str, start: int, end: int) -> int:
+    """The end of a line deletion, extended past a block comment the line opens.
+
+    A member is deleted together with its line, its comma, and a same-line comment. A block comment
+    can open on that line and close on a later one, and cutting between the two leaves the comment's
+    remainder in the file — text the parser then reads as a member, or as a broken object. The
+    deletion runs to the end of the comment's last line instead, which keeps the file parseable.
+    """
+    cursor = start
+    limit = end
+    while True:
+        opening = text.find("/*", cursor)
+        if opening == -1 or opening >= limit:
+            return limit
+        closing = text.find("*/", opening + 2)
+        if closing == -1:
+            return limit
+        if closing + 2 > limit:
+            limit = _next_line_start(text, closing + 2)
+            continue
+        cursor = closing + 2
 
 
 def _comma_after(text: str, member: _MemberNode) -> int | None:

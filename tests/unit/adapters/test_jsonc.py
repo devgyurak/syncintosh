@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
@@ -598,4 +598,137 @@ def test_a_block_comment_whose_last_line_starts_with_slashes_stops_the_walk() ->
     # then — the new member goes after the block comment, not inside it (where it would parse as
     # part of the comment and the render would not match the tree)
     assert rendered == '{\n  /* note\n  // still inside */\n  "b": 2,\n  "a": 1\n}\n'
+    assert adapter.parse(rendered) == tree
+
+
+# The renderer's real contract, fuzzed: a settings file as an editor might have written it, against
+# a tree a merge could produce from it. Every layout shape that has bitten this renderer is a knob
+# here — one line or member-per-line, tight or spaced, padded braces, a trailing comma, CRLF, and a
+# comment in each position it can sit in — and the tree is either derived from the file (a key
+# reordered, added, dropped, or changed) or an unrelated document.
+# Keys come from a tiny pool on purpose: a merge hands the renderer a tree that shares most of its
+# keys with the file, so the interesting shapes are reorderings and one-key edits, not two unrelated
+# documents. An unrelated key set exercises the "replace everything" path and little else.
+_FUZZ_KEYS = st.sampled_from(["a", "b", "c", "d"])
+
+_FUZZ_VALUES = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.text(max_size=3),
+    lambda children: st.lists(children, max_size=2) | st.dictionaries(_FUZZ_KEYS, children, max_size=3),
+)
+
+_MUTATIONS = st.sampled_from(["reorder", "add", "drop", "change", "nested", "independent"])
+
+_COMMENTS = st.sampled_from(
+    [
+        "none",
+        "before-first",
+        "after-first",
+        "own-line",
+        "before-close",
+        "block-after-first",  # a block comment opening on a member's line and closing below it
+        "block-before-close",
+    ]
+)
+
+_LAYOUT = st.fixed_dictionaries(
+    {
+        "indent": st.sampled_from([None, "", "  ", "\t", " "]),
+        "separators": st.sampled_from([(",", ":"), (", ", ": ")]),
+        "newline": st.sampled_from(["\n", "\r\n"]),
+        "trailing": st.booleans(),
+        "pad": st.booleans(),
+        "comment": _COMMENTS,
+    }
+)
+
+
+def _mutated(value, how):
+    """A tree a merge could hand the renderer, given the file it read."""
+    if not isinstance(value, dict) or not value:
+        return value if how == "independent" else {"d": "v"}
+    items = list(value.items())
+    if how == "reorder":
+        return dict(reversed(items))
+    if how == "add":
+        return {**value, "d": "v"}
+    if how == "drop":
+        return dict(items[1:]) or {"d": "v"}
+    if how == "change":
+        return {**dict(items[:-1]), items[-1][0]: "changed"}
+    if how == "nested":
+        key = items[0][0]
+        return {**value, key: _mutated(value[key], "drop") if isinstance(value[key], dict) else {"c": 1}}
+    return {"d": "v"}
+
+
+def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment) -> str:
+    """One settings file, laid out the way this combination describes."""
+    text = json.dumps(value, indent=indent, separators=separators, ensure_ascii=False)
+    if pad and "\n" not in text:
+        for opening, closing in (("{", "}"), ("[", "]")):
+            text = text.replace(opening, opening + " ").replace(closing, " " + closing)
+    if trailing and text.rstrip().endswith(("}", "]")) and not text.rstrip().endswith(("{}", "[]")):
+        body = text.rstrip()
+        text = body[:-1] + "," + body[-1] + text[len(body) :]
+    multiline_object = isinstance(value, dict) and value and "\n" in text
+    if multiline_object:
+        text = {
+            "none": text,
+            "before-first": text.replace("{", "{ // fuzz", 1),
+            "after-first": text.replace(",\n", ", // fuzz\n", 1) if ",\n" in text else text,
+            "own-line": text.replace(",\n", ",\n// fuzz\n", 1) if ",\n" in text else text,
+            "before-close": text.replace("\n}", "\n// fuzz\n}", 1),
+            "block-after-first": text.replace(",\n", ", /* fuzz\nstill */\n", 1) if ",\n" in text else text,
+            "block-before-close": text.replace("\n}", "\n/* fuzz\nstill */\n}", 1),
+        }[comment]
+    return text if newline == "\n" else text.replace("\n", newline)
+
+
+# `deadline=None`: a single example parses and re-parses a whole document, and a per-example time
+# limit here measures the interpreter's warm-up rather than a bug (AGENTS.md §5.6 — no clock).
+@settings(max_examples=500, deadline=None)
+@given(value=_FUZZ_VALUES, how=_MUTATIONS, layout=_LAYOUT)
+def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout) -> None:
+    # given — a file laid out however an editor might have written it, and a tree derived from it
+    adapter = JsoncAdapter()
+    template = _fuzz_template(value, **layout)
+    tree = tree_from_value(_mutated(value, how))
+
+    # when
+    try:
+        rendered = adapter.render(tree, template)
+    except ContentParseError:
+        # Refusing is a legitimate verdict for exactly one reason: a rewrite that would drop a
+        # comment. Anything else is a bug this test exists to catch.
+        return
+
+    # then — the render must be the tree it was handed, or the merge publishes what no one decided
+    assert adapter.parse(rendered) == tree
+
+
+def test_a_block_comment_that_closes_below_a_member_keeps_the_next_member_out_of_it() -> None:
+    # given — a block comment opens on `a`'s line and closes on the line below
+    adapter = JsoncAdapter()
+    text = '{\n  "a": 1, /* note\n  still note */\n  "b": 2\n}\n'
+    tree = tree_from_value({"a": 1, "c": 3, "b": 2})
+
+    # when — the next line after `a` is still inside that comment
+    rendered = adapter.render(tree, text)
+
+    # then — the new member goes after the comment, where it parses as a member
+    assert rendered == '{\n  "a": 1, /* note\n  still note */\n  "c": 3,\n  "b": 2\n}\n'
+    assert adapter.parse(rendered) == tree
+
+
+def test_deleting_a_member_below_a_block_comment_does_not_leave_its_tail_behind() -> None:
+    # given — a block comment opens on the deleted member's line and closes on the next
+    adapter = JsoncAdapter()
+    text = '{\n  "a": 1, /* note\n  still note */\n  "b": 2\n}\n'
+    tree = tree_from_value({"b": 2})
+
+    # when — the deletion takes the member's line, and the comment straddles it
+    rendered = adapter.render(tree, text)
+
+    # then — the comment goes with the member instead of leaving `still note */` as loose text
+    assert rendered == '{\n  "b": 2\n}\n'
     assert adapter.parse(rendered) == tree
