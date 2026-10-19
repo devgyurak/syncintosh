@@ -902,7 +902,8 @@ def test_jsonc_same_key_on_both_sides_stops_the_sync(tmp_path, memory_key_store)
 
     # then — the conflict names the key path and never its values, and B's file is untouched
     assert report.has_conflicts is True
-    assert report.conflicts[0].detail.endswith("editor.fontSize")
+    # the label mirrors the file: a flat dotted key is quoted, a nested pair is not
+    assert report.conflicts[0].detail.endswith('"editor.fontSize"')
     assert "15" not in report.conflicts[0].detail
     assert _read_jsonc(b) == local
 

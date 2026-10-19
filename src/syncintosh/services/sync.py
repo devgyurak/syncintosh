@@ -73,7 +73,7 @@ from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
-from syncintosh.core.tree import KeyPath
+from syncintosh.core.tree import KeyPath, path_label
 from syncintosh.services.repo_writer import write_repo
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
@@ -640,12 +640,12 @@ def _collect_first_sight(
 def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
-    A conflict the merge cannot put a name to still gets one: a whole-document conflict — an array
-    like `keybindings.json`, compared as one value — arrives as the **root** path, and a key whose
-    own name is empty renders as nothing. Both print `(document)`, the same word the `merge`
-    command uses, so the detail never trails a bare colon.
+    `path_label` renders each path the way a person reads the file, so a whole-document conflict —
+    an array like `keybindings.json`, compared as one value — prints `(document)` rather than
+    nothing, and two paths that differ (`"a.b"` as one key against `a` → `b`) do not print the same
+    string. The same label is what the `merge` command prints.
     """
-    named = dict.fromkeys(".".join(path) or "(document)" for path in paths)
+    named = dict.fromkeys(path_label(path) for path in paths)
     if not named:
         return reason
     return f"{reason}: {', '.join(named)}"

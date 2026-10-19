@@ -410,7 +410,7 @@ def test_a_credential_url_inside_a_keybinding_is_refused(tmp_path, memory_key_st
     assert "binding-password" not in str(refusal.value)
 
 
-def test_a_conflict_on_an_unnamed_key_is_named_as_the_document(tmp_path, memory_key_store) -> None:
+def test_a_conflict_on_an_unnamed_key_is_not_confused_with_the_document(tmp_path, memory_key_store) -> None:
     # given — a key whose own name is empty, changed on both machines
     a, b = _pair(tmp_path, memory_key_store, b'{\n  "": 1\n}\n')
     _write(a, SETTINGS, b'{\n  "": 2\n}\n')
@@ -420,7 +420,7 @@ def test_a_conflict_on_an_unnamed_key_is_named_as_the_document(tmp_path, memory_
     # when
     report = _run(b)
 
-    # then — there is no key name to print, so the document is named rather than leaving a colon
-    # dangling at the end of the detail
+    # then — each step is quoted rather than joined bare, so an unnamed key reads `""` (and the
+    # detail never trails a colon) instead of being confused with a whole-document conflict
     assert report.conflicts[0].path == SETTINGS
-    assert report.conflicts[0].detail == "the same region changed on both sides: (document)"
+    assert report.conflicts[0].detail == 'the same region changed on both sides: ""'

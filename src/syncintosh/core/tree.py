@@ -24,6 +24,7 @@ Three shapes keep a flat map honest:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -190,6 +191,19 @@ def _to_node(value: object) -> Node:
     return scalar(value)
 
 
+def path_label(path: KeyPath) -> str:
+    """A key path as a person reads it, so two different paths never print the same string.
+
+    A settings file spells a flat setting `"editor.fontSize"` — one key whose *name* contains a dot
+    — and a nested one `"editor": {"fontSize": …}`. Printing both as `editor.fontSize` would point
+    the user at the wrong place, so a step that is empty or itself contains a dot is quoted, and the
+    whole document (the empty path) is `(document)`. Standard library only (``AGENTS.md`` §2.1).
+    """
+    if not path:
+        return "(document)"
+    return ".".join(step if step and "." not in step else json.dumps(step) for step in path)
+
+
 def _node_to_value(node: Node) -> object:
     if isinstance(node, Scalar):
         return node.value
@@ -227,6 +241,7 @@ __all__ = [
     "Scalar",
     "ScalarKind",
     "Tree",
+    "path_label",
     "scalar",
     "tree_from_value",
 ]
