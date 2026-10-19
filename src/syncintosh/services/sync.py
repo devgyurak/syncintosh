@@ -426,15 +426,17 @@ def _collect(
     """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
     state = _Collect(records={} if head is None else dict(head.records))
     for item in config.items:
+        if deny.is_denied(home, item.path):
+            # The dangerous-path check comes first so a private key or a cloud credential is
+            # reported as what it is, whatever its preset happens to own.
+            state.skipped.append(item.path)
+            continue
         if not presets.catalog.knows(item.preset, item.path):
             # The local config names a path the preset it claims does not own — a hand-edited
             # config, or a catalog that changed under it. Publishing it would create a record every
             # machine, this one included, refuses to apply, so the file would never settle and every
             # later sync would ask for `--adopt` again. Refused here, and reported.
             state.refused.append(item.path)
-            continue
-        if deny.is_denied(home, item.path):
-            state.skipped.append(item.path)
             continue
         live_path = _join(home, item.path)
         if live.is_symlink(live_path):

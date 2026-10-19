@@ -554,3 +554,18 @@ def test_a_cycle_projects_a_file_once(tmp_path, memory_key_store) -> None:
     # collect made (the raw bytes are unchanged) and settle takes apply's digest, so neither runs
     # the adapter again. A regression here shows up as 6.
     assert counting.parses == 2
+
+
+def test_a_dangerous_path_is_reported_as_dangerous_not_as_unowned(tmp_path, memory_key_store) -> None:
+    # given — a private key under a preset that does not own it, so both refusals apply
+    machine = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    item = LocalItem.create(path=".ssh/id_rsa", preset="zsh", scope="common", format="text")
+    _initialize(machine, _config(machine, (item,)))
+    _write(machine, ".ssh/id_rsa", b"-----BEGIN " + b"PRIVATE KEY-----\n")
+
+    # when
+    report = _run(machine)
+
+    # then — the deny-list reason wins, because it is the one the user needs to see
+    assert report.skipped == (".ssh/id_rsa",)
+    assert report.refused == ()
