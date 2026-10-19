@@ -473,3 +473,22 @@ def test_a_render_always_reparses_to_the_merged_tree(base, local, remote) -> Non
 
     # then — the invariant content_merge relies on
     assert adapter.parse(rendered) == merged.merged
+
+
+def test_a_key_added_as_the_first_member_opens_the_object_with_a_comma_after_it() -> None:
+    # given — a tree whose *first* member is not in the template (the shape `projection.graft`
+    # produces, since it keeps the live file's order)
+    adapter = JsoncAdapter()
+    text = '{\n  "credsStore": "desktop",\n  "features": {\n    "hooks": "true"\n  }\n}\n'
+    tree = tree_from_value({"auths": {"a": {"b": "c"}}, "credsStore": "desktop", "features": {"hooks": "true"}})
+    expected = (
+        '{\n  "auths": {\n    "a": {\n      "b": "c"\n    }\n  },\n'
+        '  "credsStore": "desktop",\n  "features": {\n    "hooks": "true"\n  }\n}\n'
+    )
+
+    # when — rendering must put it first, and separate it from what follows
+    rendered = adapter.render(tree, text)
+
+    # then — reaching for the closing brace instead would leave the last member without its comma
+    assert rendered == expected
+    assert adapter.parse(rendered) == tree

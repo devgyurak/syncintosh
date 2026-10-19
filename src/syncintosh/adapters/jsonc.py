@@ -416,7 +416,17 @@ class _Diff:
             for index, member in enumerate(pending)
         )
         if anchor is None:
-            position = _line_start(self._source, node.span.end - 1)
+            # Nothing precedes the block *in the tree*, so it opens the object: before the first
+            # member the template has. Reaching for the closing brace instead would put the block
+            # after the last member — which is neither the order the tree asked for nor valid
+            # JSONC, because the member before it would then lack the comma the block's own
+            # trailing comma was meant to complete. An object with no members has no first line,
+            # so a genuinely empty `{ ... }` still takes the block just above its brace.
+            position = (
+                _line_start(self._source, node.members[0].span.start)
+                if node.members
+                else _line_start(self._source, node.span.end - 1)
+            )
         else:
             if _comma_after(self._source, anchor) is None:
                 # The anchor is now followed by a member: it needs the comma it never had.
