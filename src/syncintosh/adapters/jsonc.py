@@ -537,7 +537,7 @@ class _Diff:
                 pending.append(self._member_line((*path, key), len(path)))
                 continue
             if pending:
-                self._insert(edits, anchor, node, pending, at_end=False, trailing=trailing)
+                self._insert(edits, anchor, node, pending, trailing=trailing)
                 if anchor_index is not None:
                     insert_anchors.add(anchor_index)
                 pending = []
@@ -545,7 +545,7 @@ class _Diff:
             anchor_index = index_of[key]
             self._render(member.value, (*path, key), edits)
         if pending:
-            self._insert(edits, anchor, node, pending, at_end=True, trailing=trailing)
+            self._insert(edits, anchor, node, pending, trailing=trailing)
             if anchor_index is not None:
                 insert_anchors.add(anchor_index)
 
@@ -558,12 +558,19 @@ class _Diff:
         node: _ObjectNode,
         pending: list[str],
         *,
-        at_end: bool,
         trailing: bool,
     ) -> None:
+        """Insert a run of newly added members, after `anchor` or before the first existing member.
+
+        Whether the block needs a *trailing* comma is decided by what follows it **in the file**, not
+        by where it sits in the tree: the tree's order can differ from the document's, and a block put
+        after an anchor that has members below it is followed by one of them — leaving its comma out
+        there produces `{ "b": 2, "c": 3 "a": 1 }`, which does not parse.
+        """
+        follows = bool(node.members) if anchor is None else anchor is not node.members[-1]
         last = len(pending) - 1
         block = "".join(
-            member + ("," if index < last or not at_end or trailing else "") + self._newline
+            member + ("," if index < last or follows or trailing else "") + self._newline
             for index, member in enumerate(pending)
         )
         if anchor is None:
@@ -768,24 +775,45 @@ def _next_line_start(text: str, pos: int) -> int:
     return len(text) if newline == -1 else newline + 1
 
 
+def _skip_string(text: str, start: int, limit: int) -> int:
+    """The offset just past the string opening at `start`, or `limit` when it never closes."""
+    cursor = start + 1
+    while cursor < limit:
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return limit
+
+
 def _straddling_comment(text: str, start: int, limit: int) -> int | None:
     """The offset just past a `*/` that a block comment opened in `[start, limit)` closes after it.
 
     `None` when no comment spans `limit`. A block comment can open on a member's line and close below
     it, which is what makes "the next line" a place *inside* a comment rather than after it.
+
+    Only a comment *outside a string* counts. A settings value spells comment punctuation often — a
+    glob `**/*.pyc` next to a sibling `**/.git` is a `/*` and a `*/`, and reading those as a comment
+    deletes the wrong member, or splices one into text that only looks like a comment.
     """
     cursor = start
-    while True:
-        opening = text.find("/*", cursor)
-        if opening == -1 or opening >= limit:
-            return None
-        closing = text.find("*/", opening + 2)
-        if closing == -1:
-            # An unterminated comment means the text never parsed, so this cannot be reached.
-            return None
-        if closing + 2 > limit:
-            return closing + 2
-        cursor = closing + 2
+    while cursor < limit:
+        if text[cursor] == '"':
+            cursor = _skip_string(text, cursor, limit)
+            continue
+        if text.startswith("/*", cursor):
+            closing = text.find("*/", cursor + 2)
+            if closing == -1:
+                # An unterminated comment means the text never parsed, so this cannot be reached.
+                return None
+            if closing + 2 > limit:
+                return closing + 2
+            cursor = closing + 2
+            continue
+        cursor += 1
+    return None
 
 
 def _past_block_comment(text: str, after: int, position: int) -> int:

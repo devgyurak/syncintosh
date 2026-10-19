@@ -34,7 +34,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.config import LocalItem, SyncConfig, allows
+from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
     CommitmentsCorrupt,
@@ -48,7 +48,7 @@ from syncintosh.core.errors import (
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.models import LedgerEntry, PendingState
+from syncintosh.core.models import LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.ports import (
     Cipher,
@@ -420,17 +420,35 @@ def _strips(presets: _Presets, path: str) -> bool:
     return policy is not None and bool(policy.stripped)
 
 
-def _project_merged(presets: _Presets, data: bytes, path: str, fmt: FileFormat) -> bytes:
+def _project_merged(
+    presets: _Presets,
+    config: SyncConfig,
+    data: bytes,
+    *,
+    scope: Scope,
+    machine: str | None,
+    path: str,
+    fmt: FileFormat,
+) -> bytes:
     """A merge result as this machine's policy would seal it.
 
     The merge combines *stored* objects, and one of them can hold a key this machine's policy strips:
     another build published it, either because that build's preset did not exclude it or because the
-    key arrived from the other side as an addition. Sealing the merge as it stands would commit that
-    key again — a credential the other machine's build put in the repo — so the result is projected
-    exactly as a live file is on the collect side. A projection that cannot be done refuses the seal
-    rather than writing the raw bytes (``AGENTS.md`` §3.4).
+    key arrived from the other side as an addition. Sealing that *result* would commit the key again,
+    so the content this machine creates is projected exactly as a live file is on the collect side,
+    and a projection that cannot be done refuses the seal rather than writing the raw bytes
+    (``AGENTS.md`` §3.4).
+
+    **Only content this machine creates is projected, and only for a path it tracks.** An object the
+    merge merely re-uses is the very blob the other machine published in its own commit, so projecting
+    it would not remove anything from the history — git keeps the blob either way — while it *would*
+    delete that machine's values: its `window.zoomLevel`, or its own `proxyAuthorization`, would
+    silently drop out of the file the next time it applied. A path this machine does not track is not
+    governed by this machine's policy either: the machine that does track it decides what its preset
+    strips, and projecting it here would rewrite that machine's file — and abort the whole sync when
+    that machine's record names a format the local catalog does not use.
     """
-    if not _strips(presets, path):
+    if not allows_path(config, scope=scope, machine=machine, path=path) or not _strips(presets, path):
         return data
     projected = _project_file(presets, data, path, fmt)
     if projected.failure is not None or projected.view is None:
@@ -574,7 +592,14 @@ def _collect_existing(
             # The user edited the content the ledger last accounted for, while HEAD holds newer
             # content this machine never applied. Adopting the live bytes would drop HEAD's
             # change with no conflict, so merge instead (step 10, on a stale base).
-            state.stale.append(_StaleChange(record=record, entry=entry, live=projected.view))
+            # The record this machine republishes carries the catalog's format for the path, the
+            # one the object is really in — the same normalization the other collect paths do, so the
+            # merge below projects a format it agrees with instead of aborting the sync.
+            state.stale.append(
+                _StaleChange(
+                    record=_replace_sha(record, record.sha256, format=item.format), entry=entry, live=projected.view
+                )
+            )
         else:
             state.records[record.file_id] = _replace_sha(record, view_sha, format=item.format)
             state.contents[record.file_id] = projected.view
@@ -621,6 +646,7 @@ def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
 
 def _merge_stale(
     *,
+    config: SyncConfig,
     transport: GitTransport,
     cipher: Cipher,
     driver: MergeDriver,
@@ -675,7 +701,15 @@ def _merge_stale(
                 )
             )
             continue
-        projected = _project_merged(presets, merged.data, change.record.path, change.record.format)
+        projected = _project_merged(
+            presets,
+            config,
+            merged.data,
+            scope=change.record.scope,
+            machine=change.record.machine,
+            path=change.record.path,
+            fmt=change.record.format,
+        )
         collected.records[file_id] = _replace_sha(change.record, _sha256(projected))
         collected.contents[file_id] = projected
         collected.collected.append(change.record.path)
@@ -725,6 +759,7 @@ class _Merged:
 
 def _merge_diverged(
     *,
+    config: SyncConfig,
     transport: GitTransport,
     files: RepoFiles,
     cipher: Cipher,
@@ -785,30 +820,25 @@ def _merge_diverged(
                 ),
             )
             continue
-        projected = _project_merged(presets, merged.data, task.path, task.format)
+        projected = _project_merged(
+            presets, config, merged.data, scope=task.scope, machine=task.machine, path=task.path, fmt=task.format
+        )
         records[task.file_id] = task.complete(_sha256(projected))
         contents[task.file_id] = projected
     if conflicts:
         return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
 
-    # Every surviving record whose policy strips keys is read back and projected, even when the
-    # merge itself did not touch its content: the merge commit this machine pushes names that object,
-    # so a key the policy strips — published by another build — must not travel on in it. A record
-    # with no strip list needs no read at all.
-    for file_id, record in records.items():
-        if file_id in contents or not _strips(presets, record.path):
-            continue
-        data = _object_content(transport, cipher, local, remote, file_id, record.sha256)
-        if data is None:
-            raise ContentDigestMismatch(file_id, record.sha256, "no matching object")
-        projected = _project_merged(presets, data, record.path, record.format)
-        if projected != data:
-            records[file_id] = _replace_sha(record, _sha256(projected))
-        contents[file_id] = projected
-
     merged_manifest = Manifest.create(
         schema=MANIFEST_SCHEMA, key_generation=local_manifest.key_generation, records=records
     )
+    plan = plan_writes(local_manifest, merged_manifest)
+    for file_id in plan.objects_to_write:
+        if file_id in contents:
+            continue
+        data = _object_content(transport, cipher, local, remote, file_id, merged_manifest.records[file_id].sha256)
+        if data is None:
+            raise ContentDigestMismatch(file_id, merged_manifest.records[file_id].sha256, "no matching object")
+        contents[file_id] = data
     write_repo(files=files, cipher=cipher, scanner=scanner, head=local_manifest, new=merged_manifest, contents=contents)
     commit = _commit(transport, branch, (local, remote), "syncintosh: merge")
     return _Merged(commit=commit, conflicts=(), base_commit=base_commit)
@@ -896,6 +926,7 @@ def _publish(
                 return _Publish(published=local, remote_commit=remote_commit)
             continue
         merged = _merge_diverged(
+            config=config,
             transport=transport,
             files=files,
             cipher=cipher,
@@ -1286,6 +1317,7 @@ def _cycle(
         )
     if collected.stale:
         stale_conflicts = _merge_stale(
+            config=config,
             transport=transport,
             cipher=cipher,
             driver=driver,

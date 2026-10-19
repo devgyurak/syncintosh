@@ -87,16 +87,26 @@ class SyncConfig:
 __all__ = ["LocalItem", "SyncConfig"]
 
 
+def allows_path(config: SyncConfig, *, scope: Scope, machine: str | None, path: str) -> bool:
+    """True when the local allowlist names this `(scope, machine, path)`.
+
+    The comparison folds the path the same way tracking does, so two spellings of one file agree.
+    `allows` is this over a record; a caller holding the fields separately — a merge task, which has
+    no record until its content is merged — goes through here too, so there is one rule
+    (``AGENTS.md`` §7).
+    """
+    wanted = (scope, machine, collision_key(path))
+    return any((item.scope, item.machine, collision_key(item.path)) == wanted for item in config.items)
+
+
 def allows(config: SyncConfig, record: ManifestRecord) -> bool:
     """True when the local allowlist permits writing `record`'s path on this machine.
 
     A record's `path` arrives from the repo, so `apply` may only write a path this machine
     already tracks — never one that arrived from the remote alone
-    (``docs/design/03-manifest.md``, and note 03's "user-added path" open item). The comparison
-    folds the path the same way tracking does, so two spellings of one file agree.
+    (``docs/design/03-manifest.md``, and note 03's "user-added path" open item).
     """
-    wanted = (record.scope, record.machine, collision_key(record.path))
-    return any((item.scope, item.machine, collision_key(item.path)) == wanted for item in config.items)
+    return allows_path(config, scope=record.scope, machine=record.machine, path=record.path)
 
 
-__all__ = ["LocalItem", "SyncConfig", "allows"]
+__all__ = ["LocalItem", "SyncConfig", "allows", "allows_path"]

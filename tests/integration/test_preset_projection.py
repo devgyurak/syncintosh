@@ -743,3 +743,32 @@ def test_a_merge_projects_an_object_it_only_re_uses(tmp_path, memory_key_store) 
     assert b"FROM-A" not in sealed
     assert head != ""
     assert record.sha256 == hashlib.sha256(sealed).hexdigest()
+
+
+def test_a_diverged_merge_of_two_files_that_need_no_projection_does_not_crash(tmp_path, memory_key_store) -> None:
+    # given — each machine edits a different tracked file, and the one that changed remotely needs no
+    # projection (its record has no strip list)
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(a, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(b, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(b)
+    _write(a, SECOND, b'[\n  {"key": "cmd+j"}\n]\n')
+    _run(a)
+    _write(b, JSONC, b'{"editor.fontSize": 15}\n')
+
+    # when — B merges against A's commit, and the object it re-uses is SECOND
+    report = _run(b)
+
+    # then — the merge completes with both changes, and both machines converge
+    assert report.has_conflicts is False
+    _run(a)
+    assert _read(b, SECOND) == b'[\n  {"key": "cmd+j"}\n]\n'
+    assert _read(b, JSONC) == b'{"editor.fontSize": 15}\n'
+    assert _read(a, JSONC) == b'{"editor.fontSize": 15}\n'

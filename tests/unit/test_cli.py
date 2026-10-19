@@ -201,6 +201,7 @@ def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeyp
     # when
     result = runner.invoke(main_module.app, ["sync"])
 
-    # then — reported, and the exit code says the cycle did its job
+    # then — reported on stdout as its own case (not the word a dangerous path gets), and the exit
+    # code says the cycle did its job
     assert result.exit_code == 0
-    assert "skipped (this machine does not track it)" in _combined(result)
+    assert "not tracked here: Library/Application Support/Code/User/settings.json" in _combined(result)
