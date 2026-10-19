@@ -476,30 +476,6 @@ class _Diff:
         entries = ", ".join(self._inline_member((*path, key)) for key in children)
         return "{" + entries + "}"
 
-    def _past_block_comment(self, after: int, position: int) -> int:
-        """A position that is not inside a block comment opened after `after`.
-
-        A block comment can open on a member's line and close on a later one, so the next line after
-        that member is still inside it: splicing a member there puts it inside the comment, where it
-        parses as nothing — or, if the text after the comment is what closes it, as a broken file.
-        Either way the render stops matching the tree, and a merge reports a conflict it had already
-        resolved. The block goes after the comment instead, which leaves the comment where it was,
-        attached to the member it documents.
-        """
-        text = self._source
-        cursor = after
-        while True:
-            opening = text.find("/*", cursor)
-            if opening == -1 or opening >= position:
-                return position
-            closing = text.find("*/", opening + 2)
-            if closing == -1:
-                # An unterminated comment means the text never parsed, so this cannot be reached.
-                return position
-            if closing + 2 > position:
-                return _next_line_start(text, closing + 2)
-            cursor = closing + 2
-
     def _open_position(self, node: _ObjectNode) -> int:
         """Where a block that opens the object goes: above the first member's own comment.
 
@@ -602,8 +578,8 @@ class _Diff:
             if _comma_after(self._source, anchor) is None:
                 # The anchor is now followed by a member: it needs the comma it never had.
                 edits.append(_Edit(anchor.value.span.end, anchor.value.span.end, ","))
-            position = self._past_block_comment(
-                anchor.value.span.end, _next_line_start(self._source, anchor.value.span.end)
+            position = _past_block_comment(
+                self._source, anchor.value.span.end, _next_line_start(self._source, anchor.value.span.end)
             )
         edits.append(_Edit(position, position, block))
 
@@ -792,27 +768,51 @@ def _next_line_start(text: str, pos: int) -> int:
     return len(text) if newline == -1 else newline + 1
 
 
-def _line_end_outside_comment(text: str, start: int, end: int) -> int:
-    """The end of a line deletion, extended past a block comment the line opens.
+def _straddling_comment(text: str, start: int, limit: int) -> int | None:
+    """The offset just past a `*/` that a block comment opened in `[start, limit)` closes after it.
 
-    A member is deleted together with its line, its comma, and a same-line comment. A block comment
-    can open on that line and close on a later one, and cutting between the two leaves the comment's
-    remainder in the file — text the parser then reads as a member, or as a broken object. The
-    deletion runs to the end of the comment's last line instead, which keeps the file parseable.
+    `None` when no comment spans `limit`. A block comment can open on a member's line and close below
+    it, which is what makes "the next line" a place *inside* a comment rather than after it.
     """
     cursor = start
-    limit = end
     while True:
         opening = text.find("/*", cursor)
         if opening == -1 or opening >= limit:
-            return limit
+            return None
         closing = text.find("*/", opening + 2)
         if closing == -1:
-            return limit
+            # An unterminated comment means the text never parsed, so this cannot be reached.
+            return None
         if closing + 2 > limit:
-            limit = _next_line_start(text, closing + 2)
-            continue
+            return closing + 2
         cursor = closing + 2
+
+
+def _past_block_comment(text: str, after: int, position: int) -> int:
+    """A position that is not inside a block comment opened after `after`.
+
+    Splicing a member inside a comment makes it parse as nothing — or, when the comment's closing
+    text is what follows, breaks the file — and the render then stops matching the tree, so a merge
+    reports a conflict it had already resolved. The block goes after the comment instead, which
+    leaves the comment where it was, attached to the member it documents.
+    """
+    closing = _straddling_comment(text, after, position)
+    return position if closing is None else _next_line_start(text, closing)
+
+
+def _line_end_outside_comment(text: str, start: int, end: int) -> int:
+    """The end of a line deletion, extended past a block comment the line opens.
+
+    A member is deleted together with its line, its comma, and a same-line comment, so cutting at the
+    line's end would leave the remainder of a comment that closes below it in the file — text the
+    parser then reads as a member, or as a broken object.
+    """
+    limit = end
+    while True:
+        closing = _straddling_comment(text, start, limit)
+        if closing is None:
+            return limit
+        limit = _next_line_start(text, closing)
 
 
 def _comma_after(text: str, member: _MemberNode) -> int | None:

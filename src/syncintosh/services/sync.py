@@ -244,14 +244,20 @@ def _decode(data: bytes) -> str | None:
         return None
 
 
-def _replace_sha(record: ManifestRecord, sha256: str) -> ManifestRecord:
+def _replace_sha(record: ManifestRecord, sha256: str, *, format: FileFormat | None = None) -> ManifestRecord:
+    """The same record with a new digest, and optionally with the format the object is really in.
+
+    Collect passes its own format here: the object it seals was projected with the *local* catalog's
+    format for the path, and a record that keeps an older format would describe the object wrongly —
+    the format decides how a later scan reads the file (``docs/design/03-manifest.md``).
+    """
     return ManifestRecord.create(
         file_id=record.file_id,
         path=record.path,
         preset=record.preset,
         scope=record.scope,
         machine=record.machine,
-        format=record.format,
+        format=record.format if format is None else format,
         sha256=sha256,
     )
 
@@ -377,6 +383,9 @@ UNOWNED_PATH = "the path's preset does not own it"
 _NOT_ALLOWED = "the path is not in this machine's config"
 _DENIED = "a dangerous path this machine never collects"
 _ESCAPES = "the target leaves this machine's home directory"
+_RESTORE_FAILED = "this machine's own keys could not be re-attached to the file"
+_SYNTAX_FAILED = "the file would not pass its syntax check"
+_PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
 
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
@@ -405,6 +414,12 @@ def _record_refusal(
     return None
 
 
+def _strips(presets: _Presets, path: str) -> bool:
+    """True when this machine's policy for `path` removes any key before sealing."""
+    policy = presets.policy_for(path)
+    return policy is not None and bool(policy.stripped)
+
+
 def _project_merged(presets: _Presets, data: bytes, path: str, fmt: FileFormat) -> bytes:
     """A merge result as this machine's policy would seal it.
 
@@ -415,17 +430,12 @@ def _project_merged(presets: _Presets, data: bytes, path: str, fmt: FileFormat) 
     exactly as a live file is on the collect side. A projection that cannot be done refuses the seal
     rather than writing the raw bytes (``AGENTS.md`` §3.4).
     """
-    policy = presets.policy_for(path)
-    if policy is None or not policy.stripped:
+    if not _strips(presets, path):
         return data
-    adapter = presets.adapter_for(policy.format)
-    text = _decode(data)
-    if policy.format != fmt or adapter is None or text is None:
-        raise ProjectionError(f"{path}: the merged content is not in this machine's format for the path")
-    try:
-        return project_text(adapter, text, policy).encode("utf-8")
-    except ProjectionError as exc:
-        raise ProjectionError(f"{path}: the merge result could not be reduced to its synced form") from exc
+    projected = _project_file(presets, data, path, fmt)
+    if projected.failure is not None or projected.view is None:
+        raise ProjectionError(f"{path}: {_PROJECTION_FAILURE_MERGED}")
+    return projected.view
 
 
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
@@ -566,7 +576,7 @@ def _collect_existing(
             # change with no conflict, so merge instead (step 10, on a stale base).
             state.stale.append(_StaleChange(record=record, entry=entry, live=projected.view))
         else:
-            state.records[record.file_id] = _replace_sha(record, view_sha)
+            state.records[record.file_id] = _replace_sha(record, view_sha, format=item.format)
             state.contents[record.file_id] = projected.view
             state.collected.append(item.path)
     elif verdict == "deferred":
@@ -596,7 +606,7 @@ def _collect_first_sight(
         # Taking the repo's side: keep the record; apply writes the repo content over the file.
         return
     state.records[record.file_id] = _replace_sha(
-        record, chosen_digest("local", local_sha256=view_sha, remote_sha256=record.sha256)
+        record, chosen_digest("local", local_sha256=view_sha, remote_sha256=record.sha256), format=item.format
     )
     state.contents[record.file_id] = view
     state.collected.append(item.path)
@@ -781,17 +791,24 @@ def _merge_diverged(
     if conflicts:
         return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
 
+    # Every surviving record whose policy strips keys is read back and projected, even when the
+    # merge itself did not touch its content: the merge commit this machine pushes names that object,
+    # so a key the policy strips — published by another build — must not travel on in it. A record
+    # with no strip list needs no read at all.
+    for file_id, record in records.items():
+        if file_id in contents or not _strips(presets, record.path):
+            continue
+        data = _object_content(transport, cipher, local, remote, file_id, record.sha256)
+        if data is None:
+            raise ContentDigestMismatch(file_id, record.sha256, "no matching object")
+        projected = _project_merged(presets, data, record.path, record.format)
+        if projected != data:
+            records[file_id] = _replace_sha(record, _sha256(projected))
+        contents[file_id] = projected
+
     merged_manifest = Manifest.create(
         schema=MANIFEST_SCHEMA, key_generation=local_manifest.key_generation, records=records
     )
-    plan = plan_writes(local_manifest, merged_manifest)
-    for file_id in plan.objects_to_write:
-        if file_id in contents:
-            continue
-        data = _object_content(transport, cipher, local, remote, file_id, merged_manifest.records[file_id].sha256)
-        if data is None:
-            raise ContentDigestMismatch(file_id, merged_manifest.records[file_id].sha256, "no matching object")
-        contents[file_id] = data
     write_repo(files=files, cipher=cipher, scanner=scanner, head=local_manifest, new=merged_manifest, contents=contents)
     commit = _commit(transport, branch, (local, remote), "syncintosh: merge")
     return _Merged(commit=commit, conflicts=(), base_commit=base_commit)
@@ -1053,13 +1070,11 @@ def _apply(
                 # Never write a version whose local keys could not be re-attached: the repo's
                 # bytes hold the stripped form, and writing them raw would delete a credential
                 # or a machine-local preference (``AGENTS.md`` §3.4).
-                unprojectable.append(
-                    Refusal(record.path, "this machine's own keys could not be re-attached to the file")
-                )
+                unprojectable.append(Refusal(record.path, _RESTORE_FAILED))
                 continue
             data = restored
         if not _syntax_ok(presets, data, record.path):
-            invalid.append(Refusal(record.path, "the file would not pass its syntax check"))
+            invalid.append(Refusal(record.path, _SYNTAX_FAILED))
             continue
         live.write(live_path, data)
         applied.append(record.path)

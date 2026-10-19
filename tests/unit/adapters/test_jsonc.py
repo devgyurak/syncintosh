@@ -664,11 +664,13 @@ def _mutated(value, how):
 def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment) -> str:
     """One settings file, laid out the way this combination describes."""
     text = json.dumps(value, indent=indent, separators=separators, ensure_ascii=False)
-    if pad and "\n" not in text:
-        for opening, closing in (("{", "}"), ("[", "]")):
-            text = text.replace(opening, opening + " ").replace(closing, " " + closing)
-    if trailing and text.rstrip().endswith(("}", "]")) and not text.rstrip().endswith(("{}", "[]")):
-        body = text.rstrip()
+    if pad and "\n" not in text and text[0] in "{[":
+        # Only the document's own delimiters: padding every brace would also pad one that is part of
+        # a *string*, and the template would no longer be the document this case means to fuzz.
+        text = text[0] + " " + text[1:-1] + " " + text[-1]
+    body = text.rstrip()
+    if trailing and body.endswith(("}", "]")) and body.replace(" ", "").replace("\t", "") not in ("{}", "[]"):
+        # A trailing comma after a *member*; `[  ,]` is not JSONC, so an empty container is skipped.
         text = body[:-1] + "," + body[-1] + text[len(body) :]
     multiline_object = isinstance(value, dict) and value and "\n" in text
     if multiline_object:
@@ -698,8 +700,9 @@ def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout)
     try:
         rendered = adapter.render(tree, template)
     except ContentParseError:
-        # Refusing is a legitimate verdict for exactly one reason: a rewrite that would drop a
-        # comment. Anything else is a bug this test exists to catch.
+        # A rewrite that would drop a comment is the only legitimate refusal, so the template has to
+        # be one that holds a comment; any other refusal is a bug this test exists to catch.
+        assert "//" in template or "/*" in template
         return
 
     # then — the render must be the tree it was handed, or the merge publishes what no one decided

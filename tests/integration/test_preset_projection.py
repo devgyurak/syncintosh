@@ -9,6 +9,7 @@ policy beside it — the machinery under test is the same one the VS Code preset
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,10 +24,11 @@ from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
+from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import ContentAdapter, PresetCatalog
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.repo import COMMITMENTS_PATH
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.core.tree import Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
@@ -64,7 +66,11 @@ JSONC_POLICY = PresetFile.create(
     noise={("window", "zoomLevel")},
     excluded={("http", "proxyAuthorization")},
 )
-JSONC_PRESET = Preset.create(name="keyed-test", files=(JSONC_POLICY,))
+# A second JSONC file so a machine can have a change of its own while another file changes remotely,
+# which is what makes a merge re-use an object instead of merging content.
+SECOND = "Library/Application Support/Code/User/keybindings.json"
+SECOND_FILE = PresetFile.create(path=SECOND, format="jsonc")
+JSONC_PRESET = Preset.create(name="keyed-test", files=(JSONC_POLICY, SECOND_FILE))
 TOML_PRESET = Preset.create(name="toml-test", files=(PresetFile.create(path=TOML, format="toml", noise={("noise",)}),))
 
 
@@ -162,6 +168,16 @@ def _config(machine: Machine, items: tuple[LocalItem, ...]) -> SyncConfig:
 
 def _zsh_config(machine: Machine) -> SyncConfig:
     return _config(machine, (LocalItem.create(path=ZSH, preset="zsh", scope="common", format="text"),))
+
+
+def _two_file_config(machine: Machine) -> SyncConfig:
+    return _config(
+        machine,
+        (
+            LocalItem.create(path=JSONC, preset="keyed-test", scope="common", format="jsonc"),
+            LocalItem.create(path=SECOND, preset="keyed-test", scope="common", format="jsonc"),
+        ),
+    )
 
 
 def _jsonc_config(machine: Machine) -> SyncConfig:
@@ -664,3 +680,66 @@ def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_refu
     assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
     assert _read(b, ZSH) == b"echo one\n"
     assert again.unprojectable == report.unprojectable
+
+
+def test_a_record_is_republished_in_the_format_its_object_is_really_in(tmp_path, memory_key_store) -> None:
+    # given — A publishes the path as `text` (a build whose catalog does not know it), and this
+    # machine's catalog says it is JSONC and strips keys from it
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    item = LocalItem.create(path=JSONC, preset="keyed-test", scope="common", format="text")
+    _initialize(a, _config(a, (item,)))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _run(a, catalog=_UnawareCatalog())
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 15}\n')
+
+    # when — B keeps its own content, which seals the object in the catalog's format
+    report = _run(b, adopt="local")
+    published = loads_manifest(
+        EnvelopeCipher(b.store).open(FileRepo(b.repo).read(MANIFEST_PATH) or b"", domain="manifest", file_id="")
+    )
+    formats = {record.path: record.format for record in published.records.values()}
+
+    # then — the record names the format the object is in, so a later scan reads it as JSONC (where
+    # `$` is a literal) rather than as a shell file, and apply no longer sees a mismatch
+    assert report.unprojectable == ()
+    assert formats[JSONC] == "jsonc"
+
+
+def test_a_merge_projects_an_object_it_only_re_uses(tmp_path, memory_key_store) -> None:
+    # given — A (a build that does not exclude the key) changes `settings.json` while B changes its
+    # *other* file, so the merge re-uses A's settings object instead of merging its content
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(a, SECOND, b'[\n  {\n    "key": "cmd+k"\n  }\n]\n')
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _run(b, adopt="remote")
+    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
+    _run(a, catalog=_UnawareCatalog())
+    _write(b, SECOND, b'[\n  {\n    "key": "cmd+j"\n  }\n]\n')
+
+    # when
+    report = _run(b)
+    head = GitCLITransport(b.repo).head() or ""
+    files = FileRepo(b.repo)
+    manifest = loads_manifest(
+        EnvelopeCipher(b.store).open(files.read(MANIFEST_PATH) or b"", domain="manifest", file_id="")
+    )
+    record = next(item for item in manifest.records.values() if item.path == JSONC)
+    sealed = EnvelopeCipher(b.store).open(
+        files.read(object_path(record.file_id)) or b"", domain="object", file_id=record.file_id
+    )
+
+    # then — the object the merge commit names was projected before it was sealed, so the key this
+    # machine's policy strips is not in the commit it pushed
+    assert report.has_conflicts is False
+    assert b"proxyAuthorization" not in sealed
+    assert b"FROM-A" not in sealed
+    assert head != ""
+    assert record.sha256 == hashlib.sha256(sealed).hexdigest()
