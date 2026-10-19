@@ -33,7 +33,15 @@ PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # in `http.proxy`, a proxy setting in `~/.zshrc`, or a git remote with a token — none of which
     # the patterns above would notice (decision V2). The slashes may be JSON-escaped (`\/`), which
     # the JSONC projection preserves verbatim for an unchanged value, so both spellings are matched.
-    ("URL with credentials", re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:[^/@\s\\]+@")),
+    #
+    # `$` and `{` are excluded from the password, so a URL that *references* a credential
+    # (`http://$USER:$PASS@proxy`) is not a match. That is the recommended way to keep a secret out
+    # of the file; refusing it would block the file precisely when its owner did the right thing,
+    # and a variable name is not a value.
+    (
+        "URL with credentials",
+        re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:[^/@\s\\${]+@"),
+    ),
 )
 
 

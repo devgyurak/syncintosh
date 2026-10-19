@@ -98,3 +98,30 @@ def test_a_url_without_inline_credentials_passes(payload: bytes) -> None:
 
     # when & then
     assert scanner.scan(payload, subject="settings.json") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"postgres://app:$DB_PASS@localhost/db",  # a variable reference, not a value
+        b"postgres://app:${PGPASSWORD}@localhost/db",
+        b'http_proxy="http://$USER:$PASS@proxy.example.test:3128"',
+    ],
+)
+def test_a_url_that_only_references_its_credentials_passes(payload: bytes) -> None:
+    # given — a URL interpolating a variable is the recommended way to keep a secret out of the
+    # file, so refusing it would block the file for doing the right thing
+    scanner = PatternSecretScanner()
+
+    # when & then
+    assert scanner.scan(payload, subject=".zshrc") is None
+
+
+def test_a_literal_password_in_a_url_is_still_refused() -> None:
+    # given — excluding `$` and `{` must not have blinded the pattern to an actual value
+    scanner = PatternSecretScanner()
+    payload = b"postgres://" + b"app" + b":" + b"s3cret-placeholder" + b"@" + b"db.internal:5432"
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(payload, subject=".zshrc")
