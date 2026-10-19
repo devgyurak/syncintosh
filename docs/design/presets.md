@@ -18,7 +18,8 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 
 - The five files zsh reads at startup, verified on a Mac (zsh 5.9, 2026-10). `ZDOTDIR` is **not**
   honoured: a user who moves the startup files names paths this preset does not know, and the
-  apply-side catalog check refuses them rather than guessing.
+  catalog check refuses them at collect (nothing is published for them) and again at apply (a
+  record that arrived from elsewhere cannot reach them) rather than guessing.
 - `noise`/`excluded` are empty because `text` has no key paths to strip. A line-level merge of two
   changed regions can still produce a file that does not parse, so the merge result and every
   write are checked with `zsh -fn` (parse only, `-f` so no rc file runs).

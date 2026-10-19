@@ -102,6 +102,24 @@ _DEFER: _Decision = "defer"
 # adapter's message: that message can name a key the file holds (``AGENTS.md`` §4).
 ProjectionFailure = Literal["format-mismatch", "no-adapter", "not-utf-8", "unrenderable"]
 
+# The sentence a user sees for each code. Fixed strings, so a report can never carry file content.
+_PROJECTION_FAILURE: Mapping[ProjectionFailure, str] = MappingProxyType(
+    {
+        "format-mismatch": "the record's format is not the format the catalog uses",
+        "no-adapter": "this build has no adapter for the file's format",
+        "not-utf-8": "the file is not UTF-8",
+        "unrenderable": "the file could not be reduced to its synced form",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """One path that was refused, with the reason — a fixed phrase, never the file's content."""
+
+    path: str
+    reason: str
+
 
 @dataclass(frozen=True)
 class _Presets:
@@ -137,8 +155,8 @@ class SyncReport:
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()
-    unprojectable: tuple[str, ...] = ()
-    invalid: tuple[str, ...] = ()
+    unprojectable: tuple[Refusal, ...] = ()
+    invalid: tuple[Refusal, ...] = ()
     first_sight: tuple[str, ...] = ()
     conflicts: tuple[PendingConflictRecord, ...] = ()
     skipped: tuple[str, ...] = ()
@@ -162,6 +180,10 @@ class _Collect:
     records: dict[str, ManifestRecord] = field(default_factory=dict)
     # The projected bytes that would be sealed: the object content, keyed by file_id.
     contents: dict[str, bytes] = field(default_factory=dict)
+    # The projected form of each live file that existed at collect, keyed by file_id. Apply reuses
+    # it instead of projecting again whenever the raw bytes are unchanged since collect — the
+    # compare-and-swap already proves the file is the one this projection was made from.
+    views: dict[str, bytes] = field(default_factory=dict)
     # The bytes collect read from each live file, kept so apply can compare-and-swap a record it
     # is about to overwrite on an explicit adopt — even though it collected nothing for it. These
     # are the **raw** bytes, never the projection: an edit between collect and apply must abort
@@ -177,7 +199,8 @@ class _Collect:
     first_sight: list[str] = field(default_factory=list)
     symlinks: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    unprojectable: list[str] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
+    unprojectable: list[Refusal] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -344,6 +367,13 @@ def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileForm
     return _Projected(raw=raw, view=view)
 
 
+def _refusal(path: str, projected: _Projected) -> Refusal:
+    """The report row for a projection that failed, phrased by its fixed reason code."""
+    if projected.failure is None:
+        return Refusal(path, "the file could not be reduced to its synced form")
+    return Refusal(path, _PROJECTION_FAILURE[projected.failure])
+
+
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
     """`repo_bytes` with the live file's local values re-attached, or `None` on failure."""
     adapter = presets.adapter_for(policy.format)
@@ -396,6 +426,13 @@ def _collect(
     """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
     state = _Collect(records={} if head is None else dict(head.records))
     for item in config.items:
+        if not presets.catalog.knows(item.preset, item.path):
+            # The local config names a path the preset it claims does not own — a hand-edited
+            # config, or a catalog that changed under it. Publishing it would create a record every
+            # machine, this one included, refuses to apply, so the file would never settle and every
+            # later sync would ask for `--adopt` again. Refused here, and reported.
+            state.refused.append(item.path)
+            continue
         if deny.is_denied(home, item.path):
             state.skipped.append(item.path)
             continue
@@ -408,7 +445,7 @@ def _collect(
             continue
         projected = _project_file(presets, live.read(live_path), item.path, item.format)
         if projected.failed:
-            state.unprojectable.append(item.path)
+            state.unprojectable.append(_refusal(item.path, projected))
             continue
         record = _find_item_record(state.records, item)
         if record is not None and projected.raw is not None:
@@ -445,6 +482,7 @@ def _collect_new(
         sha256=view_sha,
     )
     state.contents[file_id] = projected.view
+    state.views[file_id] = projected.view
     if projected.raw is not None:
         state.seen[file_id] = projected.raw
     state.created.append(item.path)
@@ -461,6 +499,10 @@ def _collect_existing(
 ) -> None:
     entry = ledger.get(record.file_id)
     verdict = classify(entry, view_sha, record.sha256)
+    if projected.view is not None:
+        # Cached for apply, which reuses it while the raw bytes are unchanged (item 10: one
+        # projection per file per cycle, instead of one in each of collect, apply, and settle).
+        state.views[record.file_id] = projected.view
     if verdict == "local-change" and projected.view is not None and view_sha is not None:
         if entry is not None and entry.sha256 != record.sha256:
             # The user edited the content the ledger last accounted for, while HEAD holds newer
@@ -826,15 +868,22 @@ def _fast_forward(transport: GitTransport, branch: str, commit: str) -> None:
 
 @dataclass(frozen=True)
 class _Applied:
-    """What step 14 did with each record, by outcome."""
+    """What step 14 did with each record, by outcome.
+
+    `digests` carries the projection digest of every file apply left on disk, keyed by file_id, so
+    `_settle_ledger` does not have to project each file a second time. A file apply wrote has the
+    record's digest by construction — `restore_text` proved the round-trip — and one it left alone
+    has the digest apply observed.
+    """
 
     applied: tuple[str, ...] = ()
     deferred: tuple[str, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()
-    unprojectable: tuple[str, ...] = ()
-    invalid: tuple[str, ...] = ()
+    unprojectable: tuple[Refusal, ...] = ()
+    invalid: tuple[Refusal, ...] = ()
+    digests: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def _apply(
@@ -845,6 +894,7 @@ def _apply(
     target_commit: str,
     target_manifest: Manifest,
     seen: Mapping[str, bytes],
+    views: Mapping[str, bytes],
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
     deny: DenyList,
@@ -859,7 +909,9 @@ def _apply(
     other role those collected bytes play: the raw compare-and-swap reference for the file. When
     a preset owns the path the published bytes are first combined with the live file's own values
     at the preset's stripped keys, so an excluded credential the repo never held is left exactly
-    as this machine has it (``AGENTS.md`` §3.4).
+    as this machine has it (``AGENTS.md`` §3.4) — for a scalar value byte-identical, and for a
+    nested object the value itself but re-rendered (``docs/design/02-base-and-merge.md``,
+    "What a render is allowed to change").
 
     A record's `path` and `preset` arrive from the repo, so before writing anything this checks
     the target stays under `$HOME` (resolving the parent), is one this machine's local allowlist
@@ -871,8 +923,9 @@ def _apply(
     symlinks: list[str] = []
     aborted: list[str] = []
     refused: list[str] = []
-    unprojectable: list[str] = []
-    invalid: list[str] = []
+    unprojectable: list[Refusal] = []
+    invalid: list[Refusal] = []
+    digests: dict[str, str] = {}
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -895,16 +948,23 @@ def _apply(
             continue
         live_bytes = live.read(live_path)
         live_view = live_bytes
-        if live_bytes is not None and stripped_policy is not None:
-            view = _project_file(presets, live_bytes, record.path, record.format)
-            if view.failed:
-                unprojectable.append(record.path)
-                continue
-            live_view = view.view
         # The compare-and-swap reference is the raw bytes collect read from this file — never the
         # projection, and never the content this cycle will publish, which for a merged record is
         # not what the file holds.
         collect_baseline = seen.get(file_id)
+        cached = views.get(file_id) if live_bytes is not None and live_bytes == collect_baseline else None
+        if cached is not None:
+            # The file is byte-for-byte the one collect projected, so its projection is the same
+            # bytes; projecting it again would be work with no effect.
+            live_view = cached
+        elif live_bytes is not None and stripped_policy is not None:
+            view = _project_file(presets, live_bytes, record.path, record.format)
+            if view.failed:
+                unprojectable.append(_refusal(record.path, view))
+                continue
+            live_view = view.view
+        if live_view is not None:
+            digests[file_id] = _sha256(live_view)
         changed = live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline
         decision = _decision(
             record,
@@ -937,13 +997,18 @@ def _apply(
                 # Never write a version whose local keys could not be re-attached: the repo's
                 # bytes hold the stripped form, and writing them raw would delete a credential
                 # or a machine-local preference (``AGENTS.md`` §3.4).
-                unprojectable.append(record.path)
+                unprojectable.append(
+                    Refusal(record.path, "this machine's own keys could not be re-attached to the file")
+                )
                 continue
             data = restored
         if not _syntax_ok(presets, data, record.path):
-            invalid.append(record.path)
+            invalid.append(Refusal(record.path, "the file would not pass its syntax check"))
             continue
         live.write(live_path, data)
+        # The bytes just written project back to the record's object — `restore_text` verified it,
+        # and a file written verbatim *is* the object — so settle has nothing to recompute.
+        digests[file_id] = record.sha256
         applied.append(record.path)
     return _Applied(
         applied=tuple(applied),
@@ -953,6 +1018,7 @@ def _apply(
         refused=tuple(refused),
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
+        digests=MappingProxyType(digests),
     )
 
 
@@ -999,6 +1065,7 @@ def _settle_ledger(
     live: LiveFiles,
     deny: DenyList,
     presets: _Presets,
+    digests: Mapping[str, str],
     config: SyncConfig,
     home: str,
 ) -> dict[str, LedgerEntry]:
@@ -1033,7 +1100,11 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = LedgerEntry(sha256=old.sha256, commit=old.commit, suppressed=True)
             continue
-        digest = _ledger_digest(presets, live_bytes, record.path, record.format)
+        # Apply already knows what the file projects to when it left it alone or wrote it; only a
+        # file apply never reached needs the projection computed here.
+        digest = digests.get(file_id)
+        if digest is None:
+            digest = _ledger_digest(presets, live_bytes, record.path, record.format)
         if digest is not None and digest == record.sha256:
             settled[file_id] = LedgerEntry(sha256=digest, commit=target_commit, suppressed=False)
         else:
@@ -1153,6 +1224,7 @@ def _cycle(
             first_sight=tuple(collected.first_sight),
             symlinks=tuple(collected.symlinks),
             skipped=tuple(collected.skipped),
+            refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
         )
     if collected.stale:
@@ -1178,6 +1250,7 @@ def _cycle(
                 collected=tuple(collected.collected),
                 symlinks=tuple(collected.symlinks),
                 skipped=tuple(collected.skipped),
+                refused=tuple(collected.refused),
                 unprojectable=tuple(collected.unprojectable),
             )
 
@@ -1228,6 +1301,7 @@ def _cycle(
             created=tuple(collected.created),
             collected=tuple(collected.collected),
             skipped=tuple(collected.skipped),
+            refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
         )
 
@@ -1240,6 +1314,7 @@ def _cycle(
         target_commit=target_commit,
         target_manifest=target_manifest,
         seen=collected.seen,
+        views=collected.views,
         ledger=ledger,
         live=live,
         deny=deny,
@@ -1255,6 +1330,7 @@ def _cycle(
             live=live,
             deny=deny,
             presets=presets,
+            digests=applied.digests,
             config=config,
             home=home,
         )
@@ -1268,7 +1344,7 @@ def _cycle(
         suppressed=tuple(collected.suppressed),
         symlinks=tuple(dict.fromkeys((*collected.symlinks, *applied.symlinks))),
         aborted=applied.aborted,
-        refused=applied.refused,
+        refused=tuple(dict.fromkeys((*collected.refused, *applied.refused))),
         unprojectable=tuple(dict.fromkeys((*collected.unprojectable, *applied.unprojectable))),
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),

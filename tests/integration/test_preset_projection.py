@@ -10,6 +10,7 @@ policy beside it — the machinery under test is the same one the VS Code preset
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,12 @@ from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.ledger import AdoptChoice
+from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
+from syncintosh.core.ports import ContentAdapter
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH
+from syncintosh.core.tree import Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -182,7 +186,13 @@ def _initialize(machine: Machine, config: SyncConfig, *, import_from: Path | Non
     )
 
 
-def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog: _Catalog | None = None) -> SyncReport:
+def _run(
+    machine: Machine,
+    *,
+    adopt: AdoptChoice | None = None,
+    catalog: _Catalog | None = None,
+    adapters: Mapping[FileFormat, ContentAdapter] | None = None,
+) -> SyncReport:
     active = GitCLITransport(machine.repo)
     return sync(
         transport=active,
@@ -192,7 +202,7 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog: _Catalo
         store=machine.store,
         codec=machine.codec,
         driver=TextMergeDriver(),
-        adapters={"jsonc": JsoncAdapter()},
+        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         catalog=catalog if catalog is not None else KEYED_CATALOG,
         validators={"zsh": ZshSyntaxValidator()},
         live=SystemLiveFiles(),
@@ -301,7 +311,7 @@ def test_an_invalid_zshrc_is_never_written_on_apply(tmp_path, memory_key_store) 
     report = _run(b)
 
     # then — reported as invalid, and the file was not created
-    assert report.invalid == (ZSH,)
+    assert [refusal.path for refusal in report.invalid] == [ZSH]
     assert (b.home / ZSH).exists() is False
 
 
@@ -324,14 +334,34 @@ def test_a_zshrc_that_is_a_symlink_is_reported_and_never_written(tmp_path, memor
     assert target.read_bytes() == b"echo one\necho two\n"
 
 
+def test_an_item_whose_preset_does_not_own_its_path_is_refused(tmp_path, memory_key_store) -> None:
+    # given — the local config names a path under `zsh` that the zsh preset does not own. A fresh
+    # record for it would be refused by every machine's apply, so this machine would never get a
+    # ledger entry and would be asked for `--adopt` on every later sync.
+    machine = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    path = "notes/settings.txt"
+    _initialize(machine, _config(machine, (LocalItem.create(path=path, preset="zsh", scope="common", format="text"),)))
+    _write(machine, path, b"set\n")
+
+    # when
+    report = _run(machine)
+
+    # then — refused at collect, reported, and nothing is published for it
+    assert report.refused == (path,)
+    assert FileRepo(machine.repo).list_paths("objects") == ()
+
+
 def test_a_record_the_local_catalog_does_not_own_is_refused(tmp_path, memory_key_store) -> None:
-    # given — A tracks a path under the name `zsh` that the zsh preset does not own
+    # given — A publishes the path because its own catalog does own it under the name `zsh`;
+    # B's catalog does not, so B must refuse the record rather than write it
     remote = _bare_remote(tmp_path)
     path = "notes/settings.txt"
+    owned = _Catalog(Preset.create(name="zsh", files=(PresetFile.create(path=path, format="text"),)))
     a = _machine(tmp_path, memory_key_store, "machine-a", remote)
     _initialize(a, _config(a, (LocalItem.create(path=path, preset="zsh", scope="common", format="text"),)))
     _write(a, path, b"set\n")
-    _run(a)
+    _run(a, catalog=owned)
+    assert FileRepo(a.repo).list_paths("objects") != ()
 
     # when — B tracks the same path, so only the catalog provenance can refuse it
     b = _machine(tmp_path, memory_key_store, "machine-b", remote)
@@ -345,6 +375,34 @@ def test_a_record_the_local_catalog_does_not_own_is_refused(tmp_path, memory_key
     # then — the path is reported and never written (docs/design/03-manifest.md)
     assert report.refused == (path,)
     assert (b.home / path).exists() is False
+
+
+def test_a_one_line_settings_file_never_wedges_a_machine(tmp_path, memory_key_store) -> None:
+    # given — A published a one-line settings file, and B's own file carries the excluded key
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-B"}}\n')
+
+    # when — B takes the repo's side, then A changes a shared setting and B syncs twice more
+    first = _run(b, adopt="remote")
+    _write(a, JSONC, b'{"editor.fontSize": 15}\n')
+    _run(a)
+    second = _run(b)
+    third = _run(b)
+
+    # then — nothing was ever unprojectable, the local credential survived, and the cycle settles
+    # instead of reporting the file on every later sync
+    assert first.unprojectable == ()
+    assert second.unprojectable == ()
+    assert b'"editor.fontSize": 15' in _read(b, JSONC)
+    assert b"Basic FROM-B" in _read(b, JSONC)
+    assert third.applied == ()
+    assert third.unchanged is True
 
 
 # --------------------------------------------------------------------------- projection
@@ -416,7 +474,7 @@ def test_a_settings_file_the_policy_cannot_parse_is_reported_unprojectable(tmp_p
     report = _run(b)
 
     # then — never sealed raw, and reported rather than silently skipped
-    assert report.unprojectable == (JSONC,)
+    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
     assert _read(b, JSONC) == b'{\n  "editor.fontSize": 13,\n'
     assert a.home.exists() is True
 
@@ -430,8 +488,10 @@ def test_a_policy_whose_format_has_no_adapter_is_reported_unprojectable(tmp_path
     # when
     report = _run(machine, catalog=TOML_CATALOG)
 
-    # then — fail-closed: the raw file is never sealed
-    assert report.unprojectable == (TOML,)
+    # then — fail-closed (the raw file is never sealed), and the reason is reported rather than
+    # left for the user to guess at
+    assert [refusal.path for refusal in report.unprojectable] == [TOML]
+    assert report.unprojectable[0].reason == "this build has no adapter for the file's format"
     assert FileRepo(machine.repo).list_paths("objects") == ()
 
 
@@ -445,8 +505,9 @@ def test_a_record_whose_format_disagrees_with_the_catalog_is_unprojectable(tmp_p
     # when
     report = _run(machine, catalog=TOML_CATALOG)
 
-    # then — a mismatch is refused, never guessed at
-    assert report.unprojectable == (TOML,)
+    # then — a mismatch is refused, never guessed at, and named
+    assert [refusal.path for refusal in report.unprojectable] == [TOML]
+    assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
     assert FileRepo(machine.repo).list_paths("objects") == ()
 
 
@@ -460,5 +521,36 @@ def test_a_tracked_file_that_is_not_utf8_is_reported_unprojectable(tmp_path, mem
     report = _run(machine)
 
     # then
-    assert report.unprojectable == (JSONC,)
+    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
     assert FileRepo(machine.repo).list_paths("objects") == ()
+
+
+class _CountingAdapter:
+    """A `ContentAdapter` that counts `parse` calls, so a cycle's work is observable."""
+
+    def __init__(self, inner: ContentAdapter) -> None:
+        self._inner = inner
+        self.parses = 0
+
+    def parse(self, text: str) -> Tree:
+        self.parses += 1
+        return self._inner.parse(text)
+
+    def render(self, tree: Tree, template: str) -> str:
+        return self._inner.render(tree, template)
+
+
+def test_a_cycle_projects_a_file_once(tmp_path, memory_key_store) -> None:
+    # given — one tracked file whose collect needs a projection
+    machine = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    _initialize(machine, _jsonc_config(machine))
+    _write(machine, JSONC, b'{"editor.fontSize": 13, "window": {"zoomLevel": 1}}\n')
+    counting = _CountingAdapter(JsoncAdapter())
+
+    # when
+    _run(machine, adapters={"jsonc": counting})
+
+    # then — the projection itself, and the re-parse that verifies it; apply reuses the projection
+    # collect made (the raw bytes are unchanged) and settle takes apply's digest, so neither runs
+    # the adapter again. A regression here shows up as 6.
+    assert counting.parses == 2

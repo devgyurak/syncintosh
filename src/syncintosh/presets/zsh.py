@@ -16,7 +16,9 @@ Symlink:   ~/.zshrc → ~/dotfiles/zshrc is not followed and is reported, not wr
 
 Only the **five files zsh actually reads at startup** are listed. `ZDOTDIR` is not honoured:
 a user who moves their startup files with it names paths this preset does not know, and the
-apply-side catalog check refuses them rather than guessing (``docs/design/03-manifest.md``).
+catalog check refuses them — at collect, so nothing is ever published for them, and again at
+apply, so a record that arrived from elsewhere cannot reach them either
+(``docs/design/03-manifest.md``).
 
 The format is `text`, not a keyed format, because a shell script has no key paths — the merge
 is the line-level `MergeDriver`, and a both-sides change to one line is a whole-file conflict.

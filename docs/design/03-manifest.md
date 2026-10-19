@@ -170,6 +170,12 @@ A `preset` that is not built-in makes no claim to check, so it passes and the lo
 alone decides. The catalog consulted is always the **local** one, never a preset definition that
 arrived with the record.
 
+**The same check runs at collect**, on each of this machine's own items. Without it a config entry
+naming a path its preset does not own (a hand-edited config, or a catalog that changed under it)
+would publish a record that every machine's apply then refuses — including the one that published
+it, so it would never get a ledger entry and every later sync would ask for `--adopt` again.
+Collect refuses it and reports it, so nothing is published in the first place.
+
 ### `~/.zshrc` that is a symlink
 
 Decided with the first preset that needs it, `zsh`. An `apply` target that is a symbolic link is
