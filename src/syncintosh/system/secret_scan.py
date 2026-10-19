@@ -34,15 +34,26 @@ PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # the patterns above would notice (decision V2). The slashes may be JSON-escaped (`\/`), which
     # the JSONC projection preserves verbatim for an unchanged value, so both spellings are matched.
     #
-    # The password must be a **literal**. One that is entirely a variable reference
-    # (`$PASS`, `${PGPASSWORD}`) is skipped: that is the recommended way to keep a secret out of
-    # the file, and refusing it would block the file precisely when its owner did the right thing —
-    # a variable name is not a value. Excluding `$` and `{` from the characters matched instead
-    # would have hidden a real password that happens to contain them (`pa$$w0rd`, `abc{123}`),
-    # which is a credential leaving the machine; the lookahead skips only the reference itself.
+    # The password must be a **literal**. One that is entirely a variable reference (`$PASS`,
+    # `${PGPASSWORD}`) is skipped: that is the recommended way to keep a secret out of the file, and
+    # refusing it would block the file precisely when its owner did the right thing — a variable name
+    # is not a value. Excluding `$` and `{` from the characters matched instead would have hidden a
+    # real password that happens to contain them (`pa$$w0rd`, `abc{123}`), which is a credential
+    # leaving the machine; the lookahead skips only the reference itself.
+    #
+    # The userinfo may be empty (`http://:s3cret@host`, where the user is not the secret) and the
+    # password may hold a backslash (written `\\` in JSON). Three limits are known and deliberate,
+    # because widening the pattern to cover them would refuse far more than it caught:
+    #   * `${PASS:-fallback}` and `$1` are refused: the fallback may itself be the secret, and a
+    #     positional parameter is not the form anyone is told to use. Failing closed is the point.
+    #   * `https://<token>@host` — a token with no `:` and no `@` after it — is left to the other
+    #     patterns and to the preset exclusions; `ssh://git@github.com` is a legitimate URL, so
+    #     matching a bare userinfo would refuse it.
+    #   * A URL split across a shell line continuation is not matched: `\s` is excluded so a match
+    #     cannot span a line, and a byte pattern cannot join the two halves.
     (
         "URL with credentials",
-        re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]+:(?!\$\{?[A-Za-z_]\w*\}?@)[^/@\s\\]+@"),
+        re.compile(rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:(?!\$\{?[A-Za-z_]\w*\}?@)[^/@\s]+@"),
     ),
 )
 

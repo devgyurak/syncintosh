@@ -90,6 +90,7 @@ def test_the_first_match_is_reported() -> None:
         b"ssh://git@github.com/user/repo.git",  # a user, no password
         b"https://example.test/path?token=looks-secret",  # a query parameter, not userinfo
         b"redis://cache.example.test:6379/0",
+        b"https://:8080/path",  # an empty user and a port are not a credential
     ],
 )
 def test_a_url_without_inline_credentials_passes(payload: bytes) -> None:
@@ -125,6 +126,11 @@ def test_a_url_that_only_references_its_credentials_passes(payload: bytes) -> No
         b"'postgres://app:pass$word@db'",
         b"postgres://app:s3cret-placeholder@db.internal:5432",
         b"http:\\/\\/user:pa$$w0rd@proxy.example.test",  # the JSON-escaped spelling too
+        b"http://:s3cret-placeholder@host",  # no user, so the password is the secret
+        b'{"http.proxy": "http://user:pa\\\\ss-placeholder@host"}',  # a backslash in the value
+        b"postgres://app:${PASS:-fallback}@db",  # a default may itself hold the secret: fail closed
+        b"http://user:$1@proxy.example.test",  # a positional parameter is not the recommended form
+        b'http://user:"$PASS"@proxy.example.test',
     ],
 )
 def test_a_literal_password_in_a_url_is_refused(payload: bytes) -> None:
@@ -136,3 +142,15 @@ def test_a_literal_password_in_a_url_is_refused(payload: bytes) -> None:
     # when & then
     with pytest.raises(SecretScanError):
         scanner.scan(payload, subject=".zshrc")
+
+
+def test_a_url_split_across_a_line_continuation_passes() -> None:
+    # given — the one shape the pattern cannot reach: `\s` is excluded so a match never spans a
+    # line, and a byte pattern cannot join a shell line continuation's two halves. Pinned so the
+    # limit is a decision rather than an accident; the value is still in the file either way, which
+    # is what the dragnet's other patterns and the user's own review are for.
+    scanner = PatternSecretScanner()
+    payload = b"http://user:pa\\" + b"\n" + b"ssw0rd-placeholder@host"
+
+    # when & then
+    assert scanner.scan(payload, subject=".zshrc") is None
