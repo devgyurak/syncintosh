@@ -132,3 +132,31 @@ def test_importing_the_cli_does_not_import_the_jsonc_adapter() -> None:
 
     # then
     assert result.stdout.strip() == "False"
+
+
+def test_sync_exits_1_when_a_file_could_not_be_projected(tmp_path, monkeypatch) -> None:
+    # given — the service reports a file it could not reduce to its synced form
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.services import Refusal, SyncReport
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module,
+        "sync_service",
+        lambda **_kwargs: SyncReport(unprojectable=(Refusal(".zshrc", "not valid JSONC"),)),
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then — the exit code says "not applied", and the reason is named rather than left to guess
+    assert result.exit_code == 1
+    assert "unprojectable (not valid JSONC): .zshrc" in _combined(result)

@@ -208,7 +208,9 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         _fail(exc)
         return
     _render(report, config)
-    if report.has_conflicts or report.needs_adopt:
+    if report.has_conflicts or report.needs_adopt or report.unprojectable or report.invalid:
+        # A path that could not be projected or written is a failure, not a partial success: a
+        # launchd job or a script must not read "nothing was applied here" as "all is well".
         raise typer.Exit(code=1)
 
 
@@ -230,14 +232,16 @@ def _render(report: SyncReport, config) -> None:
         ("deferred (app not installed)", report.deferred),
         ("suppressed (removed here)", report.suppressed),
         ("skipped (dangerous path)", report.skipped),
-        ("refused (not a tracked path here)", report.refused),
+        ("refused (path not allowed here)", report.refused),
         ("skipped (symbolic link)", report.symlinks),
-        ("unprojectable (preset keys could not be stripped or restored)", report.unprojectable),
-        ("invalid (would not pass its syntax check)", report.invalid),
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:
             typer.echo(f"{label}: {path}")
+    for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
+        for refusal in refusals:
+            # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
+            typer.echo(f"{label} ({refusal.reason}): {refusal.path}", err=True)
     if report.unchanged:
         typer.echo("nothing changed")
     elif report.published_commit:
