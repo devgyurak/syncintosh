@@ -638,10 +638,16 @@ def _collect_first_sight(
 
 
 def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
-    """A pending-conflict detail that names the colliding key paths, never their values (§4)."""
-    if not paths:
+    """A pending-conflict detail that names the colliding key paths, never their values (§4).
+
+    A whole-document conflict — an array like `keybindings.json`, compared as one value — arrives
+    as the **root** path, which has no name to print, so the reason stands alone rather than
+    trailing a colon.
+    """
+    named = [path for path in paths if path]
+    if not named:
         return reason
-    return f"{reason}: {', '.join('.'.join(path) for path in paths)}"
+    return f"{reason}: {', '.join('.'.join(path) for path in named)}"
 
 
 def _merge_stale(

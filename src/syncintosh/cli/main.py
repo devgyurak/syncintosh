@@ -103,7 +103,9 @@ def merge(base: Path, local: Path, remote: Path) -> None:
     typer.echo(result.text, nl=False)
     if result.has_conflicts:
         for conflict in result.conflicts:
-            typer.echo(f"conflict: {'.'.join(conflict.path)}", err=True)
+            # An array at the root — `keybindings.json` — is compared whole, so there is no key to
+            # name and the document itself is the conflict.
+            typer.echo(f"conflict: {'.'.join(conflict.path) or '(document)'}", err=True)
         raise typer.Exit(code=1)
 
 

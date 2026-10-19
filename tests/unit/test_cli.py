@@ -232,3 +232,17 @@ def test_every_preset_validator_is_wired() -> None:
 
     # then
     assert used - set(main_module.validators()) == set()
+
+
+def test_merge_names_a_whole_document_conflict(tmp_path) -> None:
+    # given — an array at the root, compared whole, exactly the shape of `keybindings.json`
+    base = _write(tmp_path, "base.json", [1])
+    local = _write(tmp_path, "local.json", [2])
+    remote = _write(tmp_path, "remote.json", [3])
+
+    # when
+    result = runner.invoke(main_module.app, ["merge", base, local, remote])
+
+    # then — there is no key to name, so the document itself is named
+    assert result.exit_code == 1
+    assert "conflict: (document)" in _combined(result)
