@@ -157,7 +157,6 @@ def test_a_literal_password_in_a_shell_file_is_refused(payload: bytes) -> None:
         b"git@github.com:user/repo.git",
         b"redis://cache.example.test:6379/0",
         b"https://example.test/path?token=looks-secret",
-        b"http://h:3128;me@x.com",  # a `;`-separated list, not a credential
         b'{"http.proxy": "http://u:pa?ss@h"}',  # `?` starts a query, so `pa` is the password
         b'{"http.proxy": "http://u:pa#ss@h"}',  # `#` starts a fragment
     ],
@@ -192,3 +191,17 @@ def test_a_quoted_url_followed_by_an_address_is_not_a_credential() -> None:
 
     # when & then
     assert scanner.scan(payload, subject=".zshrc", format="text") is None
+
+
+def test_a_semicolon_in_a_password_fails_closed() -> None:
+    # given — RFC 3986 allows `;` in a userinfo, and the same bytes appear between two values in a
+    # `;`-separated list; the two cannot be told apart from the text alone
+    scanner = PatternSecretScanner()
+
+    # when & then — it fails **closed**, because the shapes are ambiguous: a refused sync is visible
+    # and names its reason, a leaked password is neither. Issue #25 narrows this with a user-defined
+    # allowlist rather than by loosening the pattern.
+    with pytest.raises(SecretScanError):
+        scanner.scan(b"http://me:s3cr;t@proxy:8080", subject="settings.json", format="jsonc")
+    with pytest.raises(SecretScanError):
+        scanner.scan(b'export http_proxy="http://me:s3cr;t@proxy:8080"', subject=".zshrc", format="text")

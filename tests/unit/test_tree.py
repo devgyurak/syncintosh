@@ -191,6 +191,8 @@ def test_create_freezes_the_mapping() -> None:
         (("a.b", "c"), '"a.b".c'),
         (('"a', 'b"'), '"\\"a"."b\\""'),  # a quoted step cannot be read as another step's text
         (("(document)",), '"(document)"'),  # and the document's own word is not a key's label
+        (("a,b",), '"a,b"'),  # labels are joined with `, `, so a bare comma would read as two
+        (["éditeur"], "éditeur"),  # a non-ASCII key stays readable
     ],
 )
 def test_a_path_labels_each_step_so_two_paths_cannot_print_alike(path, expected) -> None:

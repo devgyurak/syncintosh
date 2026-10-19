@@ -207,10 +207,15 @@ def path_label(path: KeyPath) -> str:
 
 
 def _step_label(step: str) -> str:
-    """One path step, quoted exactly when its bare form could be misread as another path's."""
-    if step and "." not in step and '"' not in step and step != "(document)":
+    """One path step, quoted exactly when its bare form could be misread as another path's.
+
+    A comma is quoted too: labels are joined with `, ` when a conflict names several paths, so a bare
+    step holding one would read as two. `ensure_ascii=False` keeps a non-ASCII key readable instead of
+    printing it as an escape sequence.
+    """
+    if step and not set(step) & set('.,"') and step != "(document)":
         return step
-    return json.dumps(step)
+    return json.dumps(step, ensure_ascii=False)
 
 
 def _node_to_value(node: Node) -> object:

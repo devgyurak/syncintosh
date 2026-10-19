@@ -51,13 +51,16 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 #   (`proxy='http://u:$PASS@h'`) or behind a backslash is *not* expanded by the shell, so the text
 #   itself is the credential — hence a second pattern for that case rather than a wider skip.
 #
-# A password may not contain `,`, `;`, `?`, `#`, or `"`. Those are what sits *between* values or
-# *ends* a URL: a settings line `{"proxy":"http://h:3128","email":"a@b.c"}`, a `NO_PROXY` list, a
-# query, a fragment. Matching across them reads the text between a port and a later `@` as a
-# credential — a false positive that stops **every** tracked file on the machine from syncing — and a
-# password cannot really contain them anyway: a URL's authority ends at the first `?` or `#`, and a
-# `;` in the environments where the false positive shows up separates two values.
-_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,;?#\"]+@"
+# What a literal password may hold is a **fail-closed** choice, not a grammar one. `,`, `?`, `#`, and
+# `"` all appear *between* values or *end* a URL — a settings line
+# `{"proxy":"http://h:3128","email":"a@b.c"}`, a `NO_PROXY` list, a query, a fragment — where matching
+# across them reads text between a port and a later `@` as a credential and stops **every** tracked
+# file on the machine from syncing. `;` is different, and stays *in*: RFC 3986 allows it in a userinfo,
+# so `http://me:s3cr;t@proxy` is a real credential, and the same bytes in a `;`-separated list are a
+# false positive with no way to tell the two apart from the text. A refusal is visible and names its
+# reason; a leak is neither, so the ambiguous one fails closed. Issue #25 narrows it with a
+# user-defined allowlist rather than by loosening the pattern.
+_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s,?#\"]+@"
 
 # A URL the shell passes through verbatim, so its password is a literal and may hold anything a URL
 # may — `,`, `?`, `#`, and `"` included. `;` and `'` stay out: they end the quoted string, and
