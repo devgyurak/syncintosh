@@ -195,13 +195,22 @@ def path_label(path: KeyPath) -> str:
     """A key path as a person reads it, so two different paths never print the same string.
 
     A settings file spells a flat setting `"editor.fontSize"` — one key whose *name* contains a dot
-    — and a nested one `"editor": {"fontSize": …}`. Printing both as `editor.fontSize` would point
-    the user at the wrong place, so a step that is empty or itself contains a dot is quoted, and the
-    whole document (the empty path) is `(document)`. Standard library only (``AGENTS.md`` §2.1).
+    — and a nested one `"editor": {"fontSize": …}`; printing both as `editor.fontSize` would point
+    the user at the wrong place. A step is quoted when leaving it bare could be read as part of
+    another step's spelling: when it is empty, when it holds a dot, when it holds a quote, or when it
+    is the word the whole document prints. Everything else stays bare, so the common nested path
+    still reads as `editor.fontSize`. Standard library only (``AGENTS.md`` §2.1).
     """
     if not path:
         return "(document)"
-    return ".".join(step if step and "." not in step else json.dumps(step) for step in path)
+    return ".".join(_step_label(step) for step in path)
+
+
+def _step_label(step: str) -> str:
+    """One path step, quoted exactly when its bare form could be misread as another path's."""
+    if step and "." not in step and '"' not in step and step != "(document)":
+        return step
+    return json.dumps(step)
 
 
 def _node_to_value(node: Node) -> object:

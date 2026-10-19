@@ -189,6 +189,8 @@ def test_create_freezes_the_mapping() -> None:
         (("a", ""), 'a.""'),  # an unnamed step keeps its place instead of trailing a dot
         (("",), '""'),  # and is not the same as the document
         (("a.b", "c"), '"a.b".c'),
+        (('"a', 'b"'), '"\\"a"."b\\""'),  # a quoted step cannot be read as another step's text
+        (("(document)",), '"(document)"'),  # and the document's own word is not a key's label
     ],
 )
 def test_a_path_labels_each_step_so_two_paths_cannot_print_alike(path, expected) -> None:
@@ -199,10 +201,18 @@ def test_a_path_labels_each_step_so_two_paths_cannot_print_alike(path, expected)
     assert label == expected
 
 
-def test_two_different_paths_never_share_a_label() -> None:
-    # given — a flat dotted key against the nested pair it would otherwise be confused with
-    flat = path_label(("a.b",))
-    nested = path_label(("a", "b"))
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ((("a.b",), ("a", "b"))),  # a flat dotted key against the nested pair
+        ((("(document)",), ())),  # a key named for the document against the document
+        ((('"a', 'b"'), ("a.b",))),  # a step that would spell itself like a quoted one
+        ((("",), ())),  # an unnamed key against the document
+    ],
+)
+def test_two_different_paths_never_share_a_label(pair) -> None:
+    # when
+    first, second = (path_label(path) for path in pair)
 
-    # when & then
-    assert flat != nested
+    # then
+    assert first != second
