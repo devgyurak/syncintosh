@@ -168,3 +168,39 @@ def test_sync_exits_1_for_a_path_it_could_not_write(report, expected, tmp_path, 
     # then — the exit code says "not applied", and the reason is named rather than left to guess
     assert result.exit_code == 1
     assert expected in _combined(result)
+
+
+def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeypatch) -> None:
+    # given — the service reports a record this machine's config does not name, which is ordinary:
+    # every machine carries every record, and one set up with fewer presets is not broken
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module,
+        "sync_service",
+        lambda **_kwargs: SyncReport(
+            refused=(
+                Refusal(
+                    "Library/Application Support/Code/User/settings.json",
+                    "the path is not in this machine's config",
+                    blocking=False,
+                ),
+            )
+        ),
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then — reported, and the exit code says the cycle did its job
+    assert result.exit_code == 0
+    assert "skipped (this machine does not track it)" in _combined(result)

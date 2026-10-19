@@ -115,10 +115,19 @@ _PROJECTION_FAILURE: Mapping[ProjectionFailure, str] = MappingProxyType(
 
 @dataclass(frozen=True)
 class Refusal:
-    """One path that was refused, with the reason — a fixed phrase, never the file's content."""
+    """One path that was not written, with the reason — a fixed phrase, never the file's content.
+
+    `blocking` separates a path this machine *may not* write (another machine's credential, a path
+    outside `$HOME`, a built-in preset that does not own it) from one it simply **does not track**:
+    the first is a failure the user has to act on, while the second is ordinary — every machine
+    carries every record, and a machine that was set up with fewer presets is not broken. Making the
+    second one fail the run would leave a script or a launchd job reporting a permanent error for a
+    normal configuration.
+    """
 
     path: str
     reason: str
+    blocking: bool = True
 
 
 @dataclass(frozen=True)
@@ -391,8 +400,32 @@ def _record_refusal(
     if not presets.catalog.knows(record.preset, record.path):
         return Refusal(record.path, UNOWNED_PATH)
     if not allows(config, record):
-        return Refusal(record.path, _NOT_ALLOWED)
+        # Not a refusal: this machine does not track the path, so the record is carried, not written.
+        return Refusal(record.path, _NOT_ALLOWED, blocking=False)
     return None
+
+
+def _project_merged(presets: _Presets, data: bytes, path: str, fmt: FileFormat) -> bytes:
+    """A merge result as this machine's policy would seal it.
+
+    The merge combines *stored* objects, and one of them can hold a key this machine's policy strips:
+    another build published it, either because that build's preset did not exclude it or because the
+    key arrived from the other side as an addition. Sealing the merge as it stands would commit that
+    key again — a credential the other machine's build put in the repo — so the result is projected
+    exactly as a live file is on the collect side. A projection that cannot be done refuses the seal
+    rather than writing the raw bytes (``AGENTS.md`` §3.4).
+    """
+    policy = presets.policy_for(path)
+    if policy is None or not policy.stripped:
+        return data
+    adapter = presets.adapter_for(policy.format)
+    text = _decode(data)
+    if policy.format != fmt or adapter is None or text is None:
+        raise ProjectionError(f"{path}: the merged content is not in this machine's format for the path")
+    try:
+        return project_text(adapter, text, policy).encode("utf-8")
+    except ProjectionError as exc:
+        raise ProjectionError(f"{path}: the merge result could not be reduced to its synced form") from exc
 
 
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
@@ -632,8 +665,9 @@ def _merge_stale(
                 )
             )
             continue
-        collected.records[file_id] = _replace_sha(change.record, _sha256(merged.data))
-        collected.contents[file_id] = merged.data
+        projected = _project_merged(presets, merged.data, change.record.path, change.record.format)
+        collected.records[file_id] = _replace_sha(change.record, _sha256(projected))
+        collected.contents[file_id] = projected
         collected.collected.append(change.record.path)
     return tuple(conflicts)
 
@@ -741,8 +775,9 @@ def _merge_diverged(
                 ),
             )
             continue
-        records[task.file_id] = task.complete(_sha256(merged.data))
-        contents[task.file_id] = merged.data
+        projected = _project_merged(presets, merged.data, task.path, task.format)
+        records[task.file_id] = task.complete(_sha256(projected))
+        contents[task.file_id] = projected
     if conflicts:
         return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
 
@@ -949,10 +984,14 @@ def _apply(
             refused.append(refusal)
             continue
         policy = presets.policy_for(record.path)
-        if policy is not None and policy.stripped:
-            stripped_policy: PresetFile | None = policy
-        else:
-            stripped_policy = None
+        if policy is not None and policy.format != record.format:
+            # The record names a format the local catalog does not use for this path. Apply must
+            # refuse it here rather than write it, because settle projects the bytes it reads with
+            # the *record's* format and would refuse them: two verdicts for one record leaves the
+            # file never settled, rewritten on every cycle.
+            unprojectable.append(_refusal(record.path, "format-mismatch"))
+            continue
+        stripped_policy: PresetFile | None = policy if policy is not None and policy.stripped else None
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):
             symlinks.append(record.path)
@@ -1093,12 +1132,7 @@ def _settle_ledger(
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
-        if (
-            deny.is_denied(home, record.path)
-            or deny.escapes(home, record.path)
-            or not allows(config, record)
-            or not presets.catalog.knows(record.preset, record.path)
-        ):
+        if _record_refusal(presets, config, deny, home, record) is not None:
             continue
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):

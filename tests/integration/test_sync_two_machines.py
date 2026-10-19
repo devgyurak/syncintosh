@@ -658,8 +658,10 @@ def test_a_record_this_machine_does_not_track_is_never_written(tmp_path, memory_
     # when
     report = _run(b)
 
-    # then — the record is refused and B's file is left alone
+    # then — the record is left alone and reported as one this machine does not track (which is
+    # ordinary, not a failure), and B's file is untouched
     assert [refusal.path for refusal in report.refused] == [ZSH]
+    assert report.refused[0].blocking is False
     assert _read_live(b) == b"unaccounted\n"
 
 

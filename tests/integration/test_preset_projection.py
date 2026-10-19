@@ -24,7 +24,7 @@ from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
-from syncintosh.core.ports import ContentAdapter
+from syncintosh.core.ports import ContentAdapter, PresetCatalog
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.core.tree import Tree
@@ -66,6 +66,19 @@ JSONC_POLICY = PresetFile.create(
 )
 JSONC_PRESET = Preset.create(name="keyed-test", files=(JSONC_POLICY,))
 TOML_PRESET = Preset.create(name="toml-test", files=(PresetFile.create(path=TOML, format="toml", noise={("noise",)}),))
+
+
+class _UnawareCatalog:
+    """A catalog that owns nothing — a build whose presets do not include the path under test."""
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        return None
+
+    def knows(self, preset: str, path: str) -> bool:
+        return True
+
+    def get(self, name: str) -> Preset | None:
+        return None
 
 
 class _Catalog:
@@ -190,7 +203,7 @@ def _run(
     machine: Machine,
     *,
     adopt: AdoptChoice | None = None,
-    catalog: _Catalog | None = None,
+    catalog: PresetCatalog | None = None,
     adapters: Mapping[FileFormat, ContentAdapter] | None = None,
 ) -> SyncReport:
     active = GitCLITransport(machine.repo)
@@ -594,3 +607,60 @@ def test_a_record_published_in_another_format_is_refused_however_fresh_the_file_
     # and refuse it on a machine whose file had been touched in the same window, for the same input
     assert [refusal.path for refusal in report.unprojectable] == [JSONC]
     assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
+
+
+def test_a_merge_never_re_seals_a_credential_another_build_published(tmp_path, memory_key_store) -> None:
+    # given — B applied a version without the credential, so it has a ledger baseline, and A (a
+    # build whose preset does not exclude the key) then published one that holds it
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _run(a, catalog=_UnawareCatalog())
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-B"}}\n')
+    _run(b, adopt="remote")
+    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
+    _run(a, catalog=_UnawareCatalog())
+
+    # when — B edits its own file and merges against HEAD, which still holds A's credential
+    _write(b, JSONC, b'{"editor.fontSize": 13, "editor.tabSize": 2, "http": {"proxyAuthorization": "Basic FROM-B"}}\n')
+    report = _run(b)
+    plaintexts = _decrypted_objects(b)
+
+    # then — the merge result was projected before it was sealed, so neither machine's credential is
+    # in any object, and B's own file kept its value
+    assert report.has_conflicts is False
+    assert report.unprojectable == ()
+    assert [blob for blob in plaintexts if b"proxyAuthorization" in blob] == []
+    assert [blob for blob in plaintexts if b"FROM-A" in blob] == []
+    assert [blob for blob in plaintexts if b"FROM-B" in blob] == []
+    assert b"Basic FROM-B" in _read(b, JSONC)
+    assert b'"editor.tabSize": 2' in _read(b, JSONC)
+
+
+def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_refused(tmp_path, memory_key_store) -> None:
+    # given — A publishes `.zshrc` as JSONC; this machine's catalog says it is plain text and strips
+    # nothing from it, so the format check has to run for that policy too
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    item = LocalItem.create(path=ZSH, preset="zsh", scope="common", format="jsonc")
+    _initialize(a, _config(a, (item,)))
+    _write(a, ZSH, b'{"editor.fontSize": 13}\n')
+    _run(a, catalog=_UnawareCatalog())
+    assert FileRepo(a.repo).list_paths("objects") != ()
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _zsh_config(b), import_from=a.recovery)
+    _write(b, ZSH, b"echo one\n")
+
+    # when
+    report = _run(b, adopt="remote")
+    again = _run(b, adopt="remote")
+
+    # then — refused rather than written: writing it would leave apply and settle disagreeing, and
+    # the file would be rewritten on every later cycle without ever settling
+    assert [refusal.path for refusal in report.unprojectable] == [ZSH]
+    assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
+    assert _read(b, ZSH) == b"echo one\n"
+    assert again.unprojectable == report.unprojectable
