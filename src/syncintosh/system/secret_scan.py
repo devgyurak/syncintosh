@@ -107,9 +107,9 @@ STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     #   the character class exactly, and a refusal there would be pure loss.
     #
     # What it still misses — `basic` or `BASIC`, a token under 16 characters (`admin:admin` encodes
-    # to 16 with padding, but a shorter pair does not), and `Bearer` — is a follow-up rather than a
-    # reason to widen this: the scan is a heuristic in front of the real gate, not a parser for every
-    # way a header can be spelled.
+    # to 15 plus padding), and `Bearer` — is #28, a follow-up rather than a reason to widen this: the
+    # scan is a heuristic in front of the real gate, not a parser for every way a header can be
+    # spelled.
     ("HTTP Basic credential", re.compile(rb"\bBasic[ \t]+(?=" + _BASIC_TOKEN + rb")" + _BASIC_SHAPE + _BASIC_TOKEN)),
 )
 
