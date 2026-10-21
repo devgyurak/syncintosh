@@ -13,9 +13,9 @@ structure** are all encrypted, and the repository can live on any git remote you
 
 ## Status
 
-Early skeleton. The current slice is **end-to-end sync for the built-in `zsh` and `docker`
-presets**: collect → strip the preset's non-synced keys → encrypt → commit → fetch → plaintext
-3-way merge → apply, across two Macs through an encrypted git repository. The VS Code preset, the
+Early skeleton. The current slice is **end-to-end sync for the built-in `zsh`, `vscode`, and
+`docker` presets**: collect → strip the preset's non-synced keys → encrypt → commit → fetch →
+plaintext 3-way merge → apply, across two Macs through an encrypted git repository. The
 other format adapters, LLM assistance, and conflict resolution are still to come.
 
 ## Limitations
@@ -29,7 +29,7 @@ other format adapters, LLM assistance, and conflict resolution are still to come
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or
   track the dotfiles file directly.
 - The tracked set is whatever `~/.config/syncintosh/config.json` names, expanded from the
-  built-in preset catalog (`zsh` and `docker` today; VS Code is next). `syncintosh init --preset`
+  built-in preset catalog (`zsh`, `vscode`, and `docker` today). `syncintosh init --preset`
   names one or more presets.
 
 ## Development

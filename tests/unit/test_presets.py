@@ -7,7 +7,7 @@ import pytest
 
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.presets import Preset, PresetFile, download_trust
-from syncintosh.presets import BuiltinCatalog, docker, zsh
+from syncintosh.presets import BuiltinCatalog, docker, vscode, zsh
 
 
 def _file(path: str = "settings.json", **kwargs) -> PresetFile:
@@ -160,6 +160,49 @@ def test_a_key_path_at_the_document_root_is_refused() -> None:
     # when & then — `()` would strip the whole file and make the projection a constant
     with pytest.raises(ConfigError):
         _file(excluded={()})
+
+
+def test_the_vscode_preset_names_both_user_files() -> None:
+    # when
+    paths = [file.path for file in vscode.VSCODE.files]
+
+    # then
+    assert paths == ["Library/Application Support/Code/User/settings.json", vscode.KEYBINDINGS]
+
+
+def test_the_vscode_preset_keeps_noise_and_the_proxy_credential_apart() -> None:
+    # given
+    settings = next(file for file in vscode.VSCODE.files if file.path == vscode.SETTINGS)
+
+    # when
+    noise = settings.noise
+    excluded = settings.excluded
+
+    # then — the dotted key VS Code writes and a nested spelling both carry the credential
+    assert ("http.proxyAuthorization",) in excluded
+    assert ("http", "proxyAuthorization") in excluded
+    assert ("window.zoomLevel",) in noise
+    assert ("git.path",) in noise
+    # a machine-local key is never also a credential, and the terminal keys are synced upstream
+    assert noise & excluded == frozenset()
+    assert [key for key in noise if key[0].startswith("terminal.")] == []
+
+
+def test_the_keybindings_file_has_no_strip_list() -> None:
+    # given — an array is compared whole, so there is no key to cut
+    keybindings = next(file for file in vscode.VSCODE.files if file.path == vscode.KEYBINDINGS)
+
+    # when & then
+    assert keybindings.noise == frozenset()
+    assert keybindings.excluded == frozenset()
+    assert keybindings.stripped == frozenset()
+
+
+def test_the_vscode_preset_metadata_matches_the_verified_app() -> None:
+    # when & then — the cask's zap paths give the bundle id; the vendor page gives the URL
+    assert vscode.VSCODE.bundle_id == "com.microsoft.VSCode"
+    assert vscode.VSCODE.cask == "visual-studio-code"
+    assert vscode.VSCODE.download_url == "https://code.visualstudio.com/download"
 
 
 def test_the_docker_preset_excludes_its_credential_keys() -> None:

@@ -68,10 +68,12 @@ class InMemoryRepoFiles:
 class RecordingScanner:
     def __init__(self, refuse: str | None = None) -> None:
         self.scanned: list[str] = []
+        self.formats: dict[str, str] = {}
         self._refuse = refuse
 
-    def scan(self, plaintext: bytes, *, subject: str) -> None:
+    def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
         self.scanned.append(subject)
+        self.formats[subject] = format
         if subject == self._refuse:
             raise SecretScanError(f"secret found in {subject}")
 
@@ -210,3 +212,19 @@ def test_a_non_slot_leftover_under_objects_is_swept() -> None:
     # then
     assert files.read(f"objects/.{ID1}.enc.3f2a.tmp") is None
     assert files.read(object_path(ID1)) == SEAL_PREFIX + CONTENT
+
+
+def test_the_scan_is_told_the_format_each_payload_is_in() -> None:
+    # given — a record whose format decides how its URL is read (a shell file may reference a
+    # credential, a structured file may not), and the manifest, which is canonical JSON
+    files, cipher, scanner = InMemoryRepoFiles(), FakeCipher(), RecordingScanner()
+    jsonc = ManifestRecord.create(
+        file_id=ID1, path="settings.json", preset="vscode", scope="common", format="jsonc", sha256=SHA1
+    )
+    new = _manifest({ID1: jsonc})
+
+    # when
+    _write(files, cipher, scanner, head=None, new=new, contents={ID1: CONTENT})
+
+    # then
+    assert scanner.formats == {"settings.json": "jsonc", "manifest": "jsonc"}

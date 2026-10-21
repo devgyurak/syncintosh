@@ -1,9 +1,10 @@
 # Preset reference table
 
 **Status:** Living table. One row per built-in preset, added **only** after Step 0 of the
-[`add-preset` skill](../../.claude/skills/add-preset/SKILL.md) has verified the values on a
-Mac that actually has the app. Filled in by
-[#6](https://github.com/devgyurak/syncintosh/issues/6).
+[`add-preset` skill](../../.claude/skills/add-preset/SKILL.md) has verified the values — on a Mac
+that actually has the app, or, where the app is not installed and the user has approved the
+exception, against the vendor's source and documentation with the sources named in the row's
+notes. Filled in by [#6](https://github.com/devgyurak/syncintosh/issues/6).
 
 A preset's `noise` and `excluded` keys are cut on the **collect** side, before the object is
 sealed, and re-attached from the live file on apply — so a noise change is invisible to the diff
@@ -13,6 +14,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | Preset | Paths (relative to `$HOME`) | Format | Noise keys | Excluded in code | Bundle ID | Download URL | Cask |
 |---|---|---|---|---|---|---|---|
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
+| `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 
 ### `docker` notes
@@ -56,6 +58,37 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   write are checked with `zsh -fn` (parse only, `-f` so no rc file runs).
 - A `~/.zshrc` that is a symlink is reported, never written through
   ([03-manifest.md](03-manifest.md), "`~/.zshrc` that is a symlink").
+
+### `vscode` notes
+
+- **Verified against the source, not an installed app** (the approved exception for this preset,
+  issue #6 decision V4). `microsoft/vscode` `main`,
+  `src/vs/platform/userDataSync/common/userDataSync.ts` (`getIgnoredSettings`) is what defines
+  "not synced": a setting whose registration has `ignoreSync: true`, or `scope: MACHINE`, or
+  `scope: MACHINE_OVERRIDABLE`. There is no hard-coded list any more, so this preset's noise list
+  is those setting ids. Also consulted: `configurationEditing.ts` (`setProperty` edits only the
+  value's span, so comments survive) and `diskFileSystemProvider.ts` (an atomic `.vsctmp` + rename
+  save, so a copy-based collect never reads a half-written file), plus
+  `code.visualstudio.com/docs/configure/settings` and `brew info --cask visual-studio-code`.
+- `terminal.integrated.*` is **deliberately synced** — a setting VS Code syncs is a setting we
+  sync. A `noise` entry is a *match* against the file: a stale entry is a no-op while a missing one
+  is churn on every sync, so the list errs towards completeness.
+- `http.proxyAuthorization` is registered in **both** shapes a file can spell it (the dotted key
+  VS Code writes, and a nested object), so neither can carry a credential into the repo. The secret
+  scan gained a `scheme://user:pass@` pattern as the backstop for a proxy URL written under *any
+  other* key (`system/secret_scan.py`) — and it matches a *literal* password only: `$DB_PASS` and
+  `${PGPASSWORD}` are references, which is the recommended way to keep the value out of the file,
+  so a URL that uses them is not refused.
+- `keybindings.json` has **no** strip list: the merge compares an array whole, because a later
+  binding overrides an earlier one, so identifying entries by key would change behaviour. A change
+  to the same binding on both machines is therefore a whole-file conflict.
+- A key that a machine never set simply does not arrive: a machine that has never had the file gets
+  the synced settings without the machine-local ones, which then take VS Code's own defaults. That
+  is what "not synced" means for a machine that never chose a value.
+- **Out of scope:** a non-default profile (`User/profiles/<id>/`, refused by the apply-side catalog
+  check rather than guessed at), `settingsSync.ignoredSettings`, `snippets/`, `tasks.json`,
+  `mcp.json` (its server `env` and `headers` need their own exclusion pass before it can be
+  collected safely), Insiders, portable mode, and `--user-data-dir`.
 
 ## How a row gets filled
 

@@ -14,7 +14,7 @@ import hashlib
 from collections.abc import Mapping
 
 from syncintosh.core.errors import ContentDigestMismatch
-from syncintosh.core.manifest import Manifest
+from syncintosh.core.manifest import FileFormat, Manifest
 from syncintosh.core.manifest_codec import dumps_manifest
 from syncintosh.core.ports import Cipher, RepoFiles, SecretScanner
 from syncintosh.core.repo import (
@@ -34,17 +34,24 @@ from syncintosh.core.repo import (
 MANIFEST_SUBJECT = "manifest"
 
 
+# The manifest is canonical JSON, so it is scanned as a structured format: nothing in it is a
+# shell reference.
+MANIFEST_FORMAT: FileFormat = "jsonc"
+
+
 def _payloads(
     new: Manifest,
     contents: Mapping[str, bytes],
     objects_to_write: tuple[str, ...],
     manifest_plaintext: bytes,
     write_manifest: bool,
-) -> list[tuple[str, bytes]]:
-    """Every `(subject, plaintext)` that must clear the scan, in a stable order."""
-    payloads = [(new.records[file_id].path, contents[file_id]) for file_id in objects_to_write]
+) -> list[tuple[str, bytes, FileFormat]]:
+    """Every `(subject, plaintext, format)` that must clear the scan, in a stable order."""
+    payloads = [
+        (new.records[file_id].path, contents[file_id], new.records[file_id].format) for file_id in objects_to_write
+    ]
     if write_manifest:
-        payloads.append((MANIFEST_SUBJECT, manifest_plaintext))
+        payloads.append((MANIFEST_SUBJECT, manifest_plaintext, MANIFEST_FORMAT))
     return payloads
 
 
@@ -119,8 +126,10 @@ def write_repo(
     _verify_digests(new, plan.objects_to_write, contents)
 
     # Scan everything first: a refusal must leave the repo untouched.
-    for subject, plaintext in _payloads(new, contents, plan.objects_to_write, manifest_plaintext, plan.write_manifest):
-        scanner.scan(plaintext, subject=subject)
+    for subject, plaintext, fmt in _payloads(
+        new, contents, plan.objects_to_write, manifest_plaintext, plan.write_manifest
+    ):
+        scanner.scan(plaintext, subject=subject, format=fmt)
 
     for file_id in plan.objects_to_write:
         blob = cipher.seal(contents[file_id], domain="object", file_id=file_id, key_id=new.key_generation)

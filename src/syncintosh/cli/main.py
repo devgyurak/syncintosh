@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from syncintosh.core.errors import DomainError
+from syncintosh.core.tree import path_label
 from syncintosh.services import SyncReport
 from syncintosh.services import sync as sync_service
 
@@ -103,7 +104,9 @@ def merge(base: Path, local: Path, remote: Path) -> None:
     typer.echo(result.text, nl=False)
     if result.has_conflicts:
         for conflict in result.conflicts:
-            typer.echo(f"conflict: {'.'.join(conflict.path)}", err=True)
+            # The same label the pending-conflict detail uses; an array at the root —
+            # `keybindings.json` — is compared whole, so the document itself is the conflict.
+            typer.echo(f"conflict: {path_label(conflict.path)}", err=True)
         raise typer.Exit(code=1)
 
 

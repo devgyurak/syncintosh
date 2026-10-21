@@ -7,16 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from syncintosh.core.tree import (
-    ABSENT,
-    Array,
-    EmptyObject,
-    Node,
-    Object,
-    Scalar,
-    Tree,
-    tree_from_value,
-)
+from syncintosh.core.tree import ABSENT, Array, EmptyObject, Node, Object, Scalar, Tree, path_label, tree_from_value
 
 
 def test_a_nested_object_flattens_to_key_paths() -> None:
@@ -187,3 +178,43 @@ def test_create_freezes_the_mapping() -> None:
 
     # then
     assert list(tree) == [("a",)]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ((), "(document)"),  # the whole document
+        (("editor", "fontSize"), "editor.fontSize"),  # nested keys read as a dotted setting
+        (("editor.fontSize",), '"editor.fontSize"'),  # one key whose *name* holds a dot
+        (("a", ""), 'a.""'),  # an unnamed step keeps its place instead of trailing a dot
+        (("",), '""'),  # and is not the same as the document
+        (("a.b", "c"), '"a.b".c'),
+        (('"a', 'b"'), '"\\"a"."b\\""'),  # a quoted step cannot be read as another step's text
+        (("(document)",), '"(document)"'),  # and the document's own word is not a key's label
+        (("a,b",), '"a,b"'),  # labels are joined with `, `, so a bare comma would read as two
+        (["éditeur"], "éditeur"),  # a non-ASCII key stays readable
+    ],
+)
+def test_a_path_labels_each_step_so_two_paths_cannot_print_alike(path, expected) -> None:
+    # when
+    label = path_label(path)
+
+    # then
+    assert label == expected
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ((("a.b",), ("a", "b"))),  # a flat dotted key against the nested pair
+        ((("(document)",), ())),  # a key named for the document against the document
+        ((('"a', 'b"'), ("a.b",))),  # a step that would spell itself like a quoted one
+        ((("",), ())),  # an unnamed key against the document
+    ],
+)
+def test_two_different_paths_never_share_a_label(pair) -> None:
+    # when
+    first, second = (path_label(path) for path in pair)
+
+    # then
+    assert first != second

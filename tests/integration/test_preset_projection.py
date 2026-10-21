@@ -619,7 +619,7 @@ def test_a_record_published_in_another_format_is_refused_however_fresh_the_file_
     item = LocalItem.create(path=JSONC, preset="keyed-test", scope="common", format="text")
     _initialize(a, _config(a, (item,)))
     _write(a, JSONC, b'{"editor.fontSize": 13}\n')
-    _run(a, catalog=_Catalog())
+    _run(a, catalog=_UnawareCatalog())
     assert FileRepo(a.repo).list_paths("objects") != ()
     b = _machine(tmp_path, memory_key_store, "machine-b", remote)
     _initialize(b, _jsonc_config(b), import_from=a.recovery)

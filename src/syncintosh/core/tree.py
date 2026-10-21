@@ -24,6 +24,7 @@ Three shapes keep a flat map honest:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -190,6 +191,33 @@ def _to_node(value: object) -> Node:
     return scalar(value)
 
 
+def path_label(path: KeyPath) -> str:
+    """A key path as a person reads it, so two different paths never print the same string.
+
+    A settings file spells a flat setting `"editor.fontSize"` — one key whose *name* contains a dot
+    — and a nested one `"editor": {"fontSize": …}`; printing both as `editor.fontSize` would point
+    the user at the wrong place. A step is quoted when leaving it bare could be read as part of
+    another step's spelling: when it is empty, when it holds a dot, when it holds a quote, or when it
+    is the word the whole document prints. Everything else stays bare, so the common nested path
+    still reads as `editor.fontSize`. Standard library only (``AGENTS.md`` §2.1).
+    """
+    if not path:
+        return "(document)"
+    return ".".join(_step_label(step) for step in path)
+
+
+def _step_label(step: str) -> str:
+    """One path step, quoted exactly when its bare form could be misread as another path's.
+
+    A comma is quoted too: labels are joined with `, ` when a conflict names several paths, so a bare
+    step holding one would read as two. `ensure_ascii=False` keeps a non-ASCII key readable instead of
+    printing it as an escape sequence.
+    """
+    if step and not set(step) & set('.,"') and step != "(document)":
+        return step
+    return json.dumps(step, ensure_ascii=False)
+
+
 def _node_to_value(node: Node) -> object:
     if isinstance(node, Scalar):
         return node.value
@@ -227,6 +255,7 @@ __all__ = [
     "Scalar",
     "ScalarKind",
     "Tree",
+    "path_label",
     "scalar",
     "tree_from_value",
 ]
