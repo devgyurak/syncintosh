@@ -11,9 +11,10 @@ from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.merge_service import RenderedMerge, merge_text
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.services.setup import mint_machine_id, new_machine_config
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import Refusal, SyncReport, sync
 
 __all__ = [
+    "Refusal",
     "RenderedMerge",
     "SyncReport",
     "import_ring",

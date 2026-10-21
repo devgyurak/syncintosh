@@ -164,6 +164,26 @@ A record that fails any check is **not applied and is reported**, not silently s
 paths the local catalog already knows can be written, so a synced manifest cannot make the app
 create a file in an arbitrary location.
 
+The third check is implemented by `PresetCatalog.knows(preset, path)`: a record whose `preset`
+names a **built-in** preset must name one of that preset's own paths, matched on the folded path.
+A `preset` that is not built-in makes no claim to check, so it passes and the local allowlist
+alone decides. The catalog consulted is always the **local** one, never a preset definition that
+arrived with the record.
+
+**The same check runs at collect**, on each of this machine's own items. Without it a config entry
+naming a path its preset does not own (a hand-edited config, or a catalog that changed under it)
+would publish a record that every machine's apply then refuses — including the one that published
+it, so it would never get a ledger entry and every later sync would ask for `--adopt` again.
+Collect refuses it and reports it, so nothing is published in the first place.
+
+### `~/.zshrc` that is a symlink
+
+Decided with the first preset that needs it, `zsh`. An `apply` target that is a symbolic link is
+**reported and never written**, exactly as on the collection side (§2.4). Following the link would
+mean editing a file outside the tracked path; writing a regular file over it would silently break
+a `~/.zshrc → ~/dotfiles/zshrc` setup. The link is surfaced to the user, who resolves it — the
+same conservative posture as a first-sight file.
+
 ## Open
 
 - Whether `schema` should be a per-record field as well as a manifest-wide one. Manifest-wide
@@ -171,10 +191,5 @@ create a file in an arbitrary location.
 - Record `path` is relative to `$HOME`; a preset that writes outside `$HOME` (if one ever
   does) needs a second root or an absolute escape hatch. No such preset exists yet.
 - A user-added path (Phase 4 "user item format inference") has no entry in the preset catalog,
-  so the last apply check above would refuse it. It needs an explicit local allowlist entry
-  that the user created, never one that arrived from the remote.
-- **Whether `apply` follows a symlink at the final path element.** Dotfile setups commonly have
-  `~/.zshrc → ~/dotfiles/zshrc`. Following it (and then requiring the *target* to be under
-  `$HOME`) keeps the user's link, but it contradicts §2.4, which forbids symlinks on the
-  *collection* side; writing a regular file over the link keeps §2.4 but silently breaks the
-  user's dotfiles setup. Decide with the first preset that needs it.
+  so the catalog check above would refuse it. That is deliberate: it needs an explicit local
+  allowlist entry the user created, never one that arrived from the remote.

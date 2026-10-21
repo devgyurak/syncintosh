@@ -11,7 +11,7 @@ import unicodedata
 
 import pytest
 
-from syncintosh.core.paths import collision_key
+from syncintosh.core.paths import collision_key, duplicate_paths
 
 
 @pytest.mark.parametrize(
@@ -41,3 +41,22 @@ def test_the_key_is_normalized_to_nfc() -> None:
 
     # then
     assert key == unicodedata.normalize("NFC", "caf\u00e9")
+
+
+def test_duplicate_paths_reports_each_folded_repeat_once() -> None:
+    # given — two spellings of one file, plus a unique path
+    paths = [".zshrc", ".ZSHRC", ".zshenv"]
+
+    # when
+    duplicated = duplicate_paths(paths)
+
+    # then
+    assert duplicated == (".zshrc",)
+
+
+def test_duplicate_paths_is_empty_when_every_path_is_distinct() -> None:
+    # when
+    duplicated = duplicate_paths([".zshrc", ".zshenv"])
+
+    # then
+    assert duplicated == ()

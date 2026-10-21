@@ -13,10 +13,10 @@ structure** are all encrypted, and the repository can live on any git remote you
 
 ## Status
 
-Early skeleton. The current slice is **end-to-end sync for a single text file**: collect →
-encrypt → commit → fetch → plaintext 3-way merge → apply, across two Macs through an encrypted
-git repository. The preset catalog, the other format adapters, LLM assistance, and conflict
-resolution are still to come.
+Early skeleton. The current slice is **end-to-end sync for the built-in `zsh` preset**: collect →
+strip the preset's non-synced keys → encrypt → commit → fetch → plaintext 3-way merge → apply,
+across two Macs through an encrypted git repository. The remaining presets (VS Code, Docker), the
+other format adapters, LLM assistance, and conflict resolution are still to come.
 
 ## Limitations
 
@@ -28,8 +28,9 @@ resolution are still to come.
   dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or
   track the dotfiles file directly.
-- The tracked set is whatever `~/.config/syncintosh/config.json` names; the built-in preset
-  catalog is not there yet.
+- The tracked set is whatever `~/.config/syncintosh/config.json` names, expanded from the
+  built-in preset catalog (`zsh` today; VS Code and Docker are next). `syncintosh init --preset`
+  names one or more presets.
 
 ## Development
 
@@ -39,6 +40,9 @@ uv run ruff format && uv run ruff check --fix   # format + lint
 uv run ty check                                 # type check
 uv run pytest                                   # unit + integration, 90% floor
 ```
+
+`zsh` must be on `PATH` for the test suite: the `zsh` preset's syntax check runs `zsh -fn`, and the
+tests exercise the real checker rather than a stub. macOS has it; on Linux, `apt-get install zsh`.
 
 Run the four gates before considering a change done — see AGENTS.md §1.
 

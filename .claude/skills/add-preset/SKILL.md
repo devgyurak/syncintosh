@@ -99,19 +99,31 @@ depends only on `core/`.
 - plist → the plist adapter (XML conversion).
 Only add a new adapter if no existing one fits; if you do, use the `add-adapter` skill.
 
-## 3. Ignore list and machine-only defaults
+## 3. Noise keys, exclusions, and machine-only defaults
 
-- Register the noise keys you found in the preset's ignore list so they never conflict.
-- Mark machine-specific values (Docker CPU/memory/disk paths, per-machine remote URLs) as
-  **machine-local defaults** — synced, but applied per machine, not aligned.
+- Register the noise keys you found as `PresetFile.noise`. They are **cut on the collect side**
+  (`core/projection.py`), so a change to one produces no diff, no conflict, and no commit, and
+  the machine's own value is put back on apply. Do not rely on the merge's `ignore` set alone —
+  that keeps a key out of a conflict but still writes its value into the object.
+- Register credential-shaped keys as `PresetFile.excluded`. Same mechanism, different meaning:
+  an excluded key must be **in no object at all** (`AGENTS.md` §3.4).
+- Both lists are **key paths**, so they only exist for a keyed format (`jsonc`, `toml`, `yaml`,
+  `xml`, `plist`). A `text`/`binary` preset names neither; `PresetFile.create` refuses it.
+- A value that differs per machine but lives **inside an otherwise-shared file** is `noise` — its
+  own value stays on each machine and is never aligned. A whole file that belongs to one machine
+  is a different thing: that is a `scope = "machine"` item, which every machine carries but only
+  its own writes (`docs/design/02-base-and-merge.md`).
 
 ## 4. Tests
 
 Add to `tests/`:
 - a **unit** test that normalizes a real-shaped fixture and drops the noise keys;
+- a property test that a noise-only change leaves the projection identical, and that
+  `project(restore(repo, live)) == repo` (`tests/unit/test_projection.py` is the model);
 - an **integration** test that runs collect → merge → apply for the preset end to end, with
   the app "not installed" case asserting **apply is deferred**;
-- a test that the secret exclusion actually removes `auths` (Docker) if applicable.
+- a test that the secret exclusion actually removes `auths` (Docker) if applicable, and a test
+  that this machine's own value survives an apply.
 
 Sample files go in `tests/fixtures/` with **real key names** — do not invent them.
 

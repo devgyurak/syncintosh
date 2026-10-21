@@ -97,3 +97,67 @@ Two machines that both pushed leave a genuine merge-base commit, and the cycle's
 - Never stack a second merge on top of an unpushed merge commit — that is what produces
   criss-cross history (two merge-bases), which sync then refuses
   ([01-sync-model.md](01-sync-model.md)).
+
+## Projection
+
+A preset may name keys that must never travel:
+
+- **noise** — a machine- or session-specific value (window geometry, a chosen editor path). Left
+  in, a change to it is a both-sides change and conflicts on *every* sync.
+- **excluded** — a credential (`auths`, a proxy authorization header). This one must not reach
+  the repo at all ([AGENTS.md](../../AGENTS.md) §3.4).
+
+Both are removed **on the collect side**, before the object is sealed — not by the merge's
+`ignore` set. Ignoring a key in `merge_tree` keeps it out of the *conflict* but still writes its
+value into the object, which for `excluded` is exactly the leak. `services` projects every
+tracked file a preset owns:
+
+| Step | What it produces |
+|---|---|
+| `project_text(text)` = `render(strip(parse(text)), text)`, re-parsed and compared | the bytes that are hashed, staged, merged, and sealed |
+| `restore_text(repo, live)` = `render(graft(parse(repo), parse(live)), repo)`, projected again | the bytes `apply` writes |
+
+Two consequences follow, and they are the point of the whole mechanism:
+
+- **A noise-only change is invisible.** The digest is the projection's, so the ledger, the
+  record, and the write plan all see "unchanged": no diff, no conflict, and no commit.
+- **An excluded key is in no object.** It was not in the bytes that were sealed, so no later
+  step can resurrect it.
+
+`restore_text` re-attaches *this machine's* values from the live file, ordered by the live file
+so a stripped key returns to the position it had. Its result is projected again and required to
+reproduce the repo text **byte for byte**: the apply ledger stores the projection's digest, so a
+restore that did not round-trip would make the next cycle read the file as changed again — the
+one failure that would loop forever.
+
+The cut is verified rather than trusted. `project_text` re-parses its own output and compares it
+with the projected tree, so a renderer that half-applied an edit cannot seal a file that is
+neither the original nor the projection. A path the local catalog cannot project — no adapter for
+its format, a file that is not UTF-8, a value that cannot be rewritten without dropping a comment
+— is **refused and reported**, never sealed raw ([03-manifest.md](03-manifest.md)).
+
+### What a render is allowed to change
+
+The renderer edits the original text at the spans it must, so the layout of everything it did not
+decide about survives:
+
+- **A one-line object stays on one line.** A member is added or removed *in place* — appended
+  before the closing brace with the separator its own removal takes back — because re-flowing the
+  object to member-per-line would change the file far beyond what the merge decided, and then
+  `project_text(restore(...))` could not reproduce the repo text at all. That byte-exactness is
+  not cosmetic: a projection that did not round-trip would leave the file reported
+  `unprojectable` on **every** later sync, so the machine would stop receiving the other
+  machine's changes.
+- **A comment above the first member stays with it.** A key inserted at the top of a multi-line
+  object goes above that comment, not between the comment and the member it documents.
+- **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
+  comes back from the tree rather than from the live file's own text, so a nested object's
+  internal layout may differ from what the file had. A scalar value — the usual noise or excluded
+  key — is byte-identical.
+
+A strict consequence: **an object that is not itself a projection is refused, not applied.** An
+object can hold a key the local policy strips when the machine that published it did not exclude
+it — two builds disagreeing about the preset. Writing the file then would make its projection
+differ from the object, and the next cycle would publish that difference, which the other build
+would publish back: a churn of commits instead of a fix. The file is reported as `unprojectable`
+(and `sync` exits non-zero) so the user can see the disagreement and act on it.

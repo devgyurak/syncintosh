@@ -147,6 +147,28 @@ class ContentParseError(DomainError):
     """
 
 
+class ProjectionError(DomainError):
+    """A file could not be reduced to, or restored from, the preset's projected form.
+
+    Raised on the collect side when a tracked file does not parse as its catalog format, when
+    no adapter exists for that format, or when stripping the preset's keys does not render
+    cleanly; and on the apply side when re-attaching this machine's local values would not
+    round-trip back to the published object. Every caller treats it as fail-closed: collect
+    reports the path as unprojectable rather than sealing the raw file, and apply aborts rather
+    than overwrite a local value it could not preserve (``docs/design/02-base-and-merge.md``).
+    """
+
+
+class SyntaxInvalid(DomainError):
+    """A `SyntaxValidator` refused a would-be result.
+
+    Carries the subject and a one-line reason, never the offending text: the file is the user's
+    settings and can hold a secret (``AGENTS.md`` §4). A file that fails its validator is
+    reported — as a conflict when a merge produced it, and as invalid when apply would have
+    written it — so nothing that would not run reaches a live path.
+    """
+
+
 class GitError(DomainError):
     """A git plumbing command failed.
 

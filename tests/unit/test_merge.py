@@ -8,7 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.tree import Absent, Tree, tree_from_value
+from syncintosh.core.tree import Absent, EmptyObject, Tree, tree_from_value
 
 # A recursive JSON strategy, then flatten each value into a Tree. Generating values (not paths)
 # keeps every drawn tree a document a real parser could produce.
@@ -278,7 +278,17 @@ def _subtree_view(tree: Tree, path: tuple[str, ...]) -> dict[tuple[str, ...], ob
 
 
 def _shape(tree: Tree, path: tuple[str, ...]) -> str:
+    """The kind of value a side has at `path`: a terminal, an object, or nothing.
+
+    An `EmptyObject` counts as an **object**, not a terminal leaf. That is the engine's own rule:
+    `merge._is_terminal` excludes it, and `_fold_structure` documents that an `EmptyObject` that
+    gained a child "is not a conflict — the object is merely no longer empty". Treating `{}` as a
+    third shape here would demand a conflict for `{}` against `{...}`, which the engine resolves
+    on purpose (``test_an_empty_object_that_gained_a_child_is_not_a_conflict``).
+    """
     node = tree.value(path)
+    if isinstance(node, EmptyObject):
+        return "subtree"
     if not isinstance(node, Absent):
         return "leaf"
     return "subtree" if any(other[: len(path)] == path and len(other) > len(path) for other in tree) else "absent"
@@ -315,3 +325,18 @@ def test_a_both_sides_shape_change_is_covered_by_a_conflict(base, local, remote)
         path for path in paths if _shape_changed(base, local, remote, path) and not _covers(conflict_paths, path)
     ]
     assert uncovered == []
+
+
+def test_an_empty_object_that_gained_a_child_is_not_a_conflict() -> None:
+    # given — one side writes `{}` at a key and the other fills the same key
+    base = tree_from_value({"x": 1})
+    local = tree_from_value({"x": 1, "a": {}})
+    remote = tree_from_value({"x": 1, "a": {"b": 2}})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — `{}` and `{...}` are the same kind of value, so the populated shape simply wins
+    # (docs/design/02-base-and-merge.md; `merge._fold_structure` documents this rule)
+    assert result.conflicts == ()
+    assert result.merged.to_value() == {"x": 1, "a": {"b": 2}}

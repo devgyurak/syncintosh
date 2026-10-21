@@ -13,6 +13,12 @@ that shape the code:
   place, and stops without pushing.
 * **Publish before apply**, and apply checks every write against its baseline (compare-and-swap).
 * **Commit only on change**, so an unchanged sync rewrites nothing.
+* **A preset's policy is applied on the collect side.** The bytes that are hashed, staged,
+  merged, and sealed are the *projection* — the file with the preset's noise and excluded keys
+  removed — and apply re-attaches the local values from the live file
+  (``docs/design/02-base-and-merge.md``, "Projection"). A noise-only change therefore reaches
+  neither the digest nor the merge, and a Docker `auths` block is never sealed because it was
+  never collected (``AGENTS.md`` §3.4).
 
 `services` orchestrates the ports; it never imports `vcs`, `crypto`, `system`, or `adapters`
 (``AGENTS.md`` §2.2).
@@ -28,7 +34,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.config import LocalItem, SyncConfig, allows
+from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
     CommitmentsCorrupt,
@@ -36,11 +42,13 @@ from syncintosh.core.errors import (
     GitError,
     KeyGenerationMismatch,
     PendingConflict,
+    ProjectionError,
+    SyntaxInvalid,
 )
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.models import LedgerEntry, PendingState
+from syncintosh.core.models import LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.ports import (
     Cipher,
@@ -53,12 +61,16 @@ from syncintosh.core.ports import (
     LiveFiles,
     MergeDriver,
     PendingStore,
+    PresetCatalog,
     RepoFiles,
     RingCodec,
     SecretScanner,
     SyncLock,
+    SyntaxValidator,
     remote_ref,
 )
+from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
+from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
 from syncintosh.core.tree import KeyPath
@@ -72,12 +84,71 @@ MAX_PUSH_ATTEMPTS = 4
 # default argument cannot be mutated (``AGENTS.md`` §4).
 NO_ADAPTERS: Mapping[FileFormat, ContentAdapter] = MappingProxyType({})
 
+# The validator map a caller with no validators passes, for the same reason.
+NO_VALIDATORS: Mapping[ValidatorName, SyntaxValidator] = MappingProxyType({})
+
+# The catalog a caller with no built-in presets passes: the core null object, so the projection
+# is the identity and `knows` makes no claim.
+NO_CATALOG: PresetCatalog = EMPTY_CATALOG
+
 # What apply decided for one record.
 _Decision = Literal["write", "skip", "abort", "defer"]
 _WRITE: _Decision = "write"
 _SKIP: _Decision = "skip"
 _ABORT: _Decision = "abort"
 _DEFER: _Decision = "defer"
+
+# Why a file a preset owns could not be reduced to its synced form. A fixed code, never the
+# adapter's message: that message can name a key the file holds (``AGENTS.md`` §4).
+ProjectionFailure = Literal["format-mismatch", "no-adapter", "not-utf-8", "unrenderable"]
+
+# The sentence a user sees for each code. Fixed strings, so a report can never carry file content.
+_PROJECTION_FAILURE: Mapping[ProjectionFailure, str] = MappingProxyType(
+    {
+        "format-mismatch": "the record's format is not the format the catalog uses",
+        "no-adapter": "this build has no adapter for the file's format",
+        "not-utf-8": "the file is not UTF-8",
+        "unrenderable": "the file could not be reduced to its synced form",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """One path that was not written, with the reason — a fixed phrase, never the file's content.
+
+    `blocking` separates a path this machine *may not* write (another machine's credential, a path
+    outside `$HOME`, a built-in preset that does not own it) from one it simply **does not track**:
+    the first is a failure the user has to act on, while the second is ordinary — every machine
+    carries every record, and a machine that was set up with fewer presets is not broken. Making the
+    second one fail the run would leave a script or a launchd job reporting a permanent error for a
+    normal configuration.
+    """
+
+    path: str
+    reason: str
+    blocking: bool = True
+
+
+@dataclass(frozen=True)
+class _Presets:
+    """The local preset policy the cycle runs under: paths, adapters, and syntax checks.
+
+    Passed as one value so every step projects through the same catalog and adapter map — the
+    collect side's digest and the apply side's restore must agree, or the ledger never settles.
+    """
+
+    catalog: PresetCatalog
+    adapters: Mapping[FileFormat, ContentAdapter]
+    validators: Mapping[ValidatorName, SyntaxValidator]
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        """The strip/validate policy for `path`, or `None` when no preset owns it."""
+        return self.catalog.policy_for(path)
+
+    def adapter_for(self, fmt: FileFormat) -> ContentAdapter | None:
+        """The structural adapter for `fmt`, or `None` when this build has none."""
+        return self.adapters.get(fmt)
 
 
 @dataclass(frozen=True)
@@ -92,7 +163,9 @@ class SyncReport:
     suppressed: tuple[str, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
-    refused: tuple[str, ...] = ()
+    refused: tuple[Refusal, ...] = ()
+    unprojectable: tuple[Refusal, ...] = ()
+    invalid: tuple[Refusal, ...] = ()
     first_sight: tuple[str, ...] = ()
     conflicts: tuple[PendingConflictRecord, ...] = ()
     skipped: tuple[str, ...] = ()
@@ -114,9 +187,16 @@ class _Collect:
     """The state one collect pass produces."""
 
     records: dict[str, ManifestRecord] = field(default_factory=dict)
+    # The projected bytes that would be sealed: the object content, keyed by file_id.
     contents: dict[str, bytes] = field(default_factory=dict)
+    # The projected form of each live file that existed at collect, keyed by file_id. Apply reuses
+    # it instead of projecting again whenever the raw bytes are unchanged since collect — the
+    # compare-and-swap already proves the file is the one this projection was made from.
+    views: dict[str, bytes] = field(default_factory=dict)
     # The bytes collect read from each live file, kept so apply can compare-and-swap a record it
-    # is about to overwrite on an explicit adopt — even though it collected nothing for it.
+    # is about to overwrite on an explicit adopt — even though it collected nothing for it. These
+    # are the **raw** bytes, never the projection: an edit between collect and apply must abort
+    # the write even when the edit touched only a key the preset strips.
     seen: dict[str, bytes] = field(default_factory=dict)
     # A local change whose ledger baseline is older than HEAD: it must be merged with HEAD's
     # content, not pushed over it.
@@ -128,6 +208,8 @@ class _Collect:
     first_sight: list[str] = field(default_factory=list)
     symlinks: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    refused: list[Refusal] = field(default_factory=list)
+    unprojectable: list[Refusal] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -137,7 +219,8 @@ class _StaleChange:
     The ledger baseline (`entry`) is the object the user actually edited; HEAD moved on since.
     Pushing the live content would silently drop HEAD's change, so it is merged with that
     baseline as base and HEAD's object as the other side
-    (``docs/design/01-sync-model.md`` — "a stale base is ordinary").
+    (``docs/design/01-sync-model.md`` — "a stale base is ordinary"). `live` is the **projected**
+    live content, so the merge runs on the same form the object holds.
     """
 
     record: ManifestRecord
@@ -153,14 +236,28 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _replace_sha(record: ManifestRecord, sha256: str) -> ManifestRecord:
+def _decode(data: bytes) -> str | None:
+    """The file's text, or `None` when it is not UTF-8 (a binary record, a stray byte)."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _replace_sha(record: ManifestRecord, sha256: str, *, format: FileFormat | None = None) -> ManifestRecord:
+    """The same record with a new digest, and optionally with the format the object is really in.
+
+    Collect passes its own format here: the object it seals was projected with the *local* catalog's
+    format for the path, and a record that keeps an older format would describe the object wrongly —
+    the format decides how a later scan reads the file (``docs/design/03-manifest.md``).
+    """
     return ManifestRecord.create(
         file_id=record.file_id,
         path=record.path,
         preset=record.preset,
         scope=record.scope,
         machine=record.machine,
-        format=record.format,
+        format=record.format if format is None else format,
         sha256=sha256,
     )
 
@@ -230,6 +327,169 @@ def _commit(transport: GitTransport, branch: str, parents: tuple[str, ...], mess
     return commit
 
 
+# --------------------------------------------------------------------------- projection
+
+
+@dataclass(frozen=True)
+class _Projected:
+    """One tracked file in both forms: what is on disk, and what would be sealed.
+
+    `failure` is set when a preset owns the path but the file cannot be reduced to its synced
+    form — a format with no adapter, a file that is not UTF-8, or a render that would not
+    round-trip. That is a refusal, never a fallback to sealing the raw file: the raw file is the
+    one holding the keys the preset exists to strip (``AGENTS.md`` §3.4).
+
+    The reason is a fixed code rather than the adapter's message, so nothing content-derived
+    (a JSONC duplicate key, say) is carried around in an object that a later change might render
+    (``AGENTS.md`` §4, "never log secrets").
+    """
+
+    raw: bytes | None
+    view: bytes | None
+    failure: ProjectionFailure | None = None
+
+
+def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileFormat) -> _Projected:
+    """Reduce a live file to the bytes that would be sealed, or report why it cannot be."""
+    policy = presets.policy_for(path)
+    if policy is None:
+        return _Projected(raw=raw, view=raw)
+    if raw is None:
+        # Nothing to project, and nothing to report: a missing file is "not applied here", which
+        # the apply step already distinguishes from "the app is not installed".
+        return _Projected(raw=None, view=None)
+    if policy.format != fmt:
+        return _Projected(raw=raw, view=None, failure="format-mismatch")
+    if not policy.stripped:
+        # Nothing to cut, so no adapter is needed and the projection is the file itself. This is
+        # the `text` case: a shell script has no keys to strip.
+        return _Projected(raw=raw, view=raw)
+    adapter = presets.adapter_for(policy.format)
+    if adapter is None:
+        return _Projected(raw=raw, view=None, failure="no-adapter")
+    text = _decode(raw)
+    if text is None:
+        return _Projected(raw=raw, view=None, failure="not-utf-8")
+    try:
+        view = project_text(adapter, text, policy).encode("utf-8")
+    except ProjectionError:
+        return _Projected(raw=raw, view=None, failure="unrenderable")
+    return _Projected(raw=raw, view=view)
+
+
+# Why a record's path may not be written here, as fixed phrases: a report names the location and
+# the reason, never anything from the file (``AGENTS.md`` §4).
+UNOWNED_PATH = "the path's preset does not own it"
+_NOT_ALLOWED = "the path is not in this machine's config"
+_DENIED = "a dangerous path this machine never collects"
+_ESCAPES = "the target leaves this machine's home directory"
+_RESTORE_FAILED = "this machine's own keys could not be re-attached to the file"
+_SYNTAX_FAILED = "the file would not pass its syntax check"
+_PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
+
+
+def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
+    """The report row for a projection that failed, phrased by its fixed reason code."""
+    return Refusal(path, _PROJECTION_FAILURE[failure])
+
+
+def _record_refusal(
+    presets: _Presets, config: SyncConfig, deny: DenyList, home: str, record: ManifestRecord
+) -> Refusal | None:
+    """Why `record` may not be written here, or `None` when it may.
+
+    The first matching reason wins, most serious first: a record's `path` and `preset` arrive from
+    the repo, so each check is a trust boundary (``docs/design/03-manifest.md``), and the user needs
+    to know *which* one refused it.
+    """
+    if deny.is_denied(home, record.path):
+        return Refusal(record.path, _DENIED)
+    if deny.escapes(home, record.path):
+        return Refusal(record.path, _ESCAPES)
+    if not presets.catalog.knows(record.preset, record.path):
+        return Refusal(record.path, UNOWNED_PATH)
+    if not allows(config, record):
+        # Not a refusal: this machine does not track the path, so the record is carried, not written.
+        return Refusal(record.path, _NOT_ALLOWED, blocking=False)
+    return None
+
+
+def _strips(presets: _Presets, path: str) -> bool:
+    """True when this machine's policy for `path` removes any key before sealing."""
+    policy = presets.policy_for(path)
+    return policy is not None and bool(policy.stripped)
+
+
+def _project_merged(
+    presets: _Presets,
+    config: SyncConfig,
+    data: bytes,
+    *,
+    scope: Scope,
+    machine: str | None,
+    path: str,
+    fmt: FileFormat,
+) -> bytes:
+    """A merge result as this machine's policy would seal it.
+
+    The merge combines *stored* objects, and one of them can hold a key this machine's policy strips:
+    another build published it, either because that build's preset did not exclude it or because the
+    key arrived from the other side as an addition. Sealing that *result* would commit the key again,
+    so the content this machine creates is projected exactly as a live file is on the collect side,
+    and a projection that cannot be done refuses the seal rather than writing the raw bytes
+    (``AGENTS.md`` §3.4).
+
+    **Only content this machine creates is projected, and only for a path it tracks.** An object the
+    merge merely re-uses is the very blob the other machine published in its own commit, so projecting
+    it would not remove anything from the history — git keeps the blob either way — while it *would*
+    delete that machine's values: its `window.zoomLevel`, or its own `proxyAuthorization`, would
+    silently drop out of the file the next time it applied. A path this machine does not track is not
+    governed by this machine's policy either: the machine that does track it decides what its preset
+    strips, and projecting it here would rewrite that machine's file — and abort the whole sync when
+    that machine's record names a format the local catalog does not use.
+    """
+    if not allows_path(config, scope=scope, machine=machine, path=path) or not _strips(presets, path):
+        return data
+    projected = _project_file(presets, data, path, fmt)
+    if projected.failure is not None or projected.view is None:
+        raise ProjectionError(f"{path}: {_PROJECTION_FAILURE_MERGED}")
+    return projected.view
+
+
+def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
+    """`repo_bytes` with the live file's local values re-attached, or `None` on failure."""
+    adapter = presets.adapter_for(policy.format)
+    repo_text = _decode(repo_bytes)
+    live_text = _decode(live_raw)
+    if adapter is None or repo_text is None or live_text is None:
+        return None
+    try:
+        return restore_text(adapter, repo_text, live_text, policy).encode("utf-8")
+    except ProjectionError:
+        return None
+
+
+def _syntax_ok(presets: _Presets, data: bytes, path: str) -> bool:
+    """True when `data` survives the preset's syntax check, or when the path has none.
+
+    A path whose policy names a validator this build did not wire is **refused**, not passed: a
+    validator that silently does nothing is worse than none, because the caller believes a check
+    happened (``AGENTS.md`` §3.5).
+    """
+    policy = presets.policy_for(path)
+    if policy is None or policy.validator is None:
+        return True
+    validator = presets.validators.get(policy.validator)
+    text = _decode(data)
+    if validator is None or text is None:
+        return False
+    try:
+        validator.check(text, subject=path)
+    except SyntaxInvalid:
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- collect
 
 
@@ -243,12 +503,22 @@ def _collect(
     home: str,
     adopt: AdoptChoice | None,
     source: FileIdSource,
+    presets: _Presets,
 ) -> _Collect:
     """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
     state = _Collect(records={} if head is None else dict(head.records))
     for item in config.items:
         if deny.is_denied(home, item.path):
+            # The dangerous-path check comes first so a private key or a cloud credential is
+            # reported as what it is, whatever its preset happens to own.
             state.skipped.append(item.path)
+            continue
+        if not presets.catalog.knows(item.preset, item.path):
+            # The local config names a path the preset it claims does not own — a hand-edited
+            # config, or a catalog that changed under it. Publishing it would create a record every
+            # machine, this one included, refuses to apply, so the file would never settle and every
+            # later sync would ask for `--adopt` again. Refused here, and reported.
+            state.refused.append(Refusal(item.path, UNOWNED_PATH))
             continue
         live_path = _join(home, item.path)
         if live.is_symlink(live_path):
@@ -257,26 +527,32 @@ def _collect(
             # read as a first-sight prompt.
             state.symlinks.append(item.path)
             continue
-        live_bytes = live.read(live_path)
-        live_sha = None if live_bytes is None else _sha256(live_bytes)
+        projected = _project_file(presets, live.read(live_path), item.path, item.format)
+        if projected.failure is not None:
+            state.unprojectable.append(_refusal(item.path, projected.failure))
+            continue
         record = _find_item_record(state.records, item)
+        if record is not None and projected.raw is not None:
+            # The raw bytes are the compare-and-swap reference apply checks. They are recorded
+            # here, before the classification, so even a record that collects nothing (in-sync,
+            # suppressed, first-sight) has a baseline to detect an edit made during the cycle.
+            state.seen[record.file_id] = projected.raw
+        live_sha = None if projected.view is None else _sha256(projected.view)
         if record is None:
-            _collect_new(state, item, live_bytes, live_sha, source)
+            _collect_new(state, item, projected, live_sha, source)
         else:
-            if live_bytes is not None:
-                state.seen[record.file_id] = live_bytes
-            _collect_existing(state, item, record, live_bytes, live_sha, ledger, adopt)
+            _collect_existing(state, item, record, projected, live_sha, ledger, adopt)
     return state
 
 
 def _collect_new(
     state: _Collect,
     item: LocalItem,
-    live_bytes: bytes | None,
-    live_sha: str | None,
+    projected: _Projected,
+    view_sha: str | None,
     source: FileIdSource,
 ) -> None:
-    if live_bytes is None or live_sha is None:
+    if projected.view is None or view_sha is None:
         state.deferred.append(item.path)
         return
     file_id = mint_file_id(state.records, source)
@@ -287,9 +563,12 @@ def _collect_new(
         scope=item.scope,
         machine=item.machine,
         format=item.format,
-        sha256=live_sha,
+        sha256=view_sha,
     )
-    state.contents[file_id] = live_bytes
+    state.contents[file_id] = projected.view
+    state.views[file_id] = projected.view
+    if projected.raw is not None:
+        state.seen[file_id] = projected.raw
     state.created.append(item.path)
 
 
@@ -297,22 +576,33 @@ def _collect_existing(
     state: _Collect,
     item: LocalItem,
     record: ManifestRecord,
-    live_bytes: bytes | None,
-    live_sha: str | None,
+    projected: _Projected,
+    view_sha: str | None,
     ledger: Mapping[str, LedgerEntry],
     adopt: AdoptChoice | None,
 ) -> None:
     entry = ledger.get(record.file_id)
-    verdict = classify(entry, live_sha, record.sha256)
-    if verdict == "local-change" and live_bytes is not None and live_sha is not None:
+    verdict = classify(entry, view_sha, record.sha256)
+    if projected.view is not None:
+        # Cached for apply, which reuses it while the raw bytes are unchanged (item 10: one
+        # projection per file per cycle, instead of one in each of collect, apply, and settle).
+        state.views[record.file_id] = projected.view
+    if verdict == "local-change" and projected.view is not None and view_sha is not None:
         if entry is not None and entry.sha256 != record.sha256:
             # The user edited the content the ledger last accounted for, while HEAD holds newer
             # content this machine never applied. Adopting the live bytes would drop HEAD's
             # change with no conflict, so merge instead (step 10, on a stale base).
-            state.stale.append(_StaleChange(record=record, entry=entry, live=live_bytes))
+            # The record this machine republishes carries the catalog's format for the path, the
+            # one the object is really in — the same normalization the other collect paths do, so the
+            # merge below projects a format it agrees with instead of aborting the sync.
+            state.stale.append(
+                _StaleChange(
+                    record=_replace_sha(record, record.sha256, format=item.format), entry=entry, live=projected.view
+                )
+            )
         else:
-            state.records[record.file_id] = _replace_sha(record, live_sha)
-            state.contents[record.file_id] = live_bytes
+            state.records[record.file_id] = _replace_sha(record, view_sha, format=item.format)
+            state.contents[record.file_id] = projected.view
             state.collected.append(item.path)
     elif verdict == "deferred":
         # Nothing to collect; the apply step decides whether this machine has a file to create
@@ -320,8 +610,8 @@ def _collect_existing(
         return
     elif verdict == "suppressed":
         state.suppressed.append(item.path)
-    elif verdict == "first-sight" and live_bytes is not None and live_sha is not None:
-        _collect_first_sight(state, item, record, live_bytes, live_sha, adopt)
+    elif verdict == "first-sight" and projected.view is not None and view_sha is not None:
+        _collect_first_sight(state, item, record, projected.view, view_sha, adopt)
     # `in-sync` and `pending-apply` collect nothing: the first is already settled, and the second
     # is finished by the apply step.
 
@@ -330,8 +620,8 @@ def _collect_first_sight(
     state: _Collect,
     item: LocalItem,
     record: ManifestRecord,
-    live_bytes: bytes,
-    live_sha: str,
+    view: bytes,
+    view_sha: str,
     adopt: AdoptChoice | None,
 ) -> None:
     if adopt is None:
@@ -341,9 +631,9 @@ def _collect_first_sight(
         # Taking the repo's side: keep the record; apply writes the repo content over the file.
         return
     state.records[record.file_id] = _replace_sha(
-        record, chosen_digest("local", local_sha256=live_sha, remote_sha256=record.sha256)
+        record, chosen_digest("local", local_sha256=view_sha, remote_sha256=record.sha256), format=item.format
     )
-    state.contents[record.file_id] = live_bytes
+    state.contents[record.file_id] = view
     state.collected.append(item.path)
 
 
@@ -356,10 +646,11 @@ def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
 
 def _merge_stale(
     *,
+    config: SyncConfig,
     transport: GitTransport,
     cipher: Cipher,
     driver: MergeDriver,
-    adapters: Mapping[FileFormat, ContentAdapter],
+    presets: _Presets,
     head_commit: str | None,
     collected: _Collect,
 ) -> tuple[PendingConflictRecord, ...]:
@@ -380,7 +671,21 @@ def _merge_stale(
                 PendingConflictRecord(file_id, change.record.path, "the baseline or HEAD object is missing")
             )
             continue
-        merged = merge_content(base, change.live, head_bytes, driver, adapters.get(change.record.format))
+        merged = merge_content(base, change.live, head_bytes, driver, presets.adapter_for(change.record.format))
+        if not merged.conflicted and not _syntax_ok(presets, merged.data, change.record.path):
+            # A structural merge can produce text that is valid for its format but not for its
+            # language. Publishing it would break the user's shell, so it is a conflict.
+            conflicts.append(
+                PendingConflictRecord(
+                    file_id,
+                    change.record.path,
+                    "the merged result would not pass its syntax check",
+                    base,
+                    change.live,
+                    head_bytes,
+                )
+            )
+            continue
         if merged.conflicted:
             conflicts.append(
                 PendingConflictRecord(
@@ -396,8 +701,17 @@ def _merge_stale(
                 )
             )
             continue
-        collected.records[file_id] = _replace_sha(change.record, _sha256(merged.data))
-        collected.contents[file_id] = merged.data
+        projected = _project_merged(
+            presets,
+            config,
+            merged.data,
+            scope=change.record.scope,
+            machine=change.record.machine,
+            path=change.record.path,
+            fmt=change.record.format,
+        )
+        collected.records[file_id] = _replace_sha(change.record, _sha256(projected))
+        collected.contents[file_id] = projected
         collected.collected.append(change.record.path)
     return tuple(conflicts)
 
@@ -445,12 +759,13 @@ class _Merged:
 
 def _merge_diverged(
     *,
+    config: SyncConfig,
     transport: GitTransport,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
     driver: MergeDriver,
-    adapters: Mapping[FileFormat, ContentAdapter],
+    presets: _Presets,
     branch: str,
     local: str,
     remote: str,
@@ -478,7 +793,20 @@ def _merge_diverged(
         if local_bytes is None or remote_bytes is None:
             conflicts = (*conflicts, PendingConflictRecord(task.file_id, task.path, "a side's object is missing"))
             continue
-        merged = merge_content(base_bytes or b"", local_bytes, remote_bytes, driver, adapters.get(task.format))
+        merged = merge_content(base_bytes or b"", local_bytes, remote_bytes, driver, presets.adapter_for(task.format))
+        if not merged.conflicted and not _syntax_ok(presets, merged.data, task.path):
+            conflicts = (
+                *conflicts,
+                PendingConflictRecord(
+                    task.file_id,
+                    task.path,
+                    "the merged result would not pass its syntax check",
+                    base_bytes,
+                    local_bytes,
+                    remote_bytes,
+                ),
+            )
+            continue
         if merged.conflicted:
             conflicts = (
                 *conflicts,
@@ -492,8 +820,11 @@ def _merge_diverged(
                 ),
             )
             continue
-        records[task.file_id] = task.complete(_sha256(merged.data))
-        contents[task.file_id] = merged.data
+        projected = _project_merged(
+            presets, config, merged.data, scope=task.scope, machine=task.machine, path=task.path, fmt=task.format
+        )
+        records[task.file_id] = task.complete(_sha256(projected))
+        contents[task.file_id] = projected
     if conflicts:
         return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
 
@@ -561,7 +892,7 @@ def _publish(
     cipher: Cipher,
     scanner: SecretScanner,
     driver: MergeDriver,
-    adapters: Mapping[FileFormat, ContentAdapter],
+    presets: _Presets,
     codec: RingCodec,
     store: KeyStore,
     config: SyncConfig,
@@ -595,12 +926,13 @@ def _publish(
                 return _Publish(published=local, remote_commit=remote_commit)
             continue
         merged = _merge_diverged(
+            config=config,
             transport=transport,
             files=files,
             cipher=cipher,
             scanner=scanner,
             driver=driver,
-            adapters=adapters,
+            presets=presets,
             branch=branch,
             local=local,
             remote=remote_commit,
@@ -640,54 +972,113 @@ def _fast_forward(transport: GitTransport, branch: str, commit: str) -> None:
 # --------------------------------------------------------------------------- apply
 
 
+@dataclass(frozen=True)
+class _Applied:
+    """What step 14 did with each record, by outcome."""
+
+    applied: tuple[str, ...] = ()
+    deferred: tuple[str, ...] = ()
+    symlinks: tuple[str, ...] = ()
+    aborted: tuple[str, ...] = ()
+    refused: tuple[Refusal, ...] = ()
+    unprojectable: tuple[Refusal, ...] = ()
+    invalid: tuple[Refusal, ...] = ()
+
+
 def _apply(
     *,
     transport: GitTransport,
     cipher: Cipher,
+    presets: _Presets,
     target_commit: str,
     target_manifest: Manifest,
-    baseline: Mapping[str, bytes],
     seen: Mapping[str, bytes],
+    views: Mapping[str, bytes],
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
     deny: DenyList,
     config: SyncConfig,
     home: str,
     adopt: AdoptChoice | None,
-) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
     The bytes written come from `target_commit`, the published repo state — never from the
-    collected local bytes, which after a merge are only one side of the result. `baseline` is
-    the other role those collected bytes play: the compare-and-swap reference for the file.
+    collected local bytes, which after a merge are only one side of the result. `seen` is the
+    other role those collected bytes play: the raw compare-and-swap reference for the file. When
+    a preset owns the path the published bytes are first combined with the live file's own values
+    at the preset's stripped keys, so an excluded credential the repo never held is left exactly
+    as this machine has it (``AGENTS.md`` §3.4) — for a scalar value byte-identical, and for a
+    nested object the value itself but re-rendered (``docs/design/02-base-and-merge.md``,
+    "What a render is allowed to change").
 
     A record's `path` and `preset` arrive from the repo, so before writing anything this checks
-    the target stays under `$HOME` (resolving the parent) and is one this machine's local
-    allowlist already tracks (``docs/design/03-manifest.md``). A refusal is reported, never
-    silent.
+    the target stays under `$HOME` (resolving the parent), is one this machine's local allowlist
+    already tracks, and is one the local catalog lets that preset name
+    (``docs/design/03-manifest.md``). A refusal is reported, never silent.
     """
     applied: list[str] = []
     deferred: list[str] = []
     symlinks: list[str] = []
     aborted: list[str] = []
-    refused: list[str] = []
+    refused: list[Refusal] = []
+    unprojectable: list[Refusal] = []
+    invalid: list[Refusal] = []
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
-        if deny.is_denied(home, record.path) or deny.escapes(home, record.path) or not allows(config, record):
-            refused.append(record.path)
+        refusal = _record_refusal(presets, config, deny, home, record)
+        if refusal is not None:
+            refused.append(refusal)
             continue
+        policy = presets.policy_for(record.path)
+        if policy is not None and policy.format != record.format:
+            # The record names a format the local catalog does not use for this path. Apply must
+            # refuse it here rather than write it, because settle projects the bytes it reads with
+            # the *record's* format and would refuse them: two verdicts for one record leaves the
+            # file never settled, rewritten on every cycle.
+            unprojectable.append(_refusal(record.path, "format-mismatch"))
+            continue
+        stripped_policy: PresetFile | None = policy if policy is not None and policy.stripped else None
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):
             symlinks.append(record.path)
             continue
         live_bytes = live.read(live_path)
-        # The compare-and-swap reference is the bytes collect read from this file — not the
-        # content this cycle will publish, which for a merged record is not what the file holds.
+        live_view = live_bytes
+        # The compare-and-swap reference is the raw bytes collect read from this file — never the
+        # projection, and never the content this cycle will publish, which for a merged record is
+        # not what the file holds.
         collect_baseline = seen.get(file_id)
-        if collect_baseline is None:
-            collect_baseline = baseline.get(file_id)
-        decision = _decision(record, live_bytes, ledger.get(file_id), collect_baseline, adopt)
+        # Collect's projection stands in for this one only when the file is byte-for-byte the one
+        # it was made from **and** the record names the format the policy uses: reusing it across a
+        # format mismatch would apply a record on the strength of the file not having been touched,
+        # while touching it would refuse it — the same input, two verdicts.
+        reusable = (
+            live_bytes is not None
+            and live_bytes == collect_baseline
+            and stripped_policy is not None
+            and stripped_policy.format == record.format
+        )
+        cached = views.get(file_id) if reusable else None
+        if cached is not None:
+            live_view = cached
+        elif live_bytes is not None and stripped_policy is not None:
+            view = _project_file(presets, live_bytes, record.path, record.format)
+            if view.failure is not None:
+                unprojectable.append(_refusal(record.path, view.failure))
+                continue
+            live_view = view.view
+        changed = live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline
+        decision = _decision(
+            record,
+            live_bytes=live_bytes,
+            live_view=live_view,
+            changed=changed,
+            entry=ledger.get(file_id),
+            baseline=collect_baseline,
+            adopt=adopt,
+        )
         if decision == _ABORT:
             aborted.append(record.path)
             continue
@@ -704,30 +1095,54 @@ def _apply(
         if data is None:
             deferred.append(record.path)
             continue
+        if live_bytes is not None and stripped_policy is not None:
+            restored = _restore_file(presets, data, live_bytes, stripped_policy)
+            if restored is None:
+                # Never write a version whose local keys could not be re-attached: the repo's
+                # bytes hold the stripped form, and writing them raw would delete a credential
+                # or a machine-local preference (``AGENTS.md`` §3.4).
+                unprojectable.append(Refusal(record.path, _RESTORE_FAILED))
+                continue
+            data = restored
+        if not _syntax_ok(presets, data, record.path):
+            invalid.append(Refusal(record.path, _SYNTAX_FAILED))
+            continue
         live.write(live_path, data)
         applied.append(record.path)
-    return applied, deferred, symlinks, aborted, refused
+    return _Applied(
+        applied=tuple(applied),
+        deferred=tuple(deferred),
+        symlinks=tuple(symlinks),
+        aborted=tuple(aborted),
+        refused=tuple(refused),
+        unprojectable=tuple(unprojectable),
+        invalid=tuple(invalid),
+    )
 
 
 def _decision(
     record: ManifestRecord,
+    *,
     live_bytes: bytes | None,
+    live_view: bytes | None,
+    changed: bool,
     entry: LedgerEntry | None,
     baseline: bytes | None,
     adopt: AdoptChoice | None,
 ) -> _Decision:
     """Whether apply may write `record` over the live path, per the conservative rules.
 
-    `baseline` is the file's bytes as this cycle accounted for them — the collected content, or
-    for an `--adopt remote` record (which collected nothing) the bytes collect read. Every write
-    over an existing file is checked against it, adopt included: an edit made between collect and
-    apply must abort the write, not be overwritten.
+    `live_view` is the **projection** of the live file — the form whose digest the record and the
+    ledger hold — while `baseline` is the raw bytes collect accounted for. `changed` is True when
+    the raw file differs from that baseline: an edit made between collect and apply aborts the
+    write, adopt included, even when the edit touched only a key the preset strips.
     """
     if live_bytes is None:
         # A missing file is not a deletion. Recreate a record this machine has never written, and
         # never one it wrote and that disappeared (that is the suppressed rule).
         return _WRITE if entry is None else _SKIP
-    in_sync = _sha256(live_bytes) == record.sha256 and entry is not None and not entry.suppressed
+    view = live_bytes if live_view is None else live_view
+    in_sync = not changed and _sha256(view) == record.sha256 and entry is not None and not entry.suppressed
     if in_sync:
         return _SKIP
     if entry is None or entry.suppressed:
@@ -736,7 +1151,7 @@ def _decision(
             return _SKIP
         return _WRITE if baseline is not None and live_bytes == baseline else _ABORT
     if baseline is None:
-        return _WRITE if _sha256(live_bytes) == entry.sha256 else _ABORT
+        return _WRITE if _sha256(view) == entry.sha256 else _ABORT
     return _WRITE if live_bytes == baseline else _ABORT
 
 
@@ -747,6 +1162,7 @@ def _settle_ledger(
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
     deny: DenyList,
+    presets: _Presets,
     config: SyncConfig,
     home: str,
 ) -> dict[str, LedgerEntry]:
@@ -754,13 +1170,15 @@ def _settle_ledger(
 
     Gated exactly like apply: this reads live paths, so a record that is denied, that escapes
     `$HOME`, that is not in the local allowlist, or that belongs to another machine is never
-    opened — the deny-list refuses before anything is read (``AGENTS.md`` §3.4).
+    opened — the deny-list refuses before anything is read (``AGENTS.md`` §3.4). The digest is
+    the **projection's**, matching what collect and the record compare, so a file whose only
+    difference is a stripped key stays settled instead of being re-collected on every cycle.
     """
     settled: dict[str, LedgerEntry] = {}
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
-        if deny.is_denied(home, record.path) or deny.escapes(home, record.path) or not allows(config, record):
+        if _record_refusal(presets, config, deny, home, record) is not None:
             continue
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):
@@ -774,14 +1192,22 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = LedgerEntry(sha256=old.sha256, commit=old.commit, suppressed=True)
             continue
-        digest = _sha256(live_bytes)
-        if digest == record.sha256:
+        digest = _ledger_digest(presets, live_bytes, record.path, record.format)
+        if digest is not None and digest == record.sha256:
             settled[file_id] = LedgerEntry(sha256=digest, commit=target_commit, suppressed=False)
         else:
             old = ledger.get(file_id)
             if old is not None:
                 settled[file_id] = old
     return settled
+
+
+def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat) -> str | None:
+    """The digest the ledger should hold for a live file, or `None` when it cannot be projected."""
+    projected = _project_file(presets, live_bytes, path, fmt)
+    if projected.failure is not None or projected.view is None:
+        return None
+    return _sha256(projected.view)
 
 
 # --------------------------------------------------------------------------- entry point
@@ -806,9 +1232,12 @@ def sync(
     home: str,
     branch: str,
     adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
+    catalog: PresetCatalog = NO_CATALOG,
+    validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
     adopt: AdoptChoice | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises."""
+    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
     lock.acquire()
     try:
         if pending_store.is_pending():
@@ -823,7 +1252,7 @@ def sync(
             store=store,
             codec=codec,
             driver=driver,
-            adapters=adapters,
+            presets=presets,
             live=live,
             ledger_store=ledger_store,
             pending_store=pending_store,
@@ -847,7 +1276,7 @@ def _cycle(
     store: KeyStore,
     codec: RingCodec,
     driver: MergeDriver,
-    adapters: Mapping[FileFormat, ContentAdapter],
+    presets: _Presets,
     live: LiveFiles,
     ledger_store: LedgerStore,
     pending_store: PendingStore,
@@ -875,6 +1304,7 @@ def _cycle(
         home=home,
         adopt=adopt,
         source=source,
+        presets=presets,
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
@@ -882,13 +1312,16 @@ def _cycle(
             first_sight=tuple(collected.first_sight),
             symlinks=tuple(collected.symlinks),
             skipped=tuple(collected.skipped),
+            refused=tuple(collected.refused),
+            unprojectable=tuple(collected.unprojectable),
         )
     if collected.stale:
         stale_conflicts = _merge_stale(
+            config=config,
             transport=transport,
             cipher=cipher,
             driver=driver,
-            adapters=adapters,
+            presets=presets,
             head_commit=head_commit,
             collected=collected,
         )
@@ -906,6 +1339,8 @@ def _cycle(
                 collected=tuple(collected.collected),
                 symlinks=tuple(collected.symlinks),
                 skipped=tuple(collected.skipped),
+                refused=tuple(collected.refused),
+                unprojectable=tuple(collected.unprojectable),
             )
 
     generation = _current_generation(store, head_manifest)
@@ -933,7 +1368,7 @@ def _cycle(
         cipher=cipher,
         scanner=scanner,
         driver=driver,
-        adapters=adapters,
+        presets=presets,
         codec=codec,
         store=store,
         config=config,
@@ -955,17 +1390,20 @@ def _cycle(
             created=tuple(collected.created),
             collected=tuple(collected.collected),
             skipped=tuple(collected.skipped),
+            refused=tuple(collected.refused),
+            unprojectable=tuple(collected.unprojectable),
         )
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
-    applied, deferred, symlinks, aborted, refused = _apply(
+    applied = _apply(
         transport=transport,
         cipher=cipher,
+        presets=presets,
         target_commit=target_commit,
         target_manifest=target_manifest,
-        baseline=collected.contents,
         seen=collected.seen,
+        views=collected.views,
         ledger=ledger,
         live=live,
         deny=deny,
@@ -980,6 +1418,7 @@ def _cycle(
             ledger=ledger,
             live=live,
             deny=deny,
+            presets=presets,
             config=config,
             home=home,
         )
@@ -988,15 +1427,17 @@ def _cycle(
         published_commit=outcome.published,
         created=tuple(collected.created),
         collected=tuple(collected.collected),
-        applied=tuple(applied),
-        deferred=(*collected.deferred, *deferred),
+        applied=applied.applied,
+        deferred=(*collected.deferred, *applied.deferred),
         suppressed=tuple(collected.suppressed),
-        symlinks=tuple(dict.fromkeys((*collected.symlinks, *symlinks))),
-        aborted=tuple(aborted),
-        refused=tuple(refused),
+        symlinks=tuple(dict.fromkeys((*collected.symlinks, *applied.symlinks))),
+        aborted=applied.aborted,
+        refused=tuple(dict.fromkeys((*collected.refused, *applied.refused))),
+        unprojectable=tuple(dict.fromkeys((*collected.unprojectable, *applied.unprojectable))),
+        invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
     )
 
 
-__all__ = ["MAX_PUSH_ATTEMPTS", "SyncReport", "sync"]
+__all__ = ["MAX_PUSH_ATTEMPTS", "NO_CATALOG", "NO_VALIDATORS", "SyncReport", "sync"]

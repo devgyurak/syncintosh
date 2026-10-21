@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from syncintosh.core.errors import DomainError
 from syncintosh.services import SyncReport
 from syncintosh.services import sync as sync_service
+
+if TYPE_CHECKING:  # both names appear only in a return annotation
+    from syncintosh.core.ports import SyntaxValidator
+    from syncintosh.core.presets import ValidatorName
 
 app = typer.Typer(
     help="Keep developer-environment settings in step across Macs.",
@@ -62,6 +67,20 @@ def _fail(exc: DomainError) -> None:
     raise typer.Exit(code=1)
 
 
+def validators() -> dict[ValidatorName, SyntaxValidator]:
+    """Every syntax check a preset may name, wired to its implementation.
+
+    A preset names a check by the string in `ValidatorName`; a name with no implementation is
+    **refused** at the write, so a missing entry here stops the file from ever being applied on this
+    machine. `tests/unit/test_cli.py` compares this map against the literal, so adding a name without
+    wiring it fails in CI rather than on a user's machine.
+    """
+    from syncintosh.system.json_check import JsonSyntaxValidator
+    from syncintosh.system.zsh_check import ZshSyntaxValidator
+
+    return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()}
+
+
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
@@ -93,17 +112,20 @@ def init(
     remote: str = typer.Option(..., "--remote", help="the encrypted settings repo's git URL"),
     import_file: Path | None = typer.Option(None, "--import", help="a recovery export to import a ring from"),
     recovery: Path | None = typer.Option(None, "--recovery", help="where to write the recovery export"),
-    path: str = typer.Option(".zshrc", "--path", help="the tracked path, relative to $HOME"),
-    preset: str = typer.Option("zsh", "--preset", help="the preset that owns the tracked path"),
+    preset: list[str] | None = typer.Option(
+        None, "--preset", help="a built-in preset to track; repeat for more than one (default: zsh)"
+    ),
 ) -> None:
     """Create a repo and its first key generation, or import a ring onto a second Mac.
 
-    `--path`/`--preset` name the single tracked text file. The real preset catalog is #6; until
-    then the configuration carries one local item (``docs/design/presets.md``).
+    Every file of every named built-in preset is tracked (`zsh` when none is named). The paths,
+    formats, and strip policies come from the catalog, so a typo in a preset name is refused here
+    rather than silently tracking nothing (``docs/design/presets.md``).
     """
     from syncintosh.core.config import SyncConfig
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.presets import BuiltinCatalog
     from syncintosh.services import import_ring, init_new_repo
     from syncintosh.services.keys import published_commitments
     from syncintosh.services.setup import mint_machine_id, new_machine_config
@@ -119,8 +141,8 @@ def init(
         config: SyncConfig = new_machine_config(
             remote=remote,
             machine_id=mint_machine_id(SecureFileIdSource()),
-            path=path,
-            preset=preset,
+            preset_names=tuple(preset) if preset else ("zsh",),
+            catalog=BuiltinCatalog.default(),
         )
         transport = GitCLITransport(paths.repo_dir)
         store = _key_store(remote)
@@ -159,6 +181,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.presets import BuiltinCatalog
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.ledger import JsonLedgerStore
@@ -186,6 +209,8 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             codec=KeyMaterial(),
             driver=TextMergeDriver(),
             adapters={"jsonc": JsoncAdapter()},
+            catalog=BuiltinCatalog.default(),
+            validators=validators(),
             live=SystemLiveFiles(),
             ledger_store=JsonLedgerStore(paths.ledger_file),
             pending_store=DirectoryPendingStore(paths.pending_dir),
@@ -201,7 +226,12 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         _fail(exc)
         return
     _render(report, config)
-    if report.has_conflicts or report.needs_adopt:
+    settled = (*report.refused, *report.unprojectable, *report.invalid)
+    if report.has_conflicts or report.needs_adopt or any(refusal.blocking for refusal in settled):
+        # A path that was refused, could not be projected, or would not parse is a failure, not a
+        # partial success: a launchd job or a script must not read "nothing was applied here" as
+        # "all is well". A record this machine simply does not track is *not* that — it is a normal
+        # state (every machine carries every record) and is reported on stdout instead.
         raise typer.Exit(code=1)
 
 
@@ -223,12 +253,22 @@ def _render(report: SyncReport, config) -> None:
         ("deferred (app not installed)", report.deferred),
         ("suppressed (removed here)", report.suppressed),
         ("skipped (dangerous path)", report.skipped),
-        ("refused (not a tracked path here)", report.refused),
         ("skipped (symbolic link)", report.symlinks),
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:
             typer.echo(f"{label}: {path}")
+    for refusal in report.refused:
+        if refusal.blocking:
+            # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
+            typer.echo(f"refused ({refusal.reason}): {refusal.path}", err=True)
+        else:
+            # Not `skipped`: that word already means a dangerous path here, and the two call for
+            # very different reactions.
+            typer.echo(f"not tracked here: {refusal.path}")
+    for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
+        for refusal in refusals:
+            typer.echo(f"{label} ({refusal.reason}): {refusal.path}", err=True)
     if report.unchanged:
         typer.echo("nothing changed")
     elif report.published_commit:
