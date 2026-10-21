@@ -60,11 +60,12 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 #
 # `?`, `#`, and `"` stay *out*, and that is what keeps the false positives away rather than luck: a
 # URL's authority ends at the first `?` or `#`, so no unencoded password can contain one, and a `"`
+# (written `\"` in JSON, which the escape branch of the class puts back into the password)
 # is what ends a JSON string — without it, `{"proxy":"http://h:3128","email":"a@b.c"}` matched from
 # the port to the later `@`. A space or a `/` ends the match for the same reason.
 #
 # Issue #25 is where a user-defined allowlist would let a legitimate list through again.
-_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s[^/@\s?#\"]+@"
+_URL_CREDENTIALS = rb"[A-Za-z][A-Za-z0-9+.\-]*:(?:\\?/){2}[^/@\s:]*:%s(?:[^/@\s?#\"\\\\]|\\.)+@"
 
 # A URL the shell passes through verbatim, so its password is a literal and may hold anything a URL
 # may — `,`, `;`, `?`, `#`, and `"` included. `'` stays out: it is what ends the quoted string, and
@@ -79,6 +80,13 @@ _REFERENCE_PASSWORD = rb"(?!\$\{?[A-Za-z_]\w*\}?@)"
 # strict table, which is the fail-closed direction: a literal credential is refused, not skipped.
 _SHELL_FORMATS = ("text",)
 
+# An `Authorization` header value: `Basic` and a base64 token of a real credential.
+_BASIC_TOKEN = rb"[A-Za-z0-9+/]{16,}={0,2}"
+
+# ... and the token has to look encoded rather than be a word — a digit, `=` padding, or both letter
+# cases. `// Basic settings/preferences/overrides` fits the character class above exactly.
+_BASIC_SHAPE = rb"(?:(?=[A-Za-z0-9+/]*[0-9=])|(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z]))"
+
 # A structured file: any password, `$` and `{` included.
 STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     *COMMON_PATTERNS,
@@ -88,12 +96,21 @@ STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # heard of. Excluding a key is a promise about the key, and the scan is what keeps the promise
     # when the value is somewhere else in the same file (a VS Code settings comment, for one).
     #
-    # The token has to be 16 base64 characters or more, and that threshold is deliberate rather than
-    # tidy: a word of 16+ letters is what a *comment* holds immediately after `Basic` in prose
-    # (`// Basic authentication is configured below` is 14, and a refusal there would stop every
-    # tracked file for nothing). It is a heuristic in front of the real gate (``AGENTS.md`` §6), so a
-    # shorter token than that is left to the key exclusion and to the user's own review.
-    ("HTTP Basic credential", re.compile(rb"\bBasic\s+[A-Za-z0-9+/]{16,}={0,2}")),
+    # Three parts keep it from refusing a comment, because a false positive here stops **every**
+    # tracked file on the machine (``AGENTS.md`` §6):
+    #
+    # * `[ \t]+`, not `\s+`: a whitespace class crosses a newline, and `// Visual Basic` above a
+    #   banner of slashes then reads `Basic` and the banner as one token;
+    # * at least 16 characters, so a short word after `Basic` is not a token;
+    # * and the token has to *look* encoded rather than be a word: a digit, `=` padding, or both
+    #   letter cases. `// Basic settings/preferences/overrides` is a single line of prose that fits
+    #   the character class exactly, and a refusal there would be pure loss.
+    #
+    # What it still misses — `basic` or `BASIC`, a token under 16 characters (`admin:admin` encodes
+    # to 16 with padding, but a shorter pair does not), and `Bearer` — is a follow-up rather than a
+    # reason to widen this: the scan is a heuristic in front of the real gate, not a parser for every
+    # way a header can be spelled.
+    ("HTTP Basic credential", re.compile(rb"\bBasic[ \t]+(?=" + _BASIC_TOKEN + rb")" + _BASIC_SHAPE + _BASIC_TOKEN)),
 )
 
 # A shell file. Two spellings, because the shell decides what a `$` means by the quoting around it:

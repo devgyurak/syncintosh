@@ -248,3 +248,31 @@ def test_a_comment_about_basic_auth_is_not_a_credential() -> None:
 
     # when & then
     assert scanner.scan(b"// Basic authentication is configured below", subject="s.json", format="jsonc") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"// Basic internationalization settings",
+        b"// Basic settings/preferences/overrides",
+        b"// Visual Basic\n" + b"/" * 32,  # a banner on the next line, which `\s+` used to join to it
+        b"// Basic " + b"/" * 32,  # and a banner on the same line: a run of slashes is not a token
+    ],
+)
+def test_a_comment_that_only_says_basic_is_not_a_credential(payload: bytes) -> None:
+    # given — comments a person writes in a settings file. The word after `Basic` is prose, and a run
+    # of `/` is a banner; neither is base64, and refusing one stops every tracked file on the machine
+    scanner = PatternSecretScanner()
+
+    # when & then
+    assert scanner.scan(payload, subject="settings.json", format="jsonc") is None
+
+
+def test_an_escaped_quote_in_a_password_is_refused() -> None:
+    # given — JSONC writes a quote inside a value as `\"`, which is one character of the password
+    scanner = PatternSecretScanner()
+    payload = b'{"http.proxy": "http://me:pa\\"ss@proxy:8080"}'
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(payload, subject="settings.json", format="jsonc")
