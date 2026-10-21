@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from syncintosh.core.errors import DomainError
-from syncintosh.core.ports import SyntaxValidator
-from syncintosh.core.presets import ValidatorName
 from syncintosh.services import SyncReport
 from syncintosh.services import sync as sync_service
+
+if TYPE_CHECKING:  # both names appear only in a return annotation
+    from syncintosh.core.ports import SyntaxValidator
+    from syncintosh.core.presets import ValidatorName
 
 app = typer.Typer(
     help="Keep developer-environment settings in step across Macs.",

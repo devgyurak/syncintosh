@@ -870,16 +870,33 @@ def test_deleting_the_last_member_does_not_invent_a_trailing_comma() -> None:
     assert tree != tree_from_value({"psFormat": "b", "detachKeys": "ctrl-e,e"})
 
 
-def test_a_carriage_return_inside_a_comment_does_not_make_the_file_crlf() -> None:
-    # given — an LF file whose comment quotes a Windows line ending
+def test_a_carriage_return_inside_a_block_comment_does_not_make_the_file_crlf() -> None:
+    # given — an LF file whose *block* comment holds a Windows line ending, which is inside the
+    # comment's text because a block comment spans lines
     adapter = JsoncAdapter()
-    text = '{\n  "a": 1, // pasted from Windows\r\n  "b": 2\n}\n'
+    text = '{\n  /* pasted\nfrom Windows\r\n*/\n  "a": 1,\n  "b": 2\n}\n'
     tree = tree_from_value({"a": 1, "b": 2, "c": 3})
 
     # when
     rendered = adapter.render(tree, text)
 
-    # then — the inserted line ends the way the file's own lines do, instead of splitting the file
-    # between two line-ending styles
-    assert rendered == '{\n  "a": 1, // pasted from Windows\r\n  "b": 2,\n  "c": 3\n}\n'
+    # then — the comment is not the file's own line ending, so the inserted line is LF like the lines
+    # around it instead of splitting the file between two styles
+    assert rendered == '{\n  /* pasted\nfrom Windows\r\n*/\n  "a": 1,\n  "b": 2,\n  "c": 3\n}\n'
+    assert adapter.parse(rendered) == tree
+
+
+def test_a_crlf_file_whose_lines_end_in_comments_is_still_crlf() -> None:
+    # given — every line ends in a `//` comment, so the `\r` of each CRLF pair sits right before the
+    # `\n` the parser stops the comment at
+    adapter = JsoncAdapter()
+    text = '{\r\n  "a": 1, // note\r\n  "b": 2 // note\r\n}\r\n'
+    tree = tree_from_value({"a": 1, "b": 2, "c": 3})
+
+    # when
+    rendered = adapter.render(tree, text)
+
+    # then — the `\r` belongs to the line ending, not the comment, so the file is still CRLF and the
+    # inserted line matches the lines around it
+    assert rendered == '{\r\n  "a": 1, // note\r\n  "b": 2, // note\r\n  "c": 3\r\n}\r\n'
     assert adapter.parse(rendered) == tree

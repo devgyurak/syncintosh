@@ -119,7 +119,12 @@ class _Parser:
             elif text.startswith("//", self._pos):
                 newline = text.find("\n", self._pos)
                 self._pos = length if newline == -1 else newline
-                self.comments.append(_Span(start, self._pos))
+                # The comment's text stops before the line ending: the `\r` of a CRLF pair is part of
+                # the line ending and not of the comment, and a span that swallowed it made every
+                # CRLF line with a trailing `//` comment read as a line ending outside a comment.
+                self.comments.append(
+                    _Span(start, self._pos - 1 if self._pos > start and text[self._pos - 1] == "\r" else self._pos)
+                )
             elif text.startswith("/*", self._pos):
                 end = text.find("*/", self._pos + 2)
                 if end == -1:
@@ -702,13 +707,12 @@ def _detect_style(text: str, root: _AstNode, comments: _Comments) -> tuple[str, 
     snippet lands — and reading it there made the whole file CRLF, so every inserted line was
     terminated the other way from the lines around it.
     """
-    outside = comments.without_comments(0, len(text))
-    newline = "\r\n" if "\r\n" in outside else "\n"
+    newline = "\r\n" if "\r\n" in comments.without_comments(0, len(text)) else "\n"
     indent = "  "
     if isinstance(root, _ObjectNode) and root.members:
         leading = text[_line_start(text, root.members[0].span.start) : root.members[0].span.start]
         if leading and leading.strip() == "":
-            indent = leading.strip("\r\n")
+            indent = leading
     return indent, newline
 
 
