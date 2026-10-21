@@ -65,7 +65,12 @@ def merge_tree(
 
     conflicts = _fold_structure(merged, base_entries, local_entries, remote_entries, ignore, conflicts)
     ordered = _ordered_entries(merged, local_entries, remote_entries)
-    return TreeMerge(merged=Tree.create(ordered), conflicts=tuple(conflicts))
+    # A merge that deleted every key leaves an **empty object** document, and a parse represents
+    # that as `{(): EmptyObject()}` (`core.tree._flatten`), never as a tree with no root entry.
+    # Returning the latter would break the invariant the content merge relies on — that rendering
+    # the merged tree and re-parsing it returns the same tree — so a file whose merge emptied it
+    # could never settle, and every later sync would read it as changed.
+    return TreeMerge(merged=Tree.create(ordered or {(): EmptyObject()}), conflicts=tuple(conflicts))
 
 
 def _resolve(base_value: Leaf, local_value: Leaf, remote_value: Leaf) -> tuple[Leaf, bool]:
