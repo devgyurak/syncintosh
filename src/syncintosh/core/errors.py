@@ -206,6 +206,16 @@ class ConfigError(DomainError):
     """The machine's `config.json` is missing, unreadable, or not a valid configuration."""
 
 
+class ScanAllowCorrupt(DomainError):
+    """The machine-local scan allowlist is unreadable or not a valid allowlist.
+
+    The allowlist holds the keyed fingerprints the secret scan skips (``system/scan_allow.py``).
+    It lives outside the repo and is never synced, so a failure here is local repair, not a
+    disagreement with another machine — and it must never be silently reset, or every span the
+    user allowed would be refused again without explanation.
+    """
+
+
 class LedgerCorrupt(DomainError):
     """`applied.json` is not a valid apply ledger."""
 

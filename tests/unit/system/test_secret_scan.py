@@ -15,7 +15,8 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.errors import SecretScanError
-from syncintosh.system.secret_scan import PatternSecretScanner
+from syncintosh.system.scan_allow import ALLOWABLE_LABELS, ScanAllow, ScanAllowEntry
+from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, PatternSecretScanner
 
 # Built from pieces so the source file does not itself contain a token-shaped literal.
 PEM = b"-----BEGIN " + b"RSA PRIVATE KEY-----"
@@ -23,6 +24,9 @@ AWS = b"AKIA" + b"ABCDEFGHIJKLMNOP"
 GITHUB = b"ghp_" + b"a" * 36
 GITHUB_PAT = b"github_pat_" + b"b" * 24
 SLACK = b"xoxb-" + b"0" * 12
+
+# A fixed key for the allowlist tests, so a fingerprint is deterministic here.
+ALLOW_KEY = b"k" * 32
 
 SECRETS = [
     ("private key", PEM),
@@ -276,3 +280,104 @@ def test_an_escaped_quote_in_a_password_is_refused() -> None:
     # when & then
     with pytest.raises(SecretScanError):
         scanner.scan(payload, subject="settings.json", format="jsonc")
+
+
+# --------------------------------------------------------------------------- the local allowlist
+
+# The ambiguous span #25 exists for: a `;` in a URL's userinfo is legal RFC 3986 and the same bytes
+# separate list entries, so the scan fails closed and the user needs a way to allow that one line.
+AMBIGUOUS_URL = b"http://me:s3cr;t@proxy:8080"
+
+
+def _fingerprint_of(payload: bytes, key: bytes) -> str:
+    """The fingerprint a refusal prints for `payload`, read back out of the message."""
+    scanner = PatternSecretScanner(ScanAllow(key=key, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(payload, subject="settings.json", format="jsonc")
+    return str(caught.value).split("fingerprint ")[1].split(";")[0].strip()
+
+
+def test_a_refusal_names_the_fingerprint_and_the_way_to_allow_it() -> None:
+    # given — an allowlistable shape, so the refusal offers the command to record it
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+
+    # when & then
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(AMBIGUOUS_URL, subject="settings.json", format="jsonc")
+    assert "URL with credentials" in str(caught.value)
+    assert "scan allow" in str(caught.value)
+    assert AMBIGUOUS_URL.decode() not in str(caught.value)
+
+
+def test_a_refusal_for_an_unallowable_shape_does_not_offer_to_allow_it() -> None:
+    # given — a private key header is fixed text: one allowed entry would pass every key it stands in
+    # for, so the label is not allowlistable and the message must not suggest recording it
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+
+    # when & then
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(PEM, subject=".zshrc", format="text")
+    assert "private key" in str(caught.value)
+    assert "scan allow" not in str(caught.value)
+
+
+def test_an_allowed_span_passes() -> None:
+    # given
+    digest = _fingerprint_of(AMBIGUOUS_URL, ALLOW_KEY)
+    entry = ScanAllowEntry("settings.json", "URL with credentials", digest)
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    assert scanner.scan(AMBIGUOUS_URL, subject="settings.json", format="jsonc") is None
+
+
+def test_an_allowlist_entry_is_scoped_to_its_path() -> None:
+    # given — allowing a span in one file must not allow the same bytes everywhere
+    digest = _fingerprint_of(AMBIGUOUS_URL, ALLOW_KEY)
+    entry = ScanAllowEntry("settings.json", "URL with credentials", digest)
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(AMBIGUOUS_URL, subject=".zshrc", format="jsonc")
+
+
+def test_an_entry_for_another_span_does_not_allow_this_one() -> None:
+    # given — a fingerprint is over one exact span, so a different span's print does not match
+    other = _fingerprint_of(b"http://me:pa,ss@proxy:9090", ALLOW_KEY)
+    entry = ScanAllowEntry("settings.json", "URL with credentials", other)
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(AMBIGUOUS_URL, subject="settings.json", format="jsonc")
+
+
+def test_an_allowed_span_does_not_hide_a_later_one() -> None:
+    # given — `finditer` visits every match, so allowing the first URL still refuses the second
+    first = b"http://me:s3cr;t@proxy:8080"
+    second = b"http://me:pa,ss@proxy:9090"
+    entry = ScanAllowEntry("settings.json", "URL with credentials", _fingerprint_of(first, ALLOW_KEY))
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(first + b"\n" + second, subject="settings.json", format="jsonc")
+
+
+def test_without_an_allowlist_a_refusal_carries_no_fingerprint() -> None:
+    # given — a build with no key (or a unit test) still refuses, just without the fingerprint
+    scanner = PatternSecretScanner()
+
+    # when & then
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(AMBIGUOUS_URL, subject="settings.json", format="jsonc")
+    assert "fingerprint" not in str(caught.value)
+
+
+def test_every_allowable_label_is_a_real_pattern_label() -> None:
+    # when — the allowlist's policy names labels, and the labels live in the pattern tables
+    labels = {label for label, _pattern in STRUCTURED_PATTERNS} | {label for label, _pattern in SHELL_PATTERNS}
+
+    # then — a renamed pattern would otherwise leave the allowlist unable to name what it allows
+    assert ALLOWABLE_LABELS - labels == set()

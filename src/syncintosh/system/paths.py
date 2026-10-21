@@ -56,6 +56,16 @@ class MachinePaths:
         return self.state_dir / "applied.json"
 
     @property
+    def scan_allow_file(self) -> Path:
+        """`scan-allow.json` — the secret scan's local allowlist and its HMAC key.
+
+        Machine-local and **never synced** (``AGENTS.md`` §3.3): a synced allowlist would let one
+        machine tell another what not to scan, so it lives beside the ledger, outside the repo, at
+        mode 0600. It is deliberately not in `config.json`, which holds only non-secret values.
+        """
+        return self.state_dir / "scan-allow.json"
+
+    @property
     def pending_dir(self) -> Path:
         """The unresolved merge state, plaintext, outside the repo."""
         return self.state_dir / "pending"

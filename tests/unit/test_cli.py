@@ -246,3 +246,54 @@ def test_merge_names_a_whole_document_conflict(tmp_path) -> None:
     # then — there is no key to name, so the document itself is named
     assert result.exit_code == 1
     assert "conflict: (document)" in _combined(result)
+
+
+def test_scan_allow_records_an_entry_against_the_current_key(tmp_path) -> None:
+    # given — the fingerprint the refusal printed must be recorded against the key that produced it,
+    # or `scan allow` would store an entry the scanner can never match
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.scan_allow import fingerprint, load_scan_allow
+
+    allow_file = MachinePaths.default().scan_allow_file
+    matched = b"http://me:s3cr;t@proxy:8080"
+    digest = fingerprint(load_scan_allow(allow_file).key, matched)
+
+    # when
+    result = runner.invoke(main_module.app, ["scan", "allow", ".zshrc", "URL with credentials", digest])
+
+    # then
+    assert result.exit_code == 0
+    assert load_scan_allow(allow_file).allows(".zshrc", "URL with credentials", digest)
+
+
+def test_scan_allow_rejects_a_malformed_fingerprint(tmp_path) -> None:
+    # given — a mistyped fingerprint must not be written, or every later load would fail (and
+    # deleting the file would mint a new key, silently invalidating the recorded fingerprints)
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.scan_allow import load_scan_allow
+
+    allow_file = MachinePaths.default().scan_allow_file
+
+    # when
+    result = runner.invoke(main_module.app, ["scan", "allow", ".zshrc", "URL with credentials", "NOTHEX"])
+
+    # then — the command failed and left the list loadable and empty
+    assert result.exit_code == 1
+    assert "error:" in _combined(result)
+    assert load_scan_allow(allow_file).entries == frozenset()
+
+
+def test_scan_allow_reports_a_corrupt_allowlist(tmp_path) -> None:
+    # given — a hand-edited file that no longer parses must fail loudly, not silently reset
+    from syncintosh.system.paths import MachinePaths
+
+    allow_file = MachinePaths.default().scan_allow_file
+    allow_file.parent.mkdir(parents=True, exist_ok=True)
+    allow_file.write_text("{not json", encoding="utf-8")
+
+    # when
+    result = runner.invoke(main_module.app, ["scan", "allow", ".zshrc", "URL with credentials", "a" * 32])
+
+    # then
+    assert result.exit_code == 1
+    assert "error:" in _combined(result)
