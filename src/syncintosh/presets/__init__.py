@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.zsh import ZSH
 
 # Every built-in preset, in the order a catalog lists them.
-BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH,)
+BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, DOCKER)
 
 
 @dataclass(frozen=True)

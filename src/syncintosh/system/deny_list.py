@@ -32,6 +32,16 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Cookies",
     "Library/Caches",
     ".cache",
+    # Docker context TLS material: a client certificate and its private key, next to the
+    # context that uses them. `AGENTS.md` §3.4 names it, and the Docker preset never tracks
+    # this path — the entry exists so a user-added item cannot pull it in either.
+    #
+    # Deliberately not listed yet: `.docker/certs.d` and `.docker/tls` (Docker's registry-CA
+    # locations) and the `ca.pem`/`cert.pem`/`key.pem` defaults the CLI reference documents. None
+    # existed on the inspected machine, so no preset or item can reach them today; the private-key
+    # secret scan keeps a key out of the repo if a user adds one by hand. A follow-up adds them
+    # when a real setup needs it (docs/design/presets.md, the `docker` notes).
+    ".docker/contexts/tls",
 )
 
 

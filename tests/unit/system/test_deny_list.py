@@ -111,3 +111,29 @@ def test_a_relative_path_with_a_dotdot_component_escapes(tmp_path) -> None:
 
     # when & then — the manifest validator also refuses these, but the guard must not rely on it
     assert SystemDenyList().escapes(str(home), "../evil") is True
+
+
+def test_docker_context_tls_material_is_denied_as_a_subtree(tmp_path) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then — a private key anywhere under the directory is refused
+    assert is_denied(home / ".docker" / "contexts" / "tls" / "key.pem", home) is True
+    assert is_denied(home / ".docker" / "contexts" / "tls" / "registry" / "ca.pem", home) is True
+
+
+def test_a_case_variant_of_the_docker_tls_directory_is_denied(tmp_path) -> None:
+    # given — APFS is case-insensitive, so this names the same tree
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / ".DOCKER" / "Contexts" / "TLS" / "key.pem", home) is True
+
+
+def test_the_docker_config_beside_the_tls_tree_is_still_allowed(tmp_path) -> None:
+    # given — the preset tracks this file; only the TLS subtree is dangerous
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / ".docker" / "config.json", home) is False
+    assert is_denied(home / ".docker" / "contexts" / "meta" / "meta.json", home) is False

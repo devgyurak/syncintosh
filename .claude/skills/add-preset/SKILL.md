@@ -58,6 +58,11 @@ uv run python scripts/inspect_config.py ~/.docker/config.json
 `tests/fixtures/**` is exempt from the guard and from `.gitignore`, so you can commit
 Docker TLS fixtures (`ca.pem`, `cert.pem`, `key.pem`) needed by the exclusion tests.
 
+Add `--shape-strings` when the question is *is this value machine-local?*: it prints
+`<path>` / `<bool>` / `<str:N>` instead of only the length, so a per-machine plugin path can be
+told from a user preference without either value being shown. Never print a value to answer that
+question yourself.
+
 ### 0-5. Verify download metadata
 Record for the preset:
 - the **bundle ID** (for `mdfind` detection),
