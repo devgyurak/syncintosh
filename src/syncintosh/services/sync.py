@@ -51,6 +51,7 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.ports import (
+    AppDetector,
     Cipher,
     ContentAdapter,
     DenyList,
@@ -69,7 +70,7 @@ from syncintosh.core.ports import (
     SyntaxValidator,
     remote_ref,
 )
-from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
+from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
@@ -90,6 +91,20 @@ NO_VALIDATORS: Mapping[ValidatorName, SyntaxValidator] = MappingProxyType({})
 # The catalog a caller with no built-in presets passes: the core null object, so the projection
 # is the identity and `knows` makes no claim.
 NO_CATALOG: PresetCatalog = EMPTY_CATALOG
+
+
+class _UnknownApps:
+    """An `AppDetector` that answers `None` for everything.
+
+    The detector a caller with none passes, so `apply` keeps its directory heuristic and never
+    defers a record on a guess (``AGENTS.md`` §2.1, ``docs/design/01-sync-model.md`` step 14).
+    """
+
+    def installed(self, bundle_id: str) -> bool | None:
+        return None
+
+
+NO_APP_INFO: AppDetector = _UnknownApps()
 
 # What apply decided for one record.
 _Decision = Literal["write", "skip", "abort", "defer"]
@@ -131,6 +146,21 @@ class Refusal:
 
 
 @dataclass(frozen=True)
+class Deferral:
+    """A record this machine did not write, with why — and, for a missing app, how to get it.
+
+    `download_url` and `cask` come from the **local built-in catalog**, matched by path — never
+    from the record, whose preset name is untrusted. So a URL here is one this project shipped
+    (``AGENTS.md`` §3.6), and the CLI may show it without the untrusted-domain warning.
+    """
+
+    path: str
+    reason: str
+    download_url: str | None = None
+    cask: str | None = None
+
+
+@dataclass(frozen=True)
 class _Presets:
     """The local preset policy the cycle runs under: paths, adapters, and syntax checks.
 
@@ -159,7 +189,7 @@ class SyncReport:
     created: tuple[str, ...] = ()
     collected: tuple[str, ...] = ()
     applied: tuple[str, ...] = ()
-    deferred: tuple[str, ...] = ()
+    deferred: tuple[Deferral, ...] = ()
     suppressed: tuple[str, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
@@ -203,7 +233,7 @@ class _Collect:
     stale: list[_StaleChange] = field(default_factory=list)
     created: list[str] = field(default_factory=list)
     collected: list[str] = field(default_factory=list)
-    deferred: list[str] = field(default_factory=list)
+    deferred: list[Deferral] = field(default_factory=list)
     suppressed: list[str] = field(default_factory=list)
     first_sight: list[str] = field(default_factory=list)
     symlinks: list[str] = field(default_factory=list)
@@ -387,6 +417,14 @@ _RESTORE_FAILED = "this machine's own keys could not be re-attached to the file"
 _SYNTAX_FAILED = "the file would not pass its syntax check"
 _PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
 
+# Why a record was not written, as fixed phrases (§4). A file this machine has never had is one
+# thing, an app that is not installed is another, and the two call for different reactions — hence
+# the distinct reasons and, for the second, the app's own download page.
+_FILE_NOT_HERE = "the file is not on this machine yet"
+_APP_NOT_INSTALLED = "the app is not installed on this machine"
+_DIRECTORY_MISSING = "the file's directory is not on this machine yet"
+_OBJECT_MISSING = "the stored content is missing from the repo"
+
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
     """The report row for a projection that failed, phrased by its fixed reason code."""
@@ -553,7 +591,7 @@ def _collect_new(
     source: FileIdSource,
 ) -> None:
     if projected.view is None or view_sha is None:
-        state.deferred.append(item.path)
+        state.deferred.append(Deferral(item.path, _FILE_NOT_HERE))
         return
     file_id = mint_file_id(state.records, source)
     state.records[file_id] = ManifestRecord.create(
@@ -984,12 +1022,50 @@ class _Applied:
     """What step 14 did with each record, by outcome."""
 
     applied: tuple[str, ...] = ()
-    deferred: tuple[str, ...] = ()
+    deferred: tuple[Deferral, ...] = ()
     symlinks: tuple[str, ...] = ()
     aborted: tuple[str, ...] = ()
     refused: tuple[Refusal, ...] = ()
     unprojectable: tuple[Refusal, ...] = ()
     invalid: tuple[Refusal, ...] = ()
+
+
+def _missing_file_decision(installed: bool | None, *, parent_exists: bool) -> _Decision:
+    """Whether `apply` may create a file that is absent and that this machine never wrote.
+
+    This is the "no baseline" case: creating the file is the first apply here. App detection settles
+    it when it can (``docs/design/01-sync-model.md`` step 14):
+
+    * **the directory is already there** — `_WRITE`, whatever the detector said: a missing file in an
+      existing settings directory means the app has been installed, and Spotlight can simply miss a
+      bundle (indexing off, or the app under an excluded path), so a `False` must not defer forever
+      a file the machine can clearly hold;
+    * **the detector says installed** — `_WRITE`: create the parent directory and the file;
+    * **otherwise** (no bundle ID for the path, or a detector that answered `False`/`None` and no
+      directory) — `_DEFER`: report it with the app's download page rather than create a directory
+      tree for an app that is not there.
+    """
+    if parent_exists or installed is True:
+        return _WRITE
+    return _DEFER
+
+
+def _deferral(path: str, preset: Preset | None, installed: bool | None) -> Deferral:
+    """The report row for a file `apply` did not create, carrying the app's download metadata.
+
+    Only a definitive "not installed" gets the URL and the cask; a directory that is merely not
+    there yet is reported without them, because no app is being suggested.
+    """
+    if installed is False and preset is not None:
+        return Deferral(path, _APP_NOT_INSTALLED, download_url=preset.download_url, cask=preset.cask)
+    return Deferral(path, _DIRECTORY_MISSING)
+
+
+def _installed(apps: AppDetector, cache: dict[str, bool | None], bundle_id: str) -> bool | None:
+    """`apps.installed`, memoized per bundle ID so one cycle queries each app once (§2.6)."""
+    if bundle_id not in cache:
+        cache[bundle_id] = apps.installed(bundle_id)
+    return cache[bundle_id]
 
 
 def _apply(
@@ -1004,6 +1080,7 @@ def _apply(
     ledger: Mapping[str, LedgerEntry],
     live: LiveFiles,
     deny: DenyList,
+    apps: AppDetector,
     config: SyncConfig,
     home: str,
     adopt: AdoptChoice | None,
@@ -1025,12 +1102,14 @@ def _apply(
     (``docs/design/03-manifest.md``). A refusal is reported, never silent.
     """
     applied: list[str] = []
-    deferred: list[str] = []
+    deferred: list[Deferral] = []
     symlinks: list[str] = []
     aborted: list[str] = []
     refused: list[Refusal] = []
     unprojectable: list[Refusal] = []
     invalid: list[Refusal] = []
+    # One `mdfind` per app per cycle, however many files that app owns (§2.6).
+    installed_cache: dict[str, bool | None] = {}
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -1090,17 +1169,24 @@ def _apply(
             aborted.append(record.path)
             continue
         if decision == _DEFER:
-            deferred.append(record.path)
+            deferred.append(Deferral(record.path, _DIRECTORY_MISSING))
             continue
         if decision == _SKIP:
             continue
-        if live_bytes is None and ledger.get(file_id) is None and not live.exists(str(Path(live_path).parent)):
-            # The app is not installed: report instead of creating a directory tree.
-            deferred.append(record.path)
-            continue
+        if live_bytes is None and ledger.get(file_id) is None:
+            # First apply: the file is not here and this machine never wrote it. Whether to create
+            # it depends on the app, so ask the local catalog (never the record's untrusted preset
+            # name) and, when the path has a bundle ID, the detector.
+            preset = presets.catalog.preset_for(record.path)
+            bundle_id = None if preset is None else preset.bundle_id
+            installed = None if bundle_id is None else _installed(apps, installed_cache, bundle_id)
+            parent_exists = live.exists(str(Path(live_path).parent))
+            if _missing_file_decision(installed, parent_exists=parent_exists) == _DEFER:
+                deferred.append(_deferral(record.path, preset, installed))
+                continue
         data = _verified_object(transport, cipher, target_commit, file_id, record.sha256)
         if data is None:
-            deferred.append(record.path)
+            deferred.append(Deferral(record.path, _OBJECT_MISSING))
             continue
         if live_bytes is not None and stripped_policy is not None:
             restored = _restore_file(presets, data, live_bytes, stripped_policy)
@@ -1241,6 +1327,7 @@ def sync(
     adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
     catalog: PresetCatalog = NO_CATALOG,
     validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
+    apps: AppDetector = NO_APP_INFO,
     adopt: AdoptChoice | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises."""
@@ -1264,6 +1351,7 @@ def sync(
             ledger_store=ledger_store,
             pending_store=pending_store,
             deny=deny,
+            apps=apps,
             source=source,
             config=config,
             home=home,
@@ -1288,6 +1376,7 @@ def _cycle(
     ledger_store: LedgerStore,
     pending_store: PendingStore,
     deny: DenyList,
+    apps: AppDetector,
     source: FileIdSource,
     config: SyncConfig,
     home: str,
@@ -1414,6 +1503,7 @@ def _cycle(
         ledger=ledger,
         live=live,
         deny=deny,
+        apps=apps,
         config=config,
         home=home,
         adopt=adopt,
@@ -1447,4 +1537,4 @@ def _cycle(
     )
 
 
-__all__ = ["MAX_PUSH_ATTEMPTS", "NO_CATALOG", "NO_VALIDATORS", "SyncReport", "sync"]
+__all__ = ["MAX_PUSH_ATTEMPTS", "NO_APP_INFO", "NO_CATALOG", "NO_VALIDATORS", "Deferral", "SyncReport", "sync"]

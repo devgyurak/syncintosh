@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from syncintosh.cli import main as main_module
 from syncintosh.core.presets import ValidatorName
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.services import Refusal, SyncReport
+from syncintosh.services import Deferral, Refusal, SyncReport
 
 runner = CliRunner()
 
@@ -297,3 +297,44 @@ def test_scan_allow_reports_a_corrupt_allowlist(tmp_path) -> None:
     # then
     assert result.exit_code == 1
     assert "error:" in _combined(result)
+
+
+def test_sync_prints_a_deferrals_reason_and_install_hint(tmp_path, monkeypatch) -> None:
+    # given — a record deferred because its app is not installed
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module,
+        "sync_service",
+        lambda **_kwargs: SyncReport(
+            deferred=(
+                Deferral(
+                    "Library/Application Support/Code/User/settings.json",
+                    "the app is not installed on this machine",
+                    download_url="https://code.visualstudio.com/download",
+                    cask="visual-studio-code",
+                ),
+            )
+        ),
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then — the reason, the vendor's own page, and the cask command are all shown
+    assert result.exit_code == 0
+    assert (
+        "deferred (the app is not installed on this machine): "
+        "Library/Application Support/Code/User/settings.json" in _combined(result)
+    )
+    assert "https://code.visualstudio.com/download" in _combined(result)
+    assert "brew install --cask visual-studio-code" in _combined(result)

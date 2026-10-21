@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.errors import ConfigError
-from syncintosh.core.presets import Preset, PresetFile, download_trust
+from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, download_trust
 from syncintosh.presets import BuiltinCatalog, docker, vscode, zsh
 
 
@@ -249,3 +249,42 @@ def test_the_docker_preset_metadata_matches_the_verified_app() -> None:
     assert docker.DOCKER.bundle_id == "com.docker.docker"
     assert docker.DOCKER.cask == "docker-desktop"
     assert docker.DOCKER.download_url == "https://www.docker.com/products/docker-desktop/"
+
+
+# --------------------------------------------------------------------------- preset_for
+
+
+def test_preset_for_returns_the_owning_preset_matched_on_path() -> None:
+    # given — the lookup is by path, never by the preset name a record carries
+    catalog = BuiltinCatalog.default()
+
+    # when
+    vscode_preset = catalog.preset_for(vscode.SETTINGS)
+    docker_preset = catalog.preset_for(docker.CONFIG)
+    zsh_preset = catalog.preset_for(zsh.STARTUP_FILES[0])
+
+    # then
+    assert vscode_preset is not None
+    assert vscode_preset.name == "vscode"
+    assert docker_preset is not None
+    assert docker_preset.name == "docker"
+    assert zsh_preset is not None
+    assert zsh_preset.name == "zsh"
+    assert catalog.preset_for("Documents/notes.md") is None
+
+
+def test_preset_for_folds_case_and_normalization() -> None:
+    # given — APFS is case-insensitive, so a differently-cased path names the same file
+    catalog = BuiltinCatalog.default()
+
+    # when
+    found = catalog.preset_for(vscode.SETTINGS.upper())
+
+    # then
+    assert found is not None
+    assert found.name == "vscode"
+
+
+def test_the_empty_catalog_owns_no_path() -> None:
+    # when & then
+    assert EMPTY_CATALOG.preset_for(vscode.SETTINGS) is None

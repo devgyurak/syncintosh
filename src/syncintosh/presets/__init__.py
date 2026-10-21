@@ -90,5 +90,18 @@ class BuiltinCatalog:
         folded = collision_key(path)
         return any(collision_key(file.path) == folded for file in builtin.files)
 
+    def preset_for(self, path: str) -> Preset | None:
+        """The built-in preset that owns `path`, or `None` when none does.
+
+        Matched on the folded path, the same way `policy_for` is, so a deferral report can carry
+        the owning app's download page and cask without trusting the `preset` name a record
+        arrived with (``AGENTS.md`` §3.6).
+        """
+        folded = collision_key(path)
+        return next(
+            (preset for preset in self.presets if any(collision_key(file.path) == folded for file in preset.files)),
+            None,
+        )
+
 
 __all__ = ["BUILTIN_PRESETS", "BuiltinCatalog"]

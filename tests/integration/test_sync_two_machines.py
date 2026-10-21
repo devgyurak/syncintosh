@@ -582,7 +582,7 @@ def test_a_tracked_path_that_does_not_exist_here_is_deferred(tmp_path, memory_ke
     report = _run(a)
 
     # then
-    assert report.deferred == (ZSH,)
+    assert [deferral.path for deferral in report.deferred] == [ZSH]
 
 
 def test_a_record_whose_directory_is_absent_is_deferred(tmp_path, memory_key_store) -> None:
@@ -600,7 +600,7 @@ def test_a_record_whose_directory_is_absent_is_deferred(tmp_path, memory_key_sto
     report = _run(b)
 
     # then
-    assert report.deferred == (path,)
+    assert [deferral.path for deferral in report.deferred] == [path]
     assert (b.home / "Config").exists() is False
 
 

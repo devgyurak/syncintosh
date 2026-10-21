@@ -86,6 +86,9 @@ class _UnawareCatalog:
     def get(self, name: str) -> Preset | None:
         return None
 
+    def preset_for(self, path: str) -> Preset | None:
+        return None
+
 
 class _Catalog:
     """The built-in catalog plus one extra preset, so projection has a keyed format to run on."""
@@ -114,6 +117,11 @@ class _Catalog:
         if self._extra is not None and preset == self._extra.name:
             return self._extra_file(path) is not None
         return self._base.knows(preset, path)
+
+    def preset_for(self, path: str) -> Preset | None:
+        if self._extra is not None and self._extra_file(path) is not None:
+            return self._extra
+        return self._base.preset_for(path)
 
 
 KEYED_CATALOG = _Catalog(JSONC_PRESET)

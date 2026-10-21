@@ -28,6 +28,12 @@ class _StubCatalog:
     def knows(self, preset: str, path: str) -> bool:
         return True
 
+    def preset_for(self, path: str) -> Preset | None:
+        return next(
+            (preset for preset in self._presets if any(file.path == path for file in preset.files)),
+            None,
+        )
+
 
 def test_mint_machine_id_is_a_file_id() -> None:
     # given
