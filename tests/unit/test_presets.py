@@ -7,7 +7,7 @@ import pytest
 
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.presets import Preset, PresetFile, download_trust
-from syncintosh.presets import BuiltinCatalog, vscode, zsh
+from syncintosh.presets import BuiltinCatalog, docker, vscode, zsh
 
 
 def _file(path: str = "settings.json", **kwargs) -> PresetFile:
@@ -203,3 +203,49 @@ def test_the_vscode_preset_metadata_matches_the_verified_app() -> None:
     assert vscode.VSCODE.bundle_id == "com.microsoft.VSCode"
     assert vscode.VSCODE.cask == "visual-studio-code"
     assert vscode.VSCODE.download_url == "https://code.visualstudio.com/download"
+
+
+def test_the_docker_preset_excludes_its_credential_keys() -> None:
+    # given
+    config = next(file for file in docker.DOCKER.files if file.path == docker.CONFIG)
+
+    # when — the credential set and the machine-local set are read separately
+    excluded = config.excluded
+    noise = config.noise
+
+    # then — a credential is cut before sealing; a helper binary's name and the active context
+    # are this machine's own, so they stay here
+    assert excluded == docker.CREDENTIAL_KEYS
+    assert ("auths",) in excluded
+    assert ("proxies",) in excluded
+    assert ("HttpHeaders",) in excluded
+    assert noise == docker.NOISE_KEYS
+    assert ("credsStore",) in noise
+    assert ("credHelpers",) in noise
+    assert excluded & noise == frozenset()
+
+
+def test_every_docker_file_is_checked_as_strict_json() -> None:
+    # when — Docker's CLI and `dockerd` both read these with a strict JSON parser
+    validators = {file.validator for file in docker.DOCKER.files}
+
+    # then — so a render that leaves JSONC-only syntax (a trailing comma, a comment) is refused
+    # rather than written (AGENTS.md §3.5)
+    assert validators == {"json"}
+
+
+def test_the_docker_daemon_config_excludes_its_documented_proxy_key() -> None:
+    # given
+    daemon = next(file for file in docker.DOCKER.files if file.path == docker.DAEMON)
+
+    # when & then — the daemon config's `proxies` is a `user:pass@` carrier, and it was absent on
+    # the inspected machine, so it is excluded on Docker's documented schema (AGENTS.md §3.4)
+    assert daemon.excluded == frozenset({("proxies",)})
+    assert daemon.noise == frozenset()
+
+
+def test_the_docker_preset_metadata_matches_the_verified_app() -> None:
+    # when & then — Info.plist, the vendor's page, and `brew info --cask` (skill Step 0-5)
+    assert docker.DOCKER.bundle_id == "com.docker.docker"
+    assert docker.DOCKER.cask == "docker-desktop"
+    assert docker.DOCKER.download_url == "https://www.docker.com/products/docker-desktop/"

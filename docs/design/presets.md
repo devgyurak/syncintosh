@@ -15,6 +15,37 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 |---|---|---|---|---|---|---|---|
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
 | `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
+| `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
+
+### `docker` notes
+
+- Docker Desktop 4.91.0, inspected 2026-10 with
+  `scripts/inspect_config.py --shape-strings` (the sanctioned way to read a secret-shaped file,
+  `AGENTS.md` §6). Bundle ID from `Docker.app/Contents/Info.plist`; the cask from
+  `brew info --cask docker-desktop`.
+- `auths` was observed in the real file — it is the store `docker login` falls back to. The other
+  three exclusions were **absent** on the inspected machine but are documented carriers, so they
+  are cut by construction rather than left to the user (`AGENTS.md` §3.4):
+  - `proxies` — the CLI reference shows `httpProxy: "http://user:pass@host:port"` and warns that
+    proxy settings "may contain sensitive information"; the daemon reference documents the same
+    shape under a top-level `proxies` in `daemon.json`.
+  - `HttpHeaders` — a map of *arbitrary* headers sent on every client→daemon message, which is a
+    documented place for `Authorization: Bearer …`. The secret scan matches known token shapes, not
+    "this value looks like a header", so nothing else would catch it. A custom header set must
+    therefore be reproduced per machine.
+- `currentContext` is the endpoint this machine talks to, and `credsStore`/`credHelpers` name a
+  credential-helper binary that exists **on this machine** (`docker-credential-<value>`). Syncing
+  either would flip the other Mac's context, or point it at a helper it does not have — a Mac
+  running Docker Desktop stores `desktop` where colima or OrbStack stores `osxkeychain`, and the
+  next `docker pull` there would fail with `executable file not found` while its own stored logins
+  became unreachable. All three are `noise`, so each machine keeps its own.
+- The `plugins` map, by contrast, is synced: Step 0 showed its `hooks` values are neither paths nor
+  booleans, so there is no evidence they are machine-local — a follow-up noise entry if they churn.
+- `~/.docker/contexts/tls/` is in the deny-list (`system/deny_list.py`). `certs.d/`,
+  `~/.docker/tls/`, and the `ca.pem`/`cert.pem`/`key.pem` defaults the CLI reference documents
+  were absent on the inspected machine, so they are not denied yet: a user would have to add such
+  a path explicitly, and the private-key secret scan is the backstop that keeps it out of the repo.
+  Tracked as a follow-up rather than guessed at now.
 
 ### `zsh` notes
 
