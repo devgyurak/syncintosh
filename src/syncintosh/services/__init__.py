@@ -12,6 +12,7 @@ from syncintosh.services.merge_service import RenderedMerge, merge_text
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.services.setup import mint_machine_id, new_machine_config
 from syncintosh.services.sync import Deferral, Refusal, SyncReport, sync
+from syncintosh.services.watch import watch
 
 __all__ = [
     "Deferral",
@@ -24,5 +25,6 @@ __all__ = [
     "mint_machine_id",
     "new_machine_config",
     "sync",
+    "watch",
     "write_repo",
 ]
