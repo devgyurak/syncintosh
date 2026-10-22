@@ -155,6 +155,18 @@ the merge re-encrypt in step 12, for `resolve`, and for a change the LLM propose
 for the initial collect. A design that scans once at step 3 and then encrypts merge output at
 step 12 would violate the rule while looking compliant.
 
+### The scan's ambiguous shapes, and the local way out
+
+The scan is a heuristic, and a few shapes are genuinely ambiguous — RFC 3986 allows `,` and `;` in
+a URL's userinfo, and the same bytes separate list entries — so it **fails closed** there. A user
+with one legitimate line gets no way out but to edit the file, so a **machine-local, never-synced**
+allowlist exists (`~/.local/share/syncintosh/scan-allow.json`, mode 0600). An entry names a
+`(path, pattern label, fingerprint)`, never raw text: the fingerprint is an HMAC of the matched
+span under a random per-machine key, so the file stores no plaintext and a plain hash's
+short-password weakness does not apply. A refusal prints the fingerprint, and `syncintosh scan
+allow` records it. It stays outside the repo on purpose — a synced allowlist would let one machine
+tell another what not to scan (``AGENTS.md`` §3.3).
+
 ## Commits and rewrites
 
 - **No change means no commit.** If the plaintext set did not change, step 4 writes nothing

@@ -15,8 +15,10 @@ none, so `$` there is an ordinary character of a value (see `patterns_for`).
 from __future__ import annotations
 
 import re
+import shlex
 
 from syncintosh.core.errors import SecretScanError
+from syncintosh.system.scan_allow import ALLOWABLE_LABELS, ScanAllow, fingerprint
 
 # `(label, pattern)` — a high-signal, low-false-positive set. This is a heuristic in front of the
 # real gate (CI + review), not a sandbox (``AGENTS.md`` §6); a missed secret is still refused by
@@ -139,20 +141,51 @@ def _line_number(plaintext: bytes, offset: int) -> int:
     return plaintext.count(b"\n", 0, offset) + 1
 
 
+def _refusal(subject: str, label: str, line: int, digest: str | None) -> str:
+    """The message a refusal shows: the location, never the matched bytes (``AGENTS.md`` §4).
+
+    The fingerprint is included when the machine has a key, so the user can allow exactly the span
+    they saw. It is keyed (``system/scan_allow.py``), so printing it reveals nothing about the
+    value, and the suggested command copies straight back into `scan allow` — but only for a label
+    that may be allowed at all: a pattern that matches fixed text (a PEM header) is not
+    allowlistable, because one entry would pass every credential it stands in for.
+    """
+    message = f"{subject}: possible {label} at line {line}"
+    if digest is None:
+        return message
+    if label not in ALLOWABLE_LABELS:
+        return f"{message} (fingerprint {digest})"
+    command = f"syncintosh scan allow {shlex.quote(subject)} {shlex.quote(label)} {digest}"
+    return f"{message} (fingerprint {digest}; allow it with `{command}`)"
+
+
 class PatternSecretScanner:
-    """A `SecretScanner` over a fixed pattern table."""
+    """A `SecretScanner` over a fixed pattern table, minus this machine's allowed spans.
+
+    `allow` is the per-machine allowlist (``system/scan_allow.py``). A match whose keyed
+    fingerprint is on the list is skipped and the scan keeps looking; every other match is refused
+    as before. With no allowlist — a build that has no key, or a unit test — a refusal simply omits
+    the fingerprint.
+    """
+
+    def __init__(self, allow: ScanAllow | None = None) -> None:
+        self._allow = allow
 
     def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
         """Raise `SecretScanError` naming the location when a pattern matches; never the value.
 
         `format` picks the URL table: a shell file may reference a credential, a structured file may
-        not (see `patterns_for`).
+        not (see `patterns_for`). `finditer`, not `search`, so an allowed span early in the file
+        does not hide a later, unallowed one.
         """
+        allow = self._allow
         for label, pattern in patterns_for(format):
-            match = pattern.search(plaintext)
-            if match is not None:
+            for match in pattern.finditer(plaintext):
+                digest = None if allow is None else fingerprint(allow.key, match.group(0))
+                if allow is not None and digest is not None and allow.allows(subject, label, digest):
+                    continue
                 line = _line_number(plaintext, match.start())
-                raise SecretScanError(f"{subject}: possible {label} at line {line}")
+                raise SecretScanError(_refusal(subject, label, line, digest))
 
 
 __all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for"]

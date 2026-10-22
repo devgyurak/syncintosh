@@ -42,7 +42,7 @@ def test_every_local_state_path_sits_outside_the_repo(tmp_path) -> None:
     # when
     outside = [
         path
-        for path in (paths.ledger_file, paths.pending_dir, paths.lock_file)
+        for path in (paths.ledger_file, paths.pending_dir, paths.lock_file, paths.scan_allow_file)
         if paths.repo_dir in path.parents or path == paths.repo_dir
     ]
 

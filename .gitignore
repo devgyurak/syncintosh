@@ -44,3 +44,7 @@ htmlcov/
 # Test fixtures may legitimately be secret-shaped (Docker ca.pem / cert.pem / key.pem), so
 # re-include the fixture tree after the secret patterns above (AGENTS.md §3.4 needs them).
 !tests/fixtures/**
+
+# A user's machine-local agent permissions (the `/permissions` approvals Claude Code writes) are
+# personal and session-specific — a path or a tool that this machine approved must not reach a clone.
+.claude/settings.local.json

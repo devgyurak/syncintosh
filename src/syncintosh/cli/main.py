@@ -82,6 +82,37 @@ def validators() -> dict[ValidatorName, SyntaxValidator]:
     return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()}
 
 
+# The allowlist's own command group. `scan` itself does nothing; `allow` is the whole surface, kept
+# minimal on purpose — the narrow escape hatch issue #25 asks for, not a policy editor.
+scan_app = typer.Typer(help="The local, never-synced secret-scan allowlist.", no_args_is_help=True)
+app.add_typer(scan_app, name="scan")
+
+
+@scan_app.command("allow")
+def scan_allow(
+    path: str = typer.Argument(..., help="the subject a refusal named (a tracked path, or `manifest`)"),
+    label: str = typer.Argument(..., help="the pattern label a refusal named"),
+    fingerprint: str = typer.Argument(..., help="the fingerprint a refusal printed"),
+) -> None:
+    """Allow one refused span on this machine only.
+
+    The entry is `(path, label, fingerprint)`, and the fingerprint is keyed, so this stores no
+    plaintext. The list never leaves the machine: a synced one would let another machine decide what
+    this one does not scan (``AGENTS.md`` §3.3).
+    """
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.scan_allow import ScanAllowEntry, load_scan_allow, save_scan_allow
+
+    try:
+        allow_file = MachinePaths.default().scan_allow_file
+        allow = load_scan_allow(allow_file)
+        save_scan_allow(allow.with_entry(ScanAllowEntry(path=path, label=label, fingerprint=fingerprint)), allow_file)
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"allowed on this machine only: {path} ({label}) {fingerprint}")
+
+
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
@@ -193,6 +224,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.repo_files import FileRepo
+    from syncintosh.system.scan_allow import load_scan_allow
     from syncintosh.system.secret_scan import PatternSecretScanner
     from syncintosh.vcs.git import GitCLITransport
 
@@ -207,7 +239,9 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             transport=transport,
             files=FileRepo(paths.repo_dir),
             cipher=EnvelopeCipher(store),
-            scanner=PatternSecretScanner(),
+            # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it
+            # lives outside the repo, so it never leaves this machine.
+            scanner=PatternSecretScanner(load_scan_allow(paths.scan_allow_file)),
             store=store,
             codec=KeyMaterial(),
             driver=TextMergeDriver(),

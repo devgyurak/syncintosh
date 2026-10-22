@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 from syncintosh.core.paths import collision_key
+from syncintosh.system.paths import MachinePaths
 
 # Relative to `$HOME`. A directory entry denies everything beneath it.
 DENIED_PATHS: tuple[str, ...] = (
@@ -32,6 +33,11 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Cookies",
     "Library/Caches",
     ".cache",
+    # syncintosh's own machine-local state: the apply ledger, the pending plaintext, and the
+    # secret scan's allowlist (which holds an HMAC key). It is never collected by a built-in
+    # preset, but a user-added item could name it; refusing it by construction keeps this
+    # machine's state — and the allowlist key — off the other machines (``AGENTS.md`` §3.3).
+    ".local/share/syncintosh",
     # Docker context TLS material: a client certificate and its private key, next to the
     # context that uses them. `AGENTS.md` §3.4 names it, and the Docker preset never tracks
     # this path — the entry exists so a user-added item cannot pull it in either.
@@ -80,7 +86,14 @@ class SystemDenyList:
     def is_denied(self, home: str, relpath: str) -> bool:
         """True when `home/relpath` is a dangerous path that must never be collected."""
         home_path = Path(home)
-        return is_denied(home_path / relpath, home_path)
+        if is_denied(home_path / relpath, home_path):
+            return True
+        # `XDG_DATA_HOME` can move the state directory off the default `.local/share`, so the
+        # literal `DENIED_PATHS` entry is not enough: whatever path the state directory resolves to
+        # holds this machine's ledger, its pending plaintext, and the scan allowlist key. Deriving
+        # it here is why this check lives in the adapter and not in the pure `DENIED_PATHS` list.
+        state_dir = MachinePaths.default(home_path).state_dir
+        return _under(os.path.realpath(home_path / relpath), os.path.realpath(state_dir))
 
     def escapes(self, home: str, relpath: str) -> bool:
         """True when the record's target leaves `$HOME` once symlinks are resolved.

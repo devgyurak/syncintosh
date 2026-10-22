@@ -137,3 +137,23 @@ def test_the_docker_config_beside_the_tls_tree_is_still_allowed(tmp_path) -> Non
     # when & then
     assert is_denied(home / ".docker" / "config.json", home) is False
     assert is_denied(home / ".docker" / "contexts" / "meta" / "meta.json", home) is False
+
+
+def test_the_machine_local_state_directory_is_denied(tmp_path) -> None:
+    # given — the ledger, the pending plaintext, and the scan allowlist (with its HMAC key) live
+    # under `~/.local/share/syncintosh`; a user-added item must not be able to collect them
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / ".local" / "share" / "syncintosh" / "scan-allow.json", home) is True
+    assert is_denied(home / ".LOCAL" / "share" / "syncintosh" / "applied.json", home) is True
+
+
+def test_the_state_directory_is_denied_even_under_a_moved_data_root(tmp_path, monkeypatch) -> None:
+    # given — `XDG_DATA_HOME` moves the ledger, the pending plaintext, and the allowlist key away
+    # from the default, so the literal home-relative entry alone would not cover them
+    home = tmp_path / "home"
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / "elsewhere"))
+
+    # when & then
+    assert SystemDenyList().is_denied(str(home), "elsewhere/syncintosh/scan-allow.json") is True
