@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 
 from syncintosh.core.models import Conflict, TreeMerge
+from syncintosh.core.resolution import Side
 from syncintosh.core.tree import ABSENT, Absent, Array, EmptyObject, KeyPath, Leaf, Node, Scalar, Tree
 
 # The paths a merge must never decide — noise keys the collector knows are machine-specific.
@@ -36,11 +37,14 @@ def merge_tree(
     remote: Tree,
     *,
     ignore: IgnorePaths = frozenset(),
+    choices: Mapping[KeyPath, Side] | None = None,
 ) -> TreeMerge:
     """Merge three typed trees; conflicts are returned, not raised.
 
     ``base`` is the common ancestor; ``local`` wins a both-sides change. A path under ``ignore``
-    keeps the local value and is never a conflict.
+    keeps the local value and is never a conflict. ``choices`` settles a conflicted path to the
+    side an operator picked; a choice on a path that is not a conflict is ignored, and a
+    conflict with no choice stays in the result.
     """
     base_entries = base.entries
     local_entries = local.entries
@@ -64,6 +68,8 @@ def merge_tree(
             merged[path] = chosen
 
     conflicts = _fold_structure(merged, base_entries, local_entries, remote_entries, ignore, conflicts)
+    conflicts = _apply_choices(conflicts, choices or {}, merged, local_entries, remote_entries, ignore)
+    _drop_emptied(merged)
     ordered = _ordered_entries(merged, local_entries, remote_entries)
     # A merge that deleted every key leaves an **empty object** document, and a parse represents
     # that as `{(): EmptyObject()}` (`core.tree._flatten`), never as a tree with no root entry.
@@ -71,6 +77,30 @@ def merge_tree(
     # the merged tree and re-parsing it returns the same tree — so a file whose merge emptied it
     # could never settle, and every later sync would read it as changed.
     return TreeMerge(merged=Tree.create(ordered or {(): EmptyObject()}), conflicts=tuple(conflicts))
+
+
+def _apply_choices(
+    conflicts: list[Conflict],
+    choices: Mapping[KeyPath, Side],
+    merged: dict[KeyPath, Node],
+    local_entries: Mapping[KeyPath, Node],
+    remote_entries: Mapping[KeyPath, Node],
+    ignore: IgnorePaths,
+) -> list[Conflict]:
+    """Settle each chosen conflict to the side the operator picked; the rest stay conflicts.
+
+    Only a path that is still a conflict is consulted, so a choice on a path that never conflicted
+    changes nothing. Conflicts are subsumed under their shallowest path, so no chosen path sits
+    under another chosen path and the order of application does not matter.
+    """
+    unchosen: list[Conflict] = []
+    for conflict in conflicts:
+        side = choices.get(conflict.path)
+        if side is None:
+            unchosen.append(conflict)
+            continue
+        _choose_side(conflict.path, side, merged, local_entries, remote_entries, ignore)
+    return unchosen
 
 
 def _resolve(base_value: Leaf, local_value: Leaf, remote_value: Leaf) -> tuple[Leaf, bool]:
@@ -117,6 +147,11 @@ def _fold_structure(
     An ``EmptyObject`` that gained a child is not a conflict — the object is merely no longer
     empty — so it is dropped without a conflict. Deeper conflicts are subsumed so the user sees
     one decision, not a cascade.
+
+    A local ``{}`` at a key does not mean "the key is now empty": it is the local side's deletion of
+    the keys it had under that key. Keys the other side added beneath it survive, because only a
+    change both sides make to the same key is a conflict (``AGENTS.md`` §5.3). Keep this rule: a
+    "empty object replaces everything beneath it" rule would silently drop the other side's edits.
     """
     conflicts_by_path = list(conflicts)
     structural: list[Conflict] = []
@@ -137,18 +172,17 @@ def _fold_structure(
                     remote=remote_entries.get(path, ABSENT),
                 )
             )
-            _resolve_structural(path, merged, local_entries)
+            _choose_side(path, "local", merged, local_entries, remote_entries, ignore)
         elif _is_terminal(merged.get(path)) and _keeps_local_subtree(path, ignore, local_entries):
             # A local key under this path is ignored, so local's subtree must survive; the
             # terminal that won here gives way instead of erasing the ignored key. Every other
             # terminal above live descendants is a conflict, already resolved above.
             del merged[path]
 
-    # An `EmptyObject` that kept a surviving child is no longer empty. This runs after the fold:
-    # during it an `EmptyObject` can transiently sit above a descendant a structural conflict is
-    # about to remove, and dropping it then would erase a root or a parent that still stands.
-    for path in [p for p, node in merged.items() if isinstance(node, EmptyObject) and _has_descendant(merged, p)]:
-        del merged[path]
+    # This runs after the fold: during it an `EmptyObject` can transiently sit above a descendant
+    # a structural conflict is about to remove, and dropping it then would erase a root or a
+    # parent that still stands.
+    _drop_emptied(merged)
 
     subsumed = {conflict.path for conflict in structural}
     kept = [
@@ -164,24 +198,53 @@ def _is_terminal(node: Leaf | None) -> bool:
     return isinstance(node, (Scalar, Array))
 
 
-def _resolve_structural(path: KeyPath, merged: dict[KeyPath, Node], local_entries: Mapping[KeyPath, Node]) -> None:
-    """Make `merged` consistent at a structural conflict, with the local shape winning.
+def _drop_emptied(merged: dict[KeyPath, Node]) -> None:
+    """Drop an `EmptyObject` that kept a surviving child: the object is no longer empty."""
+    for path in [p for p, node in merged.items() if isinstance(node, EmptyObject) and _has_descendant(merged, p)]:
+        del merged[path]
 
-    A local leaf at `path` replaces the subtree beneath it; a local subtree is restored whole
-    from the local side (a path the per-path pass deleted because remote dropped it must come
-    back), and a local deletion leaves nothing. The conflict was recorded either way, so this
-    only fixes the candidate value a resolver would start from (``AGENTS.md`` §5.3).
+
+def _choose_side(
+    path: KeyPath,
+    side: Side,
+    merged: dict[KeyPath, Node],
+    local_entries: Mapping[KeyPath, Node],
+    remote_entries: Mapping[KeyPath, Node],
+    ignore: IgnorePaths,
+) -> None:
+    """Make `merged` take `side`'s shape at `path`, the same way for either side.
+
+    The chosen side's leaf replaces whatever sat beneath `path`; a chosen deletion leaves nothing
+    there, and the chosen side's subtree is restored whole (a path the per-path pass deleted must
+    come back). Ignored paths are never taken from the remote side: local keeps them, as always.
+    A terminal that would sit above local's ignored keys gives way, as `_fold_structure` does. The
+    conflict is settled either way, so this only fixes the candidate value a resolver starts from
+    (``AGENTS.md`` §5.3).
     """
+    chosen_entries = remote_entries if side == "remote" else local_entries
     for deeper in [candidate for candidate in merged if _strictly_under(candidate, path)]:
         del merged[deeper]
-    local_leaf = local_entries.get(path, ABSENT)
-    if isinstance(local_leaf, Absent):
+    chosen_leaf = chosen_entries.get(path, ABSENT)
+    if isinstance(chosen_leaf, Absent):
         merged.pop(path, None)
-        for deeper, node in local_entries.items():
-            if _strictly_under(deeper, path):
-                merged[deeper] = node
-        return
-    merged[path] = local_leaf
+    else:
+        merged[path] = chosen_leaf
+    for deeper, node in chosen_entries.items():
+        if _strictly_under(deeper, path) and not _is_ignored(deeper, ignore):
+            merged[deeper] = node
+    for deeper, node in local_entries.items():
+        if _strictly_under(deeper, path) and _is_ignored(deeper, ignore):
+            merged[deeper] = node
+    if _is_terminal(merged.get(path)) and _keeps_local_subtree(path, ignore, local_entries):
+        del merged[path]
+    # The chosen side's object that holds `path` may be an empty object there: an `EmptyObject` on
+    # that side is the only record that the object exists, so restore it unless the merge already
+    # has something beneath it. Without this, choosing the last child's deletion erases the parent.
+    for depth in range(len(path)):
+        ancestor = path[:depth]
+        empty_here = isinstance(chosen_entries.get(ancestor), EmptyObject)
+        if empty_here and ancestor not in merged and not _has_descendant(merged, ancestor):
+            merged[ancestor] = EmptyObject()
 
 
 def _keeps_local_subtree(path: KeyPath, ignore: IgnorePaths, local_entries: Mapping[KeyPath, Node]) -> bool:

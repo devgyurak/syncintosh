@@ -21,6 +21,7 @@ from syncintosh.core.errors import GenerationDivergence
 from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
+from syncintosh.core.resolution import CollisionChoice, CollisionKey, RecordChoice
 
 # The three record-level conflicts; the kind decides the user's choice
 # (docs/design/03-manifest.md).
@@ -126,12 +127,20 @@ def merge_records(
     base: Mapping[str, ManifestRecord] | None,
     local: Mapping[str, ManifestRecord],
     remote: Mapping[str, ManifestRecord],
+    *,
+    choices: Mapping[str, RecordChoice] | None = None,
+    collision_choices: Mapping[CollisionKey, CollisionChoice] | None = None,
 ) -> RecordMergeResult:
     """Merge record maps keyed by `file_id` (``base = None`` means an empty base).
 
     `base`/`local`/`remote` may be a `Manifest.records` map or any record mapping. A record
     whose content changed on both sides while its metadata merged cleanly is returned as a
     `ContentMergeTask`, not as a conflict — only the content merge decides content.
+
+    `choices` settles a record conflict by its `file_id`; `collision_choices` settles a
+    `PathCollision` by its `CollisionKey`. A choice for something that is not a conflict or a
+    collision is ignored. Settling a record can dissolve a collision, so the collisions are
+    recomputed after the record choices, and the collision choices apply to what remains.
     """
     base_records: Mapping[str, ManifestRecord] = base or {}
     merged: dict[str, ManifestRecord] = {}
@@ -160,8 +169,31 @@ def merge_records(
         else:
             _merge_both_changed(file_id, base_record, local_record, remote_record, merged, conflicts, content_merges)
 
+    picks = choices or {}
+    unsettled: list[RecordConflict] = []
+    for conflict in conflicts:
+        if conflict.file_id in picks:
+            _settle_conflict(conflict, picks[conflict.file_id], merged, deleted, content_merges)
+        else:
+            unsettled.append(conflict)
+    conflicts = unsettled
+
     deduplicated: list[str] = []
     collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
+    chosen = collision_choices or {}
+    settled = [collision for collision in collisions if collision_key_of(collision) in chosen]
+    if settled:
+        losers = {
+            file_id
+            for collision in settled
+            for file_id in _losers(collision, chosen[collision_key_of(collision)], local, remote)
+        }
+        for file_id in losers:
+            merged.pop(file_id, None)
+        content_merges = [task for task in content_merges if task.file_id not in losers]
+        conflicts = [conflict for conflict in conflicts if conflict.file_id not in losers]
+        collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
+
     return RecordMergeResult(
         merged=MappingProxyType(merged),
         conflicts=tuple(conflicts),
@@ -170,6 +202,111 @@ def merge_records(
         deleted=tuple(sorted(deleted)),
         deduplicated=tuple(sorted(deduplicated)),
     )
+
+
+def record_path_of(conflict: RecordConflict) -> str:
+    """The path a record conflict is about: the first side that holds a record, or empty."""
+    record = conflict.local or conflict.remote or conflict.base
+    return "" if record is None else record.path
+
+
+def _settle_conflict(
+    conflict: RecordConflict,
+    choice: RecordChoice,
+    merged: dict[str, ManifestRecord],
+    deleted: list[str],
+    content_merges: list[ContentMergeTask],
+) -> None:
+    """Apply one record choice: the chosen side's record survives, or the path is untracked.
+
+    A modify/modify takes the chosen side's metadata only. The digest is still decided by the
+    three-way rule, so a content change the other side made survives the choice; only a content
+    change on both sides goes to the content merge (``docs/design/03-manifest.md``). A choice that
+    does not fit the conflict's kind is a caller error, not something to guess at.
+    """
+    if conflict.kind == "delete/modify":
+        if choice == "delete":
+            deleted.append(conflict.file_id)
+            return
+        if choice != "keep":
+            raise ValueError(f"a delete/modify conflict takes keep or delete, not {choice!r}")
+        survivor = conflict.local if conflict.local is not None else conflict.remote
+        if survivor is not None:
+            merged[conflict.file_id] = survivor
+        return
+    if choice == "drop" and conflict.kind == "add/add":
+        return
+    if choice not in ("local", "remote"):
+        raise ValueError(f"a {conflict.kind} conflict takes local or remote, not {choice!r}")
+    picked = conflict.local if choice == "local" else conflict.remote
+    if picked is None:
+        return
+    if conflict.kind == "modify/modify" and conflict.base is not None and conflict.local and conflict.remote:
+        _with_picked_metadata(
+            conflict.file_id, conflict.base, conflict.local, conflict.remote, picked, merged, content_merges
+        )
+        return
+    merged[conflict.file_id] = picked
+
+
+def _with_picked_metadata(
+    file_id: str,
+    base: ManifestRecord,
+    local: ManifestRecord,
+    remote: ManifestRecord,
+    picked: ManifestRecord,
+    merged: dict[str, ManifestRecord],
+    content_merges: list[ContentMergeTask],
+) -> None:
+    """The picked side's metadata, with the digest decided by the three-way rule."""
+    sha256, changed_on_both = _pick(base.sha256, local.sha256, remote.sha256)
+    if changed_on_both:
+        content_merges.append(
+            ContentMergeTask(
+                file_id=file_id,
+                base_sha256=base.sha256,
+                local_sha256=local.sha256,
+                remote_sha256=remote.sha256,
+                path=picked.path,
+                preset=picked.preset,
+                scope=picked.scope,
+                machine=picked.machine,
+                format=picked.format,
+            )
+        )
+        return
+    merged[file_id] = ManifestRecord.create(
+        file_id=file_id,
+        path=picked.path,
+        preset=picked.preset,
+        scope=picked.scope,
+        machine=picked.machine,
+        format=picked.format,
+        sha256=sha256,
+    )
+
+
+def collision_key_of(collision: PathCollision) -> CollisionKey:
+    """The key a collision is settled under: the same folded key the record merge groups by."""
+    return (collision.scope, collision.machine, collision_key(collision.path))
+
+
+def _losers(
+    collision: PathCollision,
+    choice: CollisionChoice,
+    local: Mapping[str, ManifestRecord],
+    remote: Mapping[str, ManifestRecord],
+) -> tuple[str, ...]:
+    """The file IDs a collision choice drops; the survivor is the smallest ID the chosen side holds.
+
+    A side that holds none of the colliding IDs leaves the path untracked, the same as `drop`.
+    """
+    if choice == "drop":
+        return collision.file_ids
+    side = local if choice == "local" else remote
+    survivors = [file_id for file_id in collision.file_ids if file_id in side]
+    keep = min(survivors) if survivors else None
+    return tuple(file_id for file_id in collision.file_ids if file_id != keep)
 
 
 def merge_manifests(base: Manifest | None, local: Manifest, remote: Manifest) -> RecordMergeResult:
