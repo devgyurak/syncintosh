@@ -76,7 +76,9 @@ guards the write regardless.
 2. Re-run the cycle from step 2 (collect → fetch → classify → merge). The conflicts are the ones
    that exist *now*; the pending state is not replayed.
 3. If there are no conflicts, the cycle completes as an ordinary sync and the pending state is cleared.
-4. Otherwise each conflict is offered for a decision. A decision is identified by a
+4. Otherwise each conflict is offered for a decision, once. A decision that settles some conflicts
+   reruns the cycle, and the conflicts it exposed are offered in the next round; a round that
+   answers nothing new stops the run with its conflicts pending. A decision is identified by a
    **fingerprint** of the conflict's place and its three side digests (the record's file ID,
    or the key path, plus the digests of the base, local, and remote sides). Decisions are never
    written to disk; they live for this run only.

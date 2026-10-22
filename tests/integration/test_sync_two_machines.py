@@ -20,6 +20,7 @@ from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
     CommitmentsCorrupt,
+    ConflictsNotCovered,
     ContentDigestMismatch,
     GitError,
     KeyGenerationMismatch,
@@ -48,7 +49,7 @@ from syncintosh.services.keys import (
     remote_commitments,
     rotate_repo,
 )
-from syncintosh.services.resolve import take_decision
+from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -1447,7 +1448,7 @@ def test_resolve_take_remote_settles_the_conflict_and_both_machines_converge(tmp
     _run(b)
 
     # when
-    report = _run(b, resolving=True, decide=take_decision("remote"))
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote")))
 
     # then — the remote's line is the outcome, B's live file follows, and nothing stays pending
     assert report.has_conflicts is False
@@ -1466,7 +1467,7 @@ def test_resolve_take_local_publishes_the_local_edit(tmp_path, memory_key_store)
     _run(b)
 
     # when
-    report = _run(b, resolving=True, decide=take_decision("local"))
+    report = _run(b, resolving=True, decide=decision(take_chooser("local")))
 
     # then — B's edit wins everywhere, including on A
     assert report.has_conflicts is False
@@ -1483,7 +1484,7 @@ def test_a_pick_whose_fingerprint_no_longer_matches_leaves_the_conflict_pending(
     _run(b)
 
     # when — the decision was made against some other conflict
-    report = _run(b, resolving=True, decide=lambda views: {"stale-fingerprint": "remote"})
+    report = _run(b, resolving=True, decide=lambda views, answered: {"stale-fingerprint": "remote"})
 
     # then — the conflict that the stale pick did not match stays, and the state stays pending
     assert report.has_conflicts is True
@@ -1500,7 +1501,7 @@ def test_a_declined_approval_publishes_nothing(tmp_path, memory_key_store) -> No
     _run(b)
 
     # when
-    report = _run(b, resolving=True, decide=take_decision("remote", approve=lambda views, picks: False))
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote"), approve=lambda views, picks: False))
 
     # then — the conflict is still there, nothing was written to the live file, and the pending holds
     assert report.has_conflicts is True
@@ -1514,7 +1515,7 @@ def test_resolve_with_nothing_pending_is_refused(tmp_path, memory_key_store) -> 
 
     # when & then
     with pytest.raises(PendingConflict):
-        _run(b, resolving=True, decide=take_decision("remote"))
+        _run(b, resolving=True, decide=decision(take_chooser("remote")))
 
 
 def test_a_push_that_loses_keeps_the_pending_state(tmp_path, memory_key_store) -> None:
@@ -1527,5 +1528,63 @@ def test_a_push_that_loses_keeps_the_pending_state(tmp_path, memory_key_store) -
 
     # when & then — the merge cannot be published, so the conflict must still be settleable
     with pytest.raises(GitError):
-        _run(b, transport=FailingPushTransport(b.repo), resolving=True, decide=take_decision("remote"))
+        _run(b, transport=FailingPushTransport(b.repo), resolving=True, decide=decision(take_chooser("remote")))
     assert DirectoryPendingStore(b.pending).is_pending() is True
+
+
+def test_a_scoped_resolve_that_names_no_conflict_publishes_nothing(tmp_path, memory_key_store) -> None:
+    # given — B is stopped on a conflict on .zshrc
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when — the run is scoped to another file, so the conflict has no decision
+    with pytest.raises(ConflictsNotCovered):
+        _run(b, resolving=True, decide=decision(scoped_chooser((".gitconfig",), (), home=str(b.home))))
+
+    # then — nothing is written, and the conflict is still pending
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+
+
+def test_a_scoped_resolve_naming_the_conflict_settles_it(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=decision(scoped_chooser((".zshrc",), (), home=str(b.home))))
+
+    # then
+    assert report.has_conflicts is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM B\nthree\n"
+
+
+def test_a_decision_is_asked_again_for_a_conflict_that_was_not_yet_answered(tmp_path, memory_key_store) -> None:
+    # given — two keys conflict in one settings file; the first decision answers only the first key
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15").replace("4\n", "5\n"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "12").replace("4\n", "6\n"), encoding="utf-8")
+    _run(b)
+    asked: list[int] = []
+
+    def first_key_only(views, answered):
+        pending = [view for view in views if view.fingerprint not in answered]
+        asked.append(len(pending))
+        return {pending[0].fingerprint: "remote"} if pending else None
+
+    # when
+    report = _run(b, resolving=True, decide=first_key_only)
+
+    # then — the second round asks about the key the first round left open, and both keys settle
+    assert report.has_conflicts is False
+    assert asked == [2, 1]
+    assert '"editor.fontSize": 15' in _read_jsonc(b)
+    assert '"editor.tabSize": 5' in _read_jsonc(b)

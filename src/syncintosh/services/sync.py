@@ -74,7 +74,14 @@ from syncintosh.core.ports import (
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
-from syncintosh.core.record_merge import PathCollision, RecordConflict, RecordMergeResult, merge_manifests
+from syncintosh.core.record_merge import (
+    PathCollision,
+    RecordConflict,
+    RecordMergeResult,
+    collision_key_of,
+    merge_manifests,
+    record_path_of,
+)
 from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
 from syncintosh.core.resolution import (
     Choice,
@@ -88,7 +95,7 @@ from syncintosh.core.resolution import (
     digest_of,
     fingerprint,
 )
-from syncintosh.core.tree import Absent, KeyPath, Leaf, Scalar, Tree, path_label
+from syncintosh.core.tree import KeyPath, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
@@ -808,18 +815,21 @@ class Resolution:
     """How one cycle treats its conflicts. A plain `sync` carries none of this.
 
     `resolving` marks a cycle that `resolve` runs: it may start from a pending state, and it clears
-    that state once a push lands. `decide` is asked for the conflicts a first pass finds. An answer
-    reruns the cycle with its `picks`, and each pick applies only to a conflict with the same
-    fingerprint; a conflict the picks do not cover is recorded as a new pending state, so the run
-    stops there (``docs/design/01-sync-model.md``, resolve).
+    that state once a push lands. `decide` is asked, every time a pass finds conflicts, for the ones
+    the run has not answered yet. Its answer reruns the cycle with the picks so far; each pick applies
+    only to a conflict with the same fingerprint. A pass that finds nothing new to answer records the
+    conflicts as pending and stops (``docs/design/01-sync-model.md``, resolve). `rounds` bounds the
+    reruns; every rerun answers at least one conflict the run had not answered before.
     """
 
     picks: Picks = MappingProxyType({})
     decide: Decide | None = None
     resolving: bool = False
+    rounds: int = 0
 
 
 NO_RESOLUTION: Final = Resolution()
+MAX_RESOLVE_ROUNDS: Final = 64
 
 
 @dataclass(frozen=True)
@@ -845,15 +855,28 @@ def _readable(data: bytes) -> str:
     return "(binary)" if text is None else text
 
 
-def _leaf_text(leaf: Leaf) -> str:
-    """A leaf as a person reads it: a JSON scalar, or a marker for a structure or a missing key."""
-    match leaf:
-        case Absent():
-            return "(absent)"
-        case Scalar(value=value):
-            return json.dumps(value)
-        case _:
-            return "(structure)"
+def _subtree(tree: Tree, path: KeyPath) -> dict[KeyPath, Node]:
+    """Everything a side holds at `path` or beneath it, keyed relative to `path`.
+
+    A side may hold a whole object at a key where the other holds a scalar; the object is its value,
+    so it is read and digested as a whole, not as the leaf at `path` alone.
+    """
+    return {key[len(path) :]: node for key, node in tree.entries.items() if key[: len(path)] == path}
+
+
+def _subtree_text(subtree: dict[KeyPath, Node]) -> str:
+    """A subtree as a person reads it: its JSON value, or a marker when the side has nothing there."""
+    if not subtree:
+        return "(absent)"
+    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _subtree_digest(subtree: dict[KeyPath, Node]) -> str:
+    return digest_of(tuple(sorted(subtree.items(), key=lambda item: item[0])))
+
+
+def _whole_fingerprint(file_id: str, base: bytes, local: bytes, remote: bytes) -> str:
+    return fingerprint(file_id, None, _sha256(base), _sha256(local), _sha256(remote))
 
 
 def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: bytes) -> ConflictView:
@@ -870,7 +893,7 @@ def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: byte
         file_id=file_id,
         path=path,
         key_path=None,
-        fingerprint=fingerprint(file_id, None, _sha256(base), _sha256(local), _sha256(remote)),
+        fingerprint=_whole_fingerprint(file_id, base, local, remote),
         base_text=_readable(base),
         local_text=local_text,
         remote_text=remote_text,
@@ -893,18 +916,24 @@ def _key_view(
     file_id: str, path: str, key_path: KeyPath, base_tree: Tree, local_tree: Tree, remote_tree: Tree
 ) -> ConflictView:
     """One key path as a choice. The digests of its three leaves identify it."""
-    base_leaf = base_tree.value(key_path)
-    local_leaf = local_tree.value(key_path)
-    remote_leaf = remote_tree.value(key_path)
+    base_part = _subtree(base_tree, key_path)
+    local_part = _subtree(local_tree, key_path)
+    remote_part = _subtree(remote_tree, key_path)
     return ConflictView(
         kind="key",
         file_id=file_id,
         path=path,
         key_path=key_path,
-        fingerprint=fingerprint(file_id, key_path, digest_of(base_leaf), digest_of(local_leaf), digest_of(remote_leaf)),
-        base_text=_leaf_text(base_leaf),
-        local_text=_leaf_text(local_leaf),
-        remote_text=_leaf_text(remote_leaf),
+        fingerprint=fingerprint(
+            file_id,
+            key_path,
+            _subtree_digest(base_part),
+            _subtree_digest(local_part),
+            _subtree_digest(remote_part),
+        ),
+        base_text=_subtree_text(base_part),
+        local_text=_subtree_text(local_part),
+        remote_text=_subtree_text(remote_part),
     )
 
 
@@ -934,10 +963,13 @@ def _side_pick(pick: Choice | None) -> Side | None:
             return None
 
 
-def _checked(presets: _Presets, data: bytes, path: str, whole: ConflictView) -> _Settled:
+def _checked(
+    presets: _Presets, data: bytes, path: str, file_id: str, base: bytes, local: bytes, remote: bytes
+) -> _Settled:
     """A merged result passes its syntax check whoever decided it; a failure is a conflict again."""
     if _syntax_ok(presets, data, path):
         return _Settled(data=data)
+    whole = _whole_view(file_id, path, base, local, remote)
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
@@ -961,14 +993,13 @@ def _settle_content(
     however it was settled, goes through the syntax check.
     """
     adapter = presets.adapter_for(fmt)
-    whole = _whole_view(file_id, path, base, local, remote)
-    side = _side_pick(picks.get(whole.fingerprint))
+    side = _side_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
     if side is not None:
         merged = merge_content(base, local, remote, driver, adapter, choice=side)
-        return _checked(presets, merged.data, path, whole)
+        return _checked(presets, merged.data, path, file_id, base, local, remote)
     first = merge_content(base, local, remote, driver, adapter)
     if not first.conflicted:
-        return _checked(presets, first.data, path, whole)
+        return _checked(presets, first.data, path, file_id, base, local, remote)
     key_choices: dict[KeyPath, Side] = {}
     for view in _content_views(file_id, path, base, local, remote, adapter, first.conflict_paths):
         key_side = _side_pick(picks.get(view.fingerprint))
@@ -976,14 +1007,9 @@ def _settle_content(
             key_choices[view.key_path] = key_side
     merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
     if not merged.conflicted:
-        return _checked(presets, merged.data, path, whole)
+        return _checked(presets, merged.data, path, file_id, base, local, remote)
     views = _content_views(file_id, path, base, local, remote, adapter, merged.conflict_paths)
     return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
-
-
-def _record_path(conflict: RecordConflict) -> str:
-    record = conflict.local or conflict.remote or conflict.base
-    return "" if record is None else record.path
 
 
 def _record_fingerprint(conflict: RecordConflict) -> str:
@@ -996,10 +1022,6 @@ def _collision_id(collision: PathCollision) -> str:
     return f"collision:{collision.scope}:{collision.machine}:{collision_key(collision.path)}"
 
 
-def _collision_key(collision: PathCollision) -> CollisionKey:
-    return (collision.scope, collision.machine, collision_key(collision.path))
-
-
 def _collision_fingerprint(collision: PathCollision, local: Manifest, remote: Manifest) -> str:
     """A collision's identity is its folded path; its digests are the claims each side makes on it."""
     local_claims = tuple(local.records.get(file_id) for file_id in collision.file_ids)
@@ -1009,17 +1031,42 @@ def _collision_fingerprint(collision: PathCollision, local: Manifest, remote: Ma
     )
 
 
+def _record_text(record: ManifestRecord | None) -> str:
+    """A record's metadata as a person reads it. Its content digest is summarised, not printed."""
+    if record is None:
+        return "(absent)"
+    machine = "-" if record.machine is None else record.machine
+    return f"path={record.path} scope={record.scope} machine={machine} format={record.format} preset={record.preset}"
+
+
+def _content_summary(conflict: RecordConflict) -> str:
+    """Which side changed the content, so a choice of metadata can say what it keeps."""
+    base, local, remote = conflict.base, conflict.local, conflict.remote
+    if base is None or local is None or remote is None:
+        return "content: the records differ between the sides"
+    changed = [name for name, record in (("local", local), ("remote", remote)) if record.sha256 != base.sha256]
+    if not changed:
+        return "content: unchanged on both sides"
+    if len(changed) == 2:
+        return "content: changed on both sides, merged by content"
+    return f"content: changed on {changed[0]} only; it is kept whichever side's metadata is picked"
+
+
 def _record_views(result: RecordMergeResult, local: Manifest, remote: Manifest) -> tuple[ConflictView, ...]:
     """The record and collision conflicts of a merge, as choices a person can make on them."""
     views = [
         ConflictView(
             kind=conflict.kind,
             file_id=conflict.file_id,
-            path=_record_path(conflict),
+            path=record_path_of(conflict),
             key_path=None,
             fingerprint=_record_fingerprint(conflict),
             local_present=conflict.local is not None,
             remote_present=conflict.remote is not None,
+            base_text=_record_text(conflict.base),
+            local_text=_record_text(conflict.local),
+            remote_text=_record_text(conflict.remote),
+            diff=_content_summary(conflict),
         )
         for conflict in result.conflicts
     ]
@@ -1065,7 +1112,7 @@ def _record_choices(
     for collision in first.collisions:
         pick = picks.get(_collision_fingerprint(collision, local, remote))
         if pick is not None:
-            collisions[_collision_key(collision)] = _as_collision_choice(pick)
+            collisions[collision_key_of(collision)] = _as_collision_choice(pick)
     return records, collisions
 
 
@@ -1170,14 +1217,16 @@ def _merge_diverged(
     if remote_manifest is None:
         raise GitError("the remote branch has no manifest; refusing to merge")
     first = merge_manifests(base_manifest, local_manifest, remote_manifest)
-    record_choices, collision_choices = _record_choices(first, local_manifest, remote_manifest, resolution.picks)
-    result = merge_manifests(
-        base_manifest,
-        local_manifest,
-        remote_manifest,
-        choices=record_choices,
-        collision_choices=collision_choices,
-    )
+    result = first
+    if resolution.picks:
+        record_choices, collision_choices = _record_choices(first, local_manifest, remote_manifest, resolution.picks)
+        result = merge_manifests(
+            base_manifest,
+            local_manifest,
+            remote_manifest,
+            choices=record_choices,
+            collision_choices=collision_choices,
+        )
     conflicts = list(_record_conflicts(result))
     views = list(_record_views(result, local_manifest, remote_manifest))
 
@@ -1776,11 +1825,27 @@ def sync(
 
 
 def _answer(views: tuple[ConflictView, ...], resolution: Resolution) -> Picks | None:
-    """Ask for decisions on the conflicts a pass found; `None` means no decision was made."""
-    if resolution.decide is None or not views:
+    """The picks the next pass should use, after asking for decisions on the conflicts this pass found.
+
+    `None` when there is no one to ask, or when the answer adds nothing the run has not already
+    decided: then the conflicts cannot move, and the run stops with them pending.
+    """
+    if resolution.decide is None or not views or resolution.rounds >= MAX_RESOLVE_ROUNDS:
         return None
-    answer = resolution.decide(views)
-    return None if answer is None else MappingProxyType(dict(answer))
+    fresh = resolution.decide(views, resolution.picks)
+    if not fresh or not any(key not in resolution.picks for key in fresh):
+        return None
+    return MappingProxyType({**resolution.picks, **fresh})
+
+
+def _next(resolution: Resolution, picks: Picks) -> Resolution:
+    """The resolution for the rerun that follows an answer: the same run, with its picks and one round more."""
+    return Resolution(
+        picks=picks,
+        decide=resolution.decide,
+        resolving=resolution.resolving,
+        rounds=resolution.rounds + 1,
+    )
 
 
 def _cycle(
@@ -1875,7 +1940,7 @@ def _cycle(
             views = tuple(view for item in found for view in item.views)
             answer = _answer(views, resolution)
             if answer is not None:
-                return again(Resolution(picks=answer, resolving=resolution.resolving), _restarted)
+                return again(_next(resolution, answer), _restarted)
             stale_conflicts = tuple(item.record for item in found)
             pending_store.record(
                 PendingState.create(
@@ -1939,7 +2004,7 @@ def _cycle(
     if outcome.conflicts:
         answer = _answer(outcome.views, resolution)
         if answer is not None:
-            return again(Resolution(picks=answer, resolving=resolution.resolving), _restarted)
+            return again(_next(resolution, answer), _restarted)
         pending_store.record(
             PendingState.create(
                 local_commit=local_commit or "",

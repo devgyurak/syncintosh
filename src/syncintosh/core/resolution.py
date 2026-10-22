@@ -91,7 +91,8 @@ class ConflictView:
     diff: str = field(default="", repr=False)
 
 
-# Called with the conflicts a cycle found; returns the picks, or `None` to stop without publishing.
-# The views carry plaintext (`*_text`, `diff`). A decision that sends any of it to a model or a
-# network must mask it first (``AGENTS.md`` §3.5); the interactive chooser only shows it.
-Decide = Callable[[tuple[ConflictView, ...]], Picks | None]
+# Called with every conflict the cycle currently finds, and the picks this run already made. It
+# returns the new picks (never the answered ones again), or `None` to stop without publishing. The
+# views carry plaintext (`*_text`, `diff`). A decision that sends any of it to a model or a network
+# must mask it first (``AGENTS.md`` §3.5); the interactive chooser only shows it.
+Decide = Callable[[tuple[ConflictView, ...], Picks], Picks | None]

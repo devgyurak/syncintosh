@@ -548,28 +548,45 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
 
 @app.command()
 def resolve(
-    take: str | None = typer.Option(None, "--take", help="local | remote: settle the conflicts to that side"),
+    take: str | None = typer.Option(None, "--take", help="local | remote: settle every pending conflict to that side"),
+    local: list[str] | None = typer.Option(
+        None, "--local", help="settle the conflict on this path to local (repeatable)"
+    ),
+    remote: list[str] | None = typer.Option(
+        None, "--remote", help="settle the conflict on this path to remote (repeatable)"
+    ),
     yes: bool = typer.Option(False, "--yes", help="publish without the approval prompt"),
-    paths: list[str] | None = typer.Argument(None, help="with --take, settle only the conflicts on these paths"),
 ) -> None:
-    """Settle the conflicts a stopped sync left pending, then sync. Exits 1 when conflicts remain."""
-    from syncintosh.services.resolve import take_decision
+    """Settle the conflicts a stopped sync left pending, then sync. Exits 1 when conflicts remain.
+
+    Name a side for every pending conflict: `--take local|remote`, or a `--local`/`--remote` path for
+    each one. A partial choice publishes nothing.
+    """
+    from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
     from syncintosh.system.config import load_config
     from syncintosh.system.paths import MachinePaths
 
-    if take not in ("local", "remote"):
+    scoped = bool(local or remote)
+    if take is not None and take not in ("local", "remote"):
         raise typer.BadParameter("--take must be `local` or `remote`")
+    if (take is None) == (not scoped):
+        raise typer.BadParameter("name a side: `--take local|remote`, or `--local PATH` / `--remote PATH`")
     machine = MachinePaths.default()
     approve = None if yes else _confirm_resolution
     try:
         config = load_config(machine.config_file)
-        decide = take_decision(take, paths=tuple(paths or ()), approve=approve)
-        report = sync_service(**_sync_ports(config, machine), resolving=True, decide=decide)
+        if take is not None:
+            choose = take_chooser(take)
+        else:
+            choose = scoped_chooser(tuple(local or ()), tuple(remote or ()), home=str(machine.home))
+        report = sync_service(**_sync_ports(config, machine), resolving=True, decide=decision(choose, approve=approve))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     except DomainError as exc:
         _fail(exc)
         return
     _render(report, config)
-    if report.has_conflicts:
+    if report.has_conflicts or report.needs_adopt:
         typer.echo("nothing was published; the conflicts that remain are still pending", err=True)
         raise typer.Exit(code=1)
 
