@@ -217,6 +217,15 @@ class ConfigError(DomainError):
     """The machine's `config.json` is missing, unreadable, or not a valid configuration."""
 
 
+class PruneRefused(DomainError):
+    """`key prune` refused a generation reachable history still needs.
+
+    Generations are retained by default, and prune frees almost nothing: without rewriting history
+    every commit stays reachable, so the only generation it can drop is one that was published but
+    never used — an aborted rotation (``docs/design/05-key-generations.md``).
+    """
+
+
 class ScanAllowCorrupt(DomainError):
     """The machine-local scan allowlist is unreadable or not a valid allowlist.
 

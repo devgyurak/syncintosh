@@ -13,12 +13,18 @@ from typing import cast
 import pytest
 
 from syncintosh.core.commitments import dumps_commitments, loads_commitments
-from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
-from syncintosh.core.ports import GitTransport, KeyStore
+from syncintosh.core.errors import (
+    CommitmentsCorrupt,
+    InitRefused,
+    KeyGenerationMismatch,
+    MasterKeyUnwrapError,
+    PruneRefused,
+)
+from syncintosh.core.ports import GitTransport, KeyStore, SyncLock
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import export_ring, import_ring, init_new_repo, published_commitments
+from syncintosh.services.keys import export_ring, import_ring, init_new_repo, prune_generation, published_commitments
 
 
 class _StubTransport:
@@ -539,3 +545,100 @@ def test_export_discards_a_blob_that_does_not_verify(memory_key_store) -> None:
             store=memory_key_store({1: KEY_ONE}), codec=_codec(), live=live, path=RECOVERY_PATH, passphrase=PASSPHRASE
         )
     assert RECOVERY_PATH not in live.files
+
+
+class _PruneTransport:
+    """The `GitTransport` calls `prune_generation` makes, with the reachable generations fixed."""
+
+    def __init__(self, *, head_id: str | None, remote_id: str | None, generations: tuple[int, ...]) -> None:
+        self._head_id = head_id
+        self._remote_id = remote_id
+        self._generations = generations
+
+    def fetch(self, remote: str, branch: str) -> None:
+        return None
+
+    def head(self) -> str | None:
+        return self._head_id
+
+    def resolve(self, rev: str) -> str | None:
+        return self._remote_id
+
+    def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
+        return self._generations
+
+
+class _NullLock:
+    def acquire(self) -> None:
+        return None
+
+    def release(self) -> None:
+        return None
+
+
+def _prune(store, transport, generation: int) -> None:
+    prune_generation(
+        transport=cast(GitTransport, transport),
+        store=store,
+        lock=cast(SyncLock, _NullLock()),
+        remote="a remote",
+        branch="main",
+        generation=generation,
+    )
+
+
+def test_prune_drops_a_generation_no_reachable_object_uses(memory_key_store) -> None:
+    # given — the ring holds a generation reachable history never used (an aborted rotation)
+    store = memory_key_store({1: KEY_ONE, 2: KEY_TWO})
+    transport = _PruneTransport(head_id="a" * 40, remote_id="a" * 40, generations=(1,))
+
+    # when
+    _prune(store, transport, 2)
+
+    # then
+    assert store.generations() == (1,)
+
+
+def test_prune_refuses_a_generation_reachable_history_uses(memory_key_store) -> None:
+    # given — a reachable object is encrypted under generation 2
+    store = memory_key_store({1: KEY_ONE, 2: KEY_TWO})
+    transport = _PruneTransport(head_id="a" * 40, remote_id="b" * 40, generations=(1, 2))
+
+    # when & then
+    with pytest.raises(PruneRefused):
+        _prune(store, transport, 2)
+    assert store.get(2) == KEY_TWO
+
+
+def test_prune_refuses_the_master_generation(memory_key_store) -> None:
+    # given — a ring without generation 1 could not be exported for recovery
+    store = memory_key_store({1: KEY_ONE})
+    transport = _PruneTransport(head_id="a" * 40, remote_id=None, generations=())
+
+    # when & then
+    with pytest.raises(PruneRefused):
+        _prune(store, transport, 1)
+    assert store.get(1) == KEY_ONE
+
+
+def test_prune_is_a_no_op_for_a_generation_this_machine_does_not_hold(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY_ONE})
+    transport = _PruneTransport(head_id="a" * 40, remote_id=None, generations=(1,))
+
+    # when
+    _prune(store, transport, 5)
+
+    # then
+    assert store.generations() == (1,)
+
+
+def test_prune_refuses_when_no_reachable_tip_can_be_read(memory_key_store) -> None:
+    # given — an unborn branch and a remote that names no branch
+    store = memory_key_store({1: KEY_ONE, 2: KEY_TWO})
+    transport = _PruneTransport(head_id=None, remote_id=None, generations=())
+
+    # when & then — with nothing to compare against, "unreferenced" cannot be established
+    with pytest.raises(PruneRefused):
+        _prune(store, transport, 2)
+    assert store.get(2) == KEY_TWO

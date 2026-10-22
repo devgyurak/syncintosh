@@ -91,7 +91,15 @@ KDF it will not run **before** spending work on it:
 - **Generations are retained by default.** There is no automatic expiry.
 - **Prune is explicit** (`key prune <generation>`) and must refuse while the generation is
   still needed. *Needed* means reachable: some commit reachable from this machine's `HEAD` or
-  from `origin/<branch>` has a tree holding an object encrypted under it.
+  from `origin/<branch>` has a tree holding an envelope encrypted under it. Generation 1 — the
+  master generation, without which the ring cannot be exported — is refused outright.
+- **The reachability walk reads no key.** `key_id` is cleartext in the envelope header
+  ([04-envelope-v1.md](04-envelope-v1.md)), so `git rev-list --objects <HEAD> <origin/branch>`
+  lists every reachable blob, the `manifest.enc` and `objects/<id>.enc` slots are kept, and one
+  `cat-file --batch` reads each 5-byte header. Git prints one path per unique blob; because every
+  envelope uses a fresh random nonce, one ciphertext lives at exactly one path, so the listing
+  reports the slot path. `keys/*.wrap` is deliberately **not** walked: a wrap's header names the
+  generation it is wrapped *under*, not a stored object's generation.
 - **Reachability frees almost nothing.** Without rewriting history, every commit stays
   reachable, so the only generation prune can drop is one that was published but never used
   (an aborted rotation). Say this in the `--help` text, so nobody expects prune to shrink the
@@ -209,7 +217,5 @@ objects would fail authentication on every other machine.
 
 - Whether `key prune` should also garbage-collect unreferenced `keys/*.wrap` files; the wrap
   is only useful while the generation it wraps under is live.
-- The exact reachability walk (commit graph filter, or a per-commit manifest read) — deferred
-  to the rotation slice, together with the re-encryption loop that #2 and #8 scope.
 - Whether the ring should carry a monotonic "generation created" timestamp in the export blob
   for human diagnostics. It is not needed for correctness.

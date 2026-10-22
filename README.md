@@ -38,6 +38,11 @@ other format adapters, LLM assistance, and conflict resolution are still to come
   import`. Rotation does **not** make old commits unreadable — anyone who already has the old key
   can still read history, and a machine that held the old key keeps its access. On a compromise,
   rotate out of band or migrate to a new repo; do not rely on rotation to remove a machine.
+- **`syncintosh key prune <generation>` frees almost nothing.** Generations are retained by
+  default, and reachability only lets prune drop a generation that was published but never used
+  (an aborted rotation) — every commit stays reachable unless history is rewritten, which
+  syncintosh never does. Prune refuses generation 1 and any generation a reachable object or the
+  manifest still uses.
 
 ## Development
 

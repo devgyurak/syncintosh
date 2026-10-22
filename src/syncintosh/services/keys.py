@@ -38,6 +38,7 @@ from syncintosh.core.errors import (
     KeyStoreCorrupt,
     MasterKeyUnwrapError,
     PendingConflict,
+    PruneRefused,
 )
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest
 from syncintosh.core.manifest_codec import loads_manifest
@@ -562,6 +563,46 @@ def _read_manifest(transport: GitTransport, cipher: Cipher, commit: str) -> Mani
     return loads_manifest(cipher.open(blob, domain="manifest", file_id=""))
 
 
+def prune_generation(
+    *,
+    transport: GitTransport,
+    store: KeyStore,
+    lock: SyncLock,
+    remote: str,
+    branch: str,
+    generation: int,
+) -> None:
+    """Drop a generation no reachable commit uses; refuse one that is still needed.
+
+    A generation is needed when a reachable commit — this machine's HEAD or the remote's branch
+    tip — holds an envelope encrypted under it, or when it is the manifest's current generation.
+    The `key_id` is cleartext, so this is decided **without any key**
+    (``docs/design/05-key-generations.md``). Reachability frees almost nothing: without rewriting
+    history every commit stays reachable, so the only generation this can drop is one that was
+    published but never used — an aborted rotation.
+    """
+    if generation == 1:
+        # The master generation: a ring without it cannot be exported for recovery.
+        raise PruneRefused("generation 1 is the master generation and cannot be pruned")
+    lock.acquire()
+    try:
+        transport.fetch(remote, branch)
+        tips = tuple(tip for tip in (transport.head(), transport.resolve(remote_ref(branch))) if tip is not None)
+        if not tips:
+            # No reachable history could be read (an unborn branch, or a branch name the remote does
+            # not use): with nothing to compare against, "unreferenced" cannot be established, so
+            # nothing may be dropped.
+            raise PruneRefused("no reachable history to check against; nothing can be pruned safely")
+        if generation in transport.generations_in_reachable_objects(tips):
+            raise PruneRefused(f"generation {generation} is still referenced by reachable history")
+        if store.get(generation) is None:
+            # Nothing to drop: this machine never held it, or already dropped it.
+            return
+        store.drop(generation)
+    finally:
+        lock.release()
+
+
 def _object_plaintexts(transport: GitTransport, cipher: Cipher, commit: str, manifest: Manifest) -> dict[str, bytes]:
     """Every record's plaintext, read and digest-checked, so a rotation re-seals the real content."""
     contents: dict[str, bytes] = {}
@@ -581,6 +622,7 @@ __all__ = [
     "export_ring",
     "import_ring",
     "init_new_repo",
+    "prune_generation",
     "published_commitments",
     "remote_commitments",
     "rotate_repo",

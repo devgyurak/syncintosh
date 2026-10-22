@@ -388,6 +388,18 @@ class GitTransport(Protocol):
         """Push `commit` to `branch` on `remote`, classified for the retry rule."""
         ...
 
+    def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
+        """The distinct key generations in every stored envelope reachable from `tips`, ascending.
+
+        `key_id` is cleartext in the envelope header (``docs/design/04-envelope-v1.md``), so
+        reachability is computed **without any key** — which is what lets `key prune` refuse a
+        generation a reachable commit still needs (``docs/design/05-key-generations.md``). The
+        walk covers `manifest.enc` and every `objects/<id>.enc` reachable from the tips, never a
+        `keys/<id>.wrap` (a wrap's header names the generation it is wrapped *under*, not a stored
+        object's generation). An empty tuple means no stored ciphertext is reachable.
+        """
+        ...
+
 
 @runtime_checkable
 class SyncLock(Protocol):

@@ -24,6 +24,7 @@ from syncintosh.core.errors import (
     GitError,
     KeyGenerationMismatch,
     PendingConflict,
+    PruneRefused,
     SecretScanError,
     UnknownKeyGeneration,
 )
@@ -40,6 +41,7 @@ from syncintosh.services.keys import (
     export_ring,
     import_ring,
     init_new_repo,
+    prune_generation,
     remote_commitments,
     rotate_repo,
 )
@@ -922,6 +924,54 @@ def test_rotate_refuses_to_rewind_an_unpushed_collect_commit(tmp_path, memory_ke
     with pytest.raises(GitError):
         _rotate(a)
     assert _git(a.repo, "rev-parse", "HEAD").strip() == before
+
+
+# --------------------------------------------------------------------------- key prune
+
+
+def _prune(machine: Machine, generation: int, *, transport: GitCLITransport | None = None) -> None:
+    active = transport or GitCLITransport(machine.repo)
+    prune_generation(
+        transport=active,
+        store=machine.store,
+        lock=FileLock(machine.lock, timeout_seconds=5),
+        remote=machine.remote,
+        branch=active.branch() or BRANCH,
+        generation=generation,
+    )
+
+
+def test_prune_refuses_a_generation_a_reachable_object_uses(tmp_path, memory_key_store) -> None:
+    # given — A rotated, so HEAD's objects are encrypted under generation 2
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a)
+
+    # when & then — reachable history still needs generation 2
+    with pytest.raises(PruneRefused):
+        _prune(a, 2)
+    assert a.store.get(2) is not None
+
+
+def test_prune_refuses_the_master_generation(tmp_path, memory_key_store) -> None:
+    # given — a ring without generation 1 could not be exported for recovery
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when & then
+    with pytest.raises(PruneRefused):
+        _prune(a, 1)
+    assert a.store.get(1) is not None
+
+
+def test_prune_drops_a_generation_no_reachable_object_uses(tmp_path, memory_key_store) -> None:
+    # given — a stray generation a crashed rotation left behind
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    a.store.put(2, bytes(range(32, 64)))
+
+    # when
+    _prune(a, 2)
+
+    # then
+    assert a.store.generations() == (1,)
 
 
 def test_collected_and_applied_files_are_regular_files(tmp_path, memory_key_store) -> None:

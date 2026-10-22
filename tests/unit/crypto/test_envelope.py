@@ -302,6 +302,33 @@ def test_the_pinned_rejection_vectors_raise(memory_key_store, case) -> None:
         envelope.decrypt(bytes.fromhex(case["blob"]), file_id=case["file_id"], keys=store, domain=case["domain"])
 
 
+def test_header_generation_reads_the_key_id_without_a_key() -> None:
+    # given
+    blob = envelope.encrypt(b"payload", file_id=FILE_ID, key=KEY, key_id=KEY_ID, domain="object")
+
+    # when
+    generation = envelope.header_generation(blob)
+
+    # then
+    assert generation == KEY_ID
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        b"",
+        b"\x01\x00\x00",
+        bytes([2]) + (1).to_bytes(4, "big"),
+        bytes([1]) + bytes(4),
+        b"not an envelope at all",
+    ],
+    ids=["empty", "short", "unknown_version", "generation_zero", "junk"],
+)
+def test_header_generation_returns_none_for_a_non_envelope(blob) -> None:
+    # when & then
+    assert envelope.header_generation(blob) is None
+
+
 @given(plaintext=st.binary(max_size=256), file_id=HEX32)
 def test_arbitrary_plaintext_and_file_id_roundtrip(plaintext, file_id, memory_key_store) -> None:
     # given

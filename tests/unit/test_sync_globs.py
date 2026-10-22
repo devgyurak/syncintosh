@@ -79,6 +79,9 @@ class _UnusedTransport:
     def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
         raise AssertionError("unused")
 
+    def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
+        raise AssertionError("unused")
+
 
 class _UnusedCipher:
     """A `Cipher` whose every method fails: a refused record is never decrypted."""

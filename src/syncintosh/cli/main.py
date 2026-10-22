@@ -22,6 +22,7 @@ from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
 from syncintosh.services import export_ring as export_ring_service
 from syncintosh.services import import_ring as import_ring_service
+from syncintosh.services import prune_generation as prune_generation_service
 from syncintosh.services import remote_commitments as remote_commitments_service
 from syncintosh.services import rotate_repo as rotate_repo_service
 from syncintosh.services import sync as sync_service
@@ -224,6 +225,37 @@ def key_import(path: Path = typer.Argument(..., help="a wrapped ring written by 
         _fail(exc)
         return
     typer.echo(f"imported the key ring from {path}")
+
+
+@key_app.command("prune")
+def key_prune(generation: int = typer.Argument(..., help="the generation id to drop from this machine")) -> None:
+    """Drop a key generation no reachable commit uses.
+
+    Reachability frees almost nothing: without rewriting history every commit stays reachable, so
+    the only generation this can drop is one that was published but never used — an aborted
+    rotation. The master generation 1, and any generation a reachable object or the manifest still
+    uses, are refused. Prune does not shrink the ring; to revoke a machine's access, migrate to a
+    new repo.
+    """
+    from syncintosh.system.config import load_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        ports = _sync_ports(config, paths)
+        prune_generation_service(
+            transport=ports["transport"],
+            store=ports["store"],
+            lock=ports["lock"],
+            remote=config.remote,
+            branch=ports["branch"],
+            generation=generation,
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"generation {generation} is not needed by reachable history")
 
 
 @app.command()
