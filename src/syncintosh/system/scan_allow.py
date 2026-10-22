@@ -13,7 +13,7 @@ This is that way out, and it is deliberately narrow:
   what not to scan, so it lives beside the apply ledger, outside the repo (``AGENTS.md`` §3.3),
   and `config.json` keeps its "non-secret values only" invariant (``docs/design/README.md``).
 * An entry names a **(path, pattern label, fingerprint)**, never raw text. The fingerprint is an
-  HMAC — keyed with a random per-machine key — of the matched span, so the file stores no
+  HMAC — keyed with a random per-machine key — of the matched **line**, so the file stores no
   plaintext. A bare digest would be reversible for a *short* value (a `sha256("pa")` can simply be
   looked up); a keyed one cannot be. The keying is what makes a fingerprint safe to put in a
   **refusal message or a log**; it says nothing to someone who can read this 0600 file, who by
@@ -55,14 +55,21 @@ KEY_BYTES: Final = 32
 # shape the scanner would never produce (and therefore never match).
 _FINGERPRINT_RE = re.compile(rf"[0-9a-f]{{{FINGERPRINT_HEX_LEN}}}")
 
-# The **only** patterns whose matches may be allowed. An allowlist entry is safe when the matched
-# span *is* the credential, because then the fingerprint is specific to that value; it is unsafe when
-# the pattern matches a fixed piece of text that stands in for any credential. The PEM header
-# (`-----BEGIN … PRIVATE KEY-----`) is the dangerous one: it is identical in every private key, so one
-# allowed entry would pass every key in the file forever. Since a new pattern's shape cannot be
-# judged in advance, the set is an explicit allowlist and everything else fails closed — an
-# unlisted label is refused even if a hand-edited file names it.
-ALLOWABLE_LABELS: Final = frozenset({"URL with credentials"})
+# The pattern labels the allowlist may name. They live **here**, with the safety judgement, rather
+# than in the pattern tables: a label is allowlistable when its match contains the credential itself,
+# so the fingerprint is specific to that one value and allowing it cannot pass a different one. A
+# label whose match is fixed text standing in for any credential — the PEM header — must never be
+# allowlistable. `secret_scan` imports these for its tables, so the two cannot drift, and
+# `test_every_allowable_label_is_a_real_pattern_label` still checks each names a pattern that exists.
+#
+# Since a new pattern's shape cannot be judged in advance, a label that is not listed here fails
+# **closed**: an unlisted label is refused even if a hand-edited allowlist names it.
+URL_CREDENTIALS_LABEL: Final = "URL with credentials"
+BASIC_LABEL: Final = "HTTP Basic credential"
+BEARER_LABEL: Final = "HTTP Bearer credential"
+AUTHORIZATION_LABEL: Final = "authorization header"
+
+ALLOWABLE_LABELS: Final = frozenset({URL_CREDENTIALS_LABEL, BASIC_LABEL, BEARER_LABEL, AUTHORIZATION_LABEL})
 
 
 @dataclass(frozen=True)
@@ -224,8 +231,12 @@ def load_scan_allow(path: Path) -> ScanAllow:
 __all__ = [
     "ALLOWABLE_LABELS",
     "ALLOW_VERSION",
+    "AUTHORIZATION_LABEL",
+    "BASIC_LABEL",
+    "BEARER_LABEL",
     "FINGERPRINT_HEX_LEN",
     "KEY_BYTES",
+    "URL_CREDENTIALS_LABEL",
     "ScanAllow",
     "ScanAllowEntry",
     "fingerprint",

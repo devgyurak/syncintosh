@@ -36,10 +36,10 @@ Desktop's `/Applications/Docker.app`, and `brew info --cask docker-desktop`.
   documented schema rather than on an observation this machine could not provide.
 - `HttpHeaders` is absent too, and the CLI reference documents it as a map of *arbitrary*
   headers sent on every client→daemon message — a documented place to put an `Authorization:
-  Bearer …`, which the secret scan cannot classify (it matches known token shapes, not a value
-  that merely looks like a header). Excluded by construction for the same reason. The cost is
-  that a custom header set must be reproduced per machine, which is also how a corporate proxy
-  header usually ought to behave.
+  Bearer …`, which the secret scan now refuses when the header is named exactly `Authorization`
+  (#28). A header can still be spelled under any other name here, so the key stays excluded by
+  construction. The cost is that a custom header set must be reproduced per machine, which is
+  also how a corporate proxy header usually ought to behave.
 - `~/.docker/certs.d/` and `~/.docker/tls/` (Docker's registry-CA locations) were absent, as was
   `~/.docker/contexts/tls/`. Only the last is denied today — see `system/deny_list.py`.
 
