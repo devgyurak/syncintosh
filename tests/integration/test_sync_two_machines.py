@@ -16,7 +16,7 @@ import pytest
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
-from syncintosh.core.commitments import loads_commitments
+from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
     CommitmentsCorrupt,
@@ -28,10 +28,10 @@ from syncintosh.core.errors import (
     UnknownKeyGeneration,
 )
 from syncintosh.core.ledger import AdoptChoice
-from syncintosh.core.manifest import FileFormat
-from syncintosh.core.manifest_codec import loads_manifest
+from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest
+from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
 from syncintosh.core.ports import LiveFiles, PushOutcome
-from syncintosh.core.repo import COMMITMENTS_PATH, object_path
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -178,13 +178,15 @@ def _run(
     adapters: dict | None = None,
 ) -> SyncReport:
     active = transport or GitCLITransport(machine.repo)
+    cipher = EnvelopeCipher(machine.store)
     return sync(
         transport=active,
         files=FileRepo(machine.repo),
-        cipher=EnvelopeCipher(machine.store),
+        cipher=cipher,
         scanner=PatternSecretScanner(),
         store=machine.store,
         codec=machine.codec,
+        wrapper=cipher,
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         live=live or SystemLiveFiles(),
@@ -539,6 +541,76 @@ def test_a_repo_that_publishes_no_commitments_is_refused(tmp_path, memory_key_st
 
 
 # --------------------------------------------------------------------------- 10
+
+
+def test_a_rotation_published_on_one_machine_is_absorbed_by_another(tmp_path, memory_key_store) -> None:
+    # given — A and B in sync under generation 1, then A publishes a hygiene rotation
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    key2 = bytes(range(32, 64))
+    _rotate_by_hand(a, new_key=key2)
+
+    # when — B syncs and fetches the rotation, which carries keys/2.wrap
+    report = _run(b)
+
+    # then — B absorbed generation 2 and applied the re-sealed content
+    assert b.store.generations() == (1, 2)
+    assert b.store.get(2) == key2
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_a_wrap_whose_key_does_not_match_the_commitment_is_refused(tmp_path, memory_key_store) -> None:
+    # given — A rotates, but the published commitment for generation 2 is not the wrapped key
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    _rotate_by_hand(a, new_key=bytes(range(32, 64)))
+    key1 = a.store.get(1)
+    assert key1 is not None
+    FileRepo(a.repo).write(COMMITMENTS_PATH, dumps_commitments({1: a.codec.commitment(key1), 2: "f" * 64}))
+    transport = GitCLITransport(a.repo)
+    commit = transport.commit((transport.head() or "",), "tamper the commitment", ALL_PATHS)
+    transport.update_ref(BRANCH, commit)
+    transport.push(remote, BRANCH, commit)
+
+    # when & then — the wrap is checked against the commitment before it reaches B's ring
+    with pytest.raises(KeyGenerationMismatch):
+        _run(b)
+    assert b.store.get(2) is None
+
+
+def _rotate_by_hand(machine: Machine, *, new_key: bytes) -> None:
+    """Re-seal every object and the manifest under a freshly minted generation, and publish it.
+
+    PR B implements this as `key rotate`; here it is built from the rotation-slice primitives so
+    the fetch-absorption path is exercised before the command exists. A hygiene rotation adds the
+    new key to the ring, publishes `keys/2.wrap` (KG_2 under KG_1), re-seals every object and the
+    manifest under KG_2, updates the commitments, and commits once
+    (``docs/design/05-key-generations.md``).
+    """
+    files = FileRepo(machine.repo)
+    transport = GitCLITransport(machine.repo)
+    head = transport.head()
+    assert head is not None
+    key1 = machine.store.get(1)
+    assert key1 is not None
+    cipher = EnvelopeCipher(machine.store)
+    stored_manifest = files.read(MANIFEST_PATH)
+    assert stored_manifest is not None
+    manifest = loads_manifest(cipher.open(stored_manifest, domain="manifest", file_id=""))
+    machine.store.put(2, new_key)
+    files.write(wrap_path(2), cipher.wrap(new_key, key_id=2, under_id=1))
+    for file_id in manifest.records:
+        stored = files.read(object_path(file_id))
+        assert stored is not None
+        plaintext = cipher.open(stored, domain="object", file_id=file_id)
+        files.write(object_path(file_id), cipher.seal(plaintext, domain="object", file_id=file_id, key_id=2))
+    rotated = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=2, records=manifest.records)
+    files.write(MANIFEST_PATH, cipher.seal(dumps_manifest(rotated), domain="manifest", file_id="", key_id=2))
+    files.write(
+        COMMITMENTS_PATH, dumps_commitments({1: machine.codec.commitment(key1), 2: machine.codec.commitment(new_key)})
+    )
+    commit = transport.commit((head,), "syncintosh: rotate", ALL_PATHS)
+    transport.update_ref(BRANCH, commit)
+    transport.push(machine.remote, BRANCH, commit)
 
 
 def test_collected_and_applied_files_are_regular_files(tmp_path, memory_key_store) -> None:

@@ -11,6 +11,7 @@ from syncintosh.core.ports import (
     DenyList,
     Domain,
     FileIdSource,
+    GenerationWrap,
     GitTransport,
     KeyStore,
     LedgerStore,
@@ -82,11 +83,62 @@ def test_key_store_port_is_structural() -> None:
         def put(self, key_id: int, key: bytes) -> None:
             return None
 
+        def drop(self, key_id: int) -> None:
+            return None
+
     # when
     matches = isinstance(FakeKeyStore(), KeyStore)
 
     # then
     assert matches is True
+
+
+def test_key_store_without_drop_does_not_conform() -> None:
+    # given — the prune/discard path needs drop to be part of the port
+    class NoDrop:
+        def generations(self) -> tuple[int, ...]:
+            return ()
+
+        def get(self, key_id: int) -> bytes | None:
+            return None
+
+        def put(self, key_id: int, key: bytes) -> None:
+            return None
+
+    # when
+    matches = isinstance(NoDrop(), KeyStore)
+
+    # then
+    assert matches is False
+
+
+def test_generation_wrap_port_is_structural() -> None:
+    # given
+    class FakeWrap:
+        def wrap(self, key: bytes, *, key_id: int, under_id: int) -> bytes:
+            return b""
+
+        def unwrap(self, blob: bytes, *, key_id: int) -> bytes:
+            return b""
+
+    # when
+    matches = isinstance(FakeWrap(), GenerationWrap)
+
+    # then
+    assert matches is True
+
+
+def test_a_wrapper_without_unwrap_does_not_conform() -> None:
+    # given — absorbing a rotation needs both halves of the wrap contract
+    class WrapOnly:
+        def wrap(self, key: bytes, *, key_id: int, under_id: int) -> bytes:
+            return b""
+
+    # when
+    matches = isinstance(WrapOnly(), GenerationWrap)
+
+    # then
+    assert matches is False
 
 
 def test_key_store_without_put_does_not_conform() -> None:

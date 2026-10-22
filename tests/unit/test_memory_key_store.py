@@ -52,3 +52,36 @@ def test_putting_the_same_key_again_is_allowed(memory_key_store) -> None:
 
     # then
     assert store.get(1) == KEY
+
+
+def test_drop_removes_a_generation(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY, 2: OTHER_KEY})
+
+    # when
+    store.drop(2)
+
+    # then
+    assert store.generations() == (1,)
+    assert store.get(2) is None
+
+
+def test_dropping_an_absent_generation_is_a_no_op(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY})
+
+    # when
+    store.drop(9)
+
+    # then
+    assert store.generations() == (1,)
+
+
+def test_the_master_generation_cannot_be_dropped(memory_key_store) -> None:
+    # given — the real store refuses this, so the fake must too
+    store = memory_key_store({1: KEY})
+
+    # when & then
+    with pytest.raises(ValueError):
+        store.drop(1)
+    assert store.get(1) == KEY

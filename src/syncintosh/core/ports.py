@@ -149,8 +149,9 @@ class KeyStore(Protocol):
 
     Addresses generations by id, not a single master key, because `merge-base` can point at a
     commit encrypted under an older generation and several generations must resolve at once
-    (`docs/design/05-key-generations.md`). `drop()` is deliberately absent here: prune and the
-    removal of an unpublished rotation land with the rotation slice (#8).
+    (`docs/design/05-key-generations.md`). `drop()` removes a generation: `key prune`, and the
+    removal of an unpublished rotation after a discarded push. Generation 1 is the master
+    generation and is never dropped (`docs/design/05-key-generations.md`).
     """
 
     def generations(self) -> tuple[int, ...]:
@@ -163,6 +164,35 @@ class KeyStore(Protocol):
 
     def put(self, key_id: int, key: bytes) -> None:
         """Store a generation key. Raises on failure."""
+        ...
+
+    def drop(self, key_id: int) -> None:
+        """Remove a generation from the ring.
+
+        Removing one this machine does not hold is not an error, so a discard is idempotent.
+        Generation 1 is refused: it is the master generation and a ring without it cannot be
+        exported for recovery.
+        """
+        ...
+
+
+@runtime_checkable
+class GenerationWrap(Protocol):
+    """Wraps one generation key under another, for in-band distribution.
+
+    A hygiene rotation publishes `keys/<new_id>.wrap`: `KG_{n+1}` sealed under `KG_n`, domain
+    `key-wrap`, subject `be32(n+1)` (``docs/design/05-key-generations.md``). The reader resolves
+    the wrapper generation from the envelope header and its own ring, then checks the result
+    against the published commitment before storing it. `services` passes raw generation keys
+    across this port the same way it passes the ring across `RingCodec` (``AGENTS.md`` §2.2).
+    """
+
+    def wrap(self, key: bytes, *, key_id: int, under_id: int) -> bytes:
+        """Seal generation `key_id`'s key under generation `under_id`, taken from the ring."""
+        ...
+
+    def unwrap(self, blob: bytes, *, key_id: int) -> bytes:
+        """Open `keys/<key_id>.wrap`, resolving the wrapper generation from the ring."""
         ...
 
 

@@ -29,6 +29,11 @@ GITIGNORE_PATH = ".gitignore"
 # path never parses as an object. The ID width comes from `core.ids`, its single owner.
 _OBJECT_PATH_RE = re.compile(rf"{OBJECTS_DIR}/({FILE_ID_PATTERN})\.enc")
 
+# A distributed generation wrap: `keys/<generation>.wrap`. The generation is the id of the key
+# being wrapped (the reader's new generation), never the one it is wrapped under — that id lives
+# in the envelope header (docs/design/05-key-generations.md).
+_WRAP_PATH_RE = re.compile(rf"{KEYS_DIR}/([1-9][0-9]*)\.wrap")
+
 # Defense in depth: mark the stored ciphertext binary so a hand-run `git merge` cannot mangle
 # it. Sync never calls `git merge` — it builds the tree with `git commit-tree`
 # (docs/design/01-sync-model.md).
@@ -59,6 +64,21 @@ TRACKED_PATHS: tuple[str, ...] = (OBJECTS_DIR, MANIFEST_PATH, KEYS_DIR, GITATTRI
 def object_path(file_id: str) -> str:
     """The repo-relative path of `file_id`'s ciphertext."""
     return f"{OBJECTS_DIR}/{file_id}.enc"
+
+
+def wrap_path(key_id: int) -> str:
+    """The repo-relative path of the wrap that distributes generation `key_id`.
+
+    `key_id` is the generation being distributed, so the wrap's filename names the reader's new
+    generation and its header names the generation it is wrapped under.
+    """
+    return f"{KEYS_DIR}/{key_id}.wrap"
+
+
+def wrap_generation_id(relpath: str) -> int | None:
+    """The generation a `keys/<id>.wrap` path distributes, or `None` for anything else."""
+    match = _WRAP_PATH_RE.fullmatch(relpath)
+    return None if match is None else int(match.group(1))
 
 
 def object_file_id(relpath: str) -> str | None:

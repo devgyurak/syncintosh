@@ -240,13 +240,15 @@ def _run(
     adapters: Mapping[FileFormat, ContentAdapter] | None = None,
 ) -> SyncReport:
     active = GitCLITransport(machine.repo)
+    cipher = EnvelopeCipher(machine.store)
     return sync(
         transport=active,
         files=FileRepo(machine.repo),
-        cipher=EnvelopeCipher(machine.store),
+        cipher=cipher,
         scanner=PatternSecretScanner(),
         store=machine.store,
         codec=machine.codec,
+        wrapper=cipher,
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         catalog=catalog if catalog is not None else KEYED_CATALOG,

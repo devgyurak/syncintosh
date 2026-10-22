@@ -14,6 +14,8 @@ from syncintosh.core.repo import (
     object_file_id,
     object_path,
     plan_writes,
+    wrap_generation_id,
+    wrap_path,
 )
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
@@ -54,6 +56,31 @@ def test_object_path_is_a_fixed_width_slot() -> None:
 def test_object_file_id_recognises_only_a_slot(relpath, expected) -> None:
     # when
     parsed = object_file_id(relpath)
+
+    # then
+    assert parsed == expected
+
+
+def test_wrap_path_names_the_generation_being_distributed() -> None:
+    # when & then
+    assert wrap_path(2) == "keys/2.wrap"
+
+
+@pytest.mark.parametrize(
+    ("relpath", "expected"),
+    [
+        ("keys/2.wrap", 2),
+        ("keys/10.wrap", 10),
+        ("keys/0.wrap", None),
+        ("keys/x.wrap", None),
+        ("keys/2.wrap.bak", None),
+        ("keys/sub/2.wrap", None),
+        ("keys/commitments.json", None),
+    ],
+)
+def test_wrap_generation_id_recognises_only_a_wrap_slot(relpath, expected) -> None:
+    # when
+    parsed = wrap_generation_id(relpath)
 
     # then
     assert parsed == expected

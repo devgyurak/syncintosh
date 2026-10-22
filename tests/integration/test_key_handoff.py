@@ -37,6 +37,9 @@ class FakeKeyringBackend:
     def set_password(self, service: str, username: str, password: str) -> None:
         self._entries[(service, username)] = password
 
+    def delete_password(self, service: str, username: str) -> None:
+        self._entries.pop((service, username), None)
+
 
 def _dump(store: KeyringKeyStore) -> Ring:
     """The `(generation, key)` entries an export carries; a held generation is never absent."""
