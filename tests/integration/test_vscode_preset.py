@@ -19,7 +19,7 @@ import pytest
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.config import LocalItem, SyncConfig
+from syncintosh.core.config import SyncConfig
 from syncintosh.core.errors import SecretScanError
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
@@ -29,8 +29,9 @@ from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.presets.vscode import KEYBINDINGS, SETTINGS
+from syncintosh.presets.vscode import KEYBINDINGS, SETTINGS, SNIPPETS_JSON
 from syncintosh.services.keys import import_ring, init_new_repo
+from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -109,13 +110,13 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str) -> Machine:
 
 
 def _config(machine: Machine) -> SyncConfig:
-    return SyncConfig.create(
+    # The shipped preset, so the config carries the two exact files and the two snippet globs — the
+    # same thing `init` writes.
+    return new_machine_config(
         remote=machine.remote,
         machine_id=machine.machine_id,
-        items=(
-            LocalItem.create(path=SETTINGS, preset="vscode", scope="common", format="jsonc"),
-            LocalItem.create(path=KEYBINDINGS, preset="vscode", scope="common", format="jsonc"),
-        ),
+        preset_names=("vscode",),
+        catalog=BuiltinCatalog.default(),
     )
 
 
@@ -503,3 +504,26 @@ def test_a_conflict_on_an_unnamed_key_is_not_confused_with_the_document(tmp_path
     # detail never trails a colon) instead of being confused with a whole-document conflict
     assert report.conflicts[0].path == SETTINGS
     assert report.conflicts[0].detail == 'the same region changed on both sides: ""'
+
+
+# --------------------------------------------------------------------------- snippet globs
+
+
+def test_a_snippet_from_another_machine_is_applied_under_the_glob(tmp_path, memory_key_store) -> None:
+    # given — A has a language snippet; B has VS Code's directories but no snippet yet
+    a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    snippet = SNIPPETS_JSON.replace("*", "javascript")
+    _write(a, snippet, b'{\n  "log": {\n    "prefix": "log",\n    "body": "console.log($1)"\n  }\n}\n')
+    _run(a)
+
+    b = _machine(tmp_path, memory_key_store, "machine-snippet", a.remote)
+    _initialize(b, import_from=a.recovery)
+    (b.home / "Library" / "Application Support" / "Code" / "User" / "snippets").mkdir(parents=True)
+
+    # when
+    report = _run(b)
+
+    # then — the record arrived, B's own config names the same glob, so it is written and settles
+    assert snippet in report.applied
+    assert _read(b, snippet) == _read(a, snippet)
+    assert report.deferred == ()

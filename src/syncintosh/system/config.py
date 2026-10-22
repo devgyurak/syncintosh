@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from syncintosh.core.config import LocalItem, SyncConfig
+from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
 from syncintosh.core.errors import ConfigError
 from syncintosh.system.paths import MachinePaths
 
@@ -30,6 +30,23 @@ def _parse_item(raw: object, where: str) -> LocalItem:
     if "path" not in raw or "preset" not in raw or "scope" not in raw or "format" not in raw:
         raise ConfigError(f"{where} must name path, preset, scope, and format")
     return LocalItem.create(
+        path=raw["path"],
+        preset=raw["preset"],
+        scope=raw["scope"],
+        machine=raw.get("machine"),
+        format=raw["format"],
+    )
+
+
+def _parse_glob(raw: object, where: str) -> LocalGlob:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a JSON object")
+    unknown = sorted(raw.keys() - _ITEM_KEYS)
+    if unknown:
+        raise ConfigError(f"{where} has unknown fields: {unknown}")
+    if "path" not in raw or "preset" not in raw or "scope" not in raw or "format" not in raw:
+        raise ConfigError(f"{where} must name path, preset, scope, and format")
+    return LocalGlob.create(
         path=raw["path"],
         preset=raw["preset"],
         scope=raw["scope"],
@@ -55,23 +72,28 @@ def load_config(path: Path | None = None) -> SyncConfig:
     if not isinstance(items_raw, list):
         raise ConfigError(f"config {resolved} must hold an `items` list")
     items = tuple(_parse_item(raw, f"items[{index}]") for index, raw in enumerate(items_raw))
-    return SyncConfig.create(remote=parsed.get("remote"), machine_id=parsed.get("machine_id"), items=items)
+    globs_raw = parsed.get("globs", [])
+    if not isinstance(globs_raw, list):
+        raise ConfigError(f"config {resolved} must hold a `globs` list")
+    globs = tuple(_parse_glob(raw, f"globs[{index}]") for index, raw in enumerate(globs_raw))
+    return SyncConfig.create(remote=parsed.get("remote"), machine_id=parsed.get("machine_id"), items=items, globs=globs)
 
 
 def config_to_mapping(config: SyncConfig) -> dict[str, Any]:
     """The plain nested mapping `config.json` is written as."""
-    items: list[dict[str, Any]] = []
-    for item in config.items:
-        entry: dict[str, Any] = {
-            "path": item.path,
-            "preset": item.preset,
-            "scope": item.scope,
-            "format": item.format,
-        }
-        if item.machine is not None:
-            entry["machine"] = item.machine
-        items.append(entry)
-    return {"remote": config.remote, "machine_id": config.machine_id, "items": items}
+
+    def _entry(path: str, preset: str, scope: str, machine: str | None, fmt: str) -> dict[str, Any]:
+        item: dict[str, Any] = {"path": path, "preset": preset, "scope": scope, "format": fmt}
+        if machine is not None:
+            item["machine"] = machine
+        return item
+
+    return {
+        "remote": config.remote,
+        "machine_id": config.machine_id,
+        "items": [_entry(i.path, i.preset, i.scope, i.machine, i.format) for i in config.items],
+        "globs": [_entry(g.glob.path, g.preset, g.scope, g.machine, g.format) for g in config.globs],
+    }
 
 
 def save_config(config: SyncConfig, path: Path | None = None) -> None:

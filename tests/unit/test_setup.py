@@ -89,3 +89,25 @@ def test_a_repeated_preset_name_is_deduplicated() -> None:
 
     # then — expanding it twice would collide on every sync, so the repeat is dropped
     assert [item.path for item in config.items] == list(zsh.STARTUP_FILES)
+
+
+def test_a_preset_glob_becomes_a_config_glob_not_an_item() -> None:
+    # given — the VS Code preset owns two exact files and two snippet globs
+    # when
+    config = new_machine_config(
+        remote="git@example.com:me/settings.git",
+        machine_id="mac-studio",
+        preset_names=("vscode",),
+        catalog=BuiltinCatalog.default(),
+    )
+
+    # then — which snippet files exist is per-machine, so only the pattern is written
+    assert [item.path for item in config.items] == [
+        "Library/Application Support/Code/User/settings.json",
+        "Library/Application Support/Code/User/keybindings.json",
+    ]
+    assert [entry.glob.path for entry in config.globs] == [
+        "Library/Application Support/Code/User/snippets/*.json",
+        "Library/Application Support/Code/User/snippets/*.code-snippets",
+    ]
+    assert {entry.preset for entry in config.globs} == {"vscode"}

@@ -332,6 +332,9 @@ def test_live_files_port_is_structural() -> None:
         def is_symlink(self, path: str) -> bool:
             return False
 
+        def list_dir(self, path: str) -> tuple[str, ...]:
+            return ()
+
         def remove(self, path: str) -> None: ...
 
     # when

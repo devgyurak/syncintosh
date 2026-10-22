@@ -50,6 +50,7 @@ from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, Mani
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
+from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import (
     AppDetector,
     Cipher,
@@ -70,7 +71,7 @@ from syncintosh.core.ports import (
     SyntaxValidator,
     remote_ref,
 )
-from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, ValidatorName
+from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
@@ -425,6 +426,16 @@ _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 
+# Why a new file under a glob was not published: the glob already covers the maximum this machine
+# publishes, so a file that is not already a record under it is held back. A file that *is* already
+# published keeps being collected — the guard is soft, so a concurrent sync that pushed the total over
+# the bound cannot leave the glob permanently refused (``core.presets.MAX_GLOB_EXPANSION``).
+_GLOB_FULL = "the glob is full, so this new file is not published"
+
+# Why a glob's directory was refused: it is a symlink (which would list another tree under this
+# preset's policy), a dangerous path, or outside `$HOME`. Checked before the directory is listed.
+_GLOB_DIRECTORY_UNSAFE = "the glob's directory is a symbolic link or a dangerous path"
+
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
     """The report row for a projection that failed, phrased by its fixed reason code."""
@@ -531,6 +542,90 @@ def _syntax_ok(presets: _Presets, data: bytes, path: str) -> bool:
 # --------------------------------------------------------------------------- collect
 
 
+@dataclass(frozen=True)
+class _Expanded:
+    """The concrete paths to collect: the exact items plus each allowed glob expanded in place."""
+
+    items: tuple[LocalItem, ...]
+    refusals: tuple[Refusal, ...]
+
+
+def _unsafe_glob_directories(config: SyncConfig, live: LiveFiles, deny: DenyList, home: str) -> tuple[PresetGlob, ...]:
+    """The globs whose **directory** may not be used here.
+
+    A glob whose directory is a symlink (say `snippets` → `~/.docker`) would list — or write into —
+    another tree under *this* preset's policy, and for VS Code that policy strips nothing, so a
+    credential the real owner excludes would be sealed (``AGENTS.md`` §2.4, §3.4). A denied directory
+    or one outside `$HOME` is refused for the same reason. Checked on **both** ends: collect must not
+    list it, and apply must not write through it.
+    """
+    unsafe: list[PresetGlob] = []
+    for entry in config.globs:
+        directory = entry.glob.directory
+        if deny.is_denied(home, directory) or deny.escapes(home, directory):
+            unsafe.append(entry.glob)
+            continue
+        if directory and live.is_symlink(_join(home, directory)):
+            unsafe.append(entry.glob)
+    return tuple(unsafe)
+
+
+def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str) -> _Expanded:
+    """Turn the config's exact items and its globs into one list of concrete items.
+
+    A glob is one directory listing, never a walk (`core.presets.PresetGlob`): only the last element
+    may be a pattern, so the expansion lists the fixed directory and matches the names.
+
+    `MAX_GLOB_EXPANSION` bounds the files a glob **publishes**, as a soft guard: a file that is
+    already a record under the glob keeps being collected, so an edit to it is never held back; new
+    files fill the slots that are left, and only the ones past that are held — each reported by name,
+    and only when there are any. Counting it here, rather than per record at apply time, is what keeps
+    the bound from becoming a permanent failure: apply refusing each of 300 records would exit 1 with
+    300 lines on every cycle, and the user would have no way out.
+
+    The **directory itself** is checked before it is listed, not only the files inside it: a glob
+    whose directory is a symlink (say `snippets` → `~/.docker`) would otherwise list another tree's
+    files and collect them under *this* preset's policy — for VS Code, a policy that strips nothing —
+    so a credential the real owner excludes would be sealed (``AGENTS.md`` §2.4, §3.4). A denied
+    directory is refused for the same reason. The expanded paths are then handed back as ordinary
+    `LocalItem`s, so `_collect` runs them through the **same** deny → ownership → symlink →
+    projection checks an exact item gets: the directory is listed, but every file inside is judged on
+    its own.
+    """
+    head_records = () if head is None else tuple(head.records.values())
+    items = list(config.items)
+    refusals: list[Refusal] = []
+    unsafe = {glob.path for glob in _unsafe_glob_directories(config, live, deny, home)}
+    for entry in config.globs:
+        if entry.glob.path in unsafe:
+            refusals.append(Refusal(entry.glob.path, _GLOB_DIRECTORY_UNSAFE))
+            continue
+        matched = entry.glob.expand(live.list_dir(_join(home, entry.glob.directory)))
+        published = {collision_key(record.path) for record in head_records if entry.glob.matches(record.path)}
+        known = tuple(path for path in matched if collision_key(path) in published)
+        fresh = tuple(path for path in matched if collision_key(path) not in published)
+        # A **soft** guard: a file already published keeps being collected, so an edit to it is never
+        # held back. New files fill the slots that are left, and only the ones past that are held —
+        # each reported by name, and only when there are any. A hard "refuse the whole glob" was a
+        # dead end: two machines syncing at once published 300 between them, and after that every
+        # cycle refused the glob with its local edits never leaving the machine.
+        room = MAX_GLOB_EXPANSION - len(published)
+        held = fresh[room:] if room >= 0 else fresh
+        refusals.extend(Refusal(path, _GLOB_FULL, blocking=False) for path in held)
+        matched = (*known, *fresh[: max(room, 0)])
+        items.extend(
+            LocalItem.create(
+                path=path,
+                preset=entry.preset,
+                scope=entry.scope,
+                machine=entry.machine,
+                format=entry.format,
+            )
+            for path in matched
+        )
+    return _Expanded(items=tuple(items), refusals=tuple(refusals))
+
+
 def _collect(
     *,
     config: SyncConfig,
@@ -545,7 +640,9 @@ def _collect(
 ) -> _Collect:
     """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
     state = _Collect(records={} if head is None else dict(head.records))
-    for item in config.items:
+    expanded = _expand_globs(config, head, live, deny, home)
+    state.refused.extend(expanded.refusals)
+    for item in expanded.items:
         if deny.is_denied(home, item.path):
             # The dangerous-path check comes first so a private key or a cloud credential is
             # reported as what it is, whatever its preset happens to own.
@@ -1110,12 +1207,18 @@ def _apply(
     invalid: list[Refusal] = []
     # One `mdfind` per app per cycle, however many files that app owns (§2.6).
     installed_cache: dict[str, bool | None] = {}
+    # The same directory check the collect side makes: a record must not be *written* through a
+    # symlinked glob directory either.
+    unsafe = _unsafe_glob_directories(config, live, deny, home)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
         refusal = _record_refusal(presets, config, deny, home, record)
         if refusal is not None:
             refused.append(refusal)
+            continue
+        if any(glob.matches(record.path) for glob in unsafe):
+            refused.append(Refusal(record.path, _GLOB_DIRECTORY_UNSAFE))
             continue
         policy = presets.policy_for(record.path)
         if policy is not None and policy.format != record.format:
@@ -1262,16 +1365,22 @@ def _settle_ledger(
     """Rewrite the ledger so the next cycle sees in-agreement files as a normal baseline.
 
     Gated exactly like apply: this reads live paths, so a record that is denied, that escapes
-    `$HOME`, that is not in the local allowlist, or that belongs to another machine is never
-    opened — the deny-list refuses before anything is read (``AGENTS.md`` §3.4). The digest is
-    the **projection's**, matching what collect and the record compare, so a file whose only
-    difference is a stripped key stays settled instead of being re-collected on every cycle.
+    `$HOME`, that is not in the local allowlist, that is under a glob whose directory may not be used,
+    or that belongs to another machine is never opened — the deny-list refuses before anything is read
+    (``AGENTS.md`` §3.4). The digest is the **projection's**, matching what collect and the record
+    compare, so a file whose only difference is a stripped key stays settled instead of being
+    re-collected on every cycle.
     """
     settled: dict[str, LedgerEntry] = {}
+    unsafe = _unsafe_glob_directories(config, live, deny, home)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
         if _record_refusal(presets, config, deny, home, record) is not None:
+            continue
+        if any(glob.matches(record.path) for glob in unsafe):
+            # Settling would read the file through the symlinked directory — the same path apply
+            # refused to write. Nothing is sealed or pushed, but a refused path is not read either.
             continue
         live_path = _join(home, record.path)
         if live.is_symlink(live_path):

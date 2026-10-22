@@ -442,6 +442,16 @@ class LiveFiles(Protocol):
         """True when `path` is a symbolic link."""
         ...
 
+    def list_dir(self, path: str) -> tuple[str, ...]:
+        """The last elements of the **non-directory** entries in `path`, sorted.
+
+        Used to expand a preset glob: a glob may only pattern the last element and never recurses,
+        so one listing is the whole expansion. Symbolic links are included — the caller reports
+        them instead of following them — but a real subdirectory is not. Empty when `path` is not a
+        directory (the app is not installed), which the caller treats as "nothing to collect".
+        """
+        ...
+
     def remove(self, path: str) -> None:
         """Remove the file if present. Raises on any other failure."""
         ...

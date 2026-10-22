@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from syncintosh.core.config import LocalItem, SyncConfig
+from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import duplicate_paths
 from syncintosh.core.ports import FileIdSource, PresetCatalog
@@ -43,22 +43,28 @@ def new_machine_config(
     exactly like a successful setup, and the user would only find out at the first sync. A name
     given twice is deduplicated rather than refused: `--preset zsh --preset zsh` is a
     repetition, not a second file, and the paths it expands to are the same either way.
+
+    A preset file whose last element is a glob (`snippets/*.json`) becomes a config **glob**, not an
+    item: which files it names is a per-machine fact, so the config records the directory pattern and
+    the collect step expands it here (`core/config.LocalGlob`).
     """
     items: list[LocalItem] = []
+    globs: list[LocalGlob] = []
     for name in dict.fromkeys(preset_names):
         preset = catalog.get(name)
         if preset is None:
             raise ConfigError(f"unknown preset {name!r}")
-        items.extend(
-            LocalItem.create(path=file.path, preset=preset.name, scope="common", format=file.format)
-            for file in preset.files
-        )
-    duplicated = duplicate_paths(item.path for item in items)
+        for file in preset.files:
+            if file.is_glob:
+                globs.append(LocalGlob.create(path=file.path, preset=preset.name, scope="common", format=file.format))
+            else:
+                items.append(LocalItem.create(path=file.path, preset=preset.name, scope="common", format=file.format))
+    duplicated = duplicate_paths([item.path for item in items] + [entry.glob.path for entry in globs])
     if duplicated:
-        # Two items for one file would carry two records and write it twice, which the manifest's
+        # Two entries for one file would carry two records and write it twice, which the manifest's
         # path-collision rule then reports as a conflict on every sync.
         raise ConfigError(f"these paths would be tracked twice: {list(duplicated)}")
-    return SyncConfig.create(remote=remote, machine_id=machine_id, items=tuple(items))
+    return SyncConfig.create(remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs))
 
 
 __all__ = ["mint_machine_id", "new_machine_config"]

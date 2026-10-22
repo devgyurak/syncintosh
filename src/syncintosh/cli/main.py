@@ -309,9 +309,10 @@ def _render(report: SyncReport, config) -> None:
             # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
             typer.echo(f"refused ({refusal.reason}): {refusal.path}", err=True)
         else:
-            # Not `skipped`: that word already means a dangerous path here, and the two call for
-            # very different reactions.
-            typer.echo(f"not tracked here: {refusal.path}")
+            # Not `skipped`: that word already means a dangerous path here, and the two call for very
+            # different reactions. The reason is shown too, so "the glob is full" is not mistaken for
+            # "this machine does not track the path".
+            typer.echo(f"not synced ({refusal.reason}): {refusal.path}")
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
             typer.echo(f"{label} ({refusal.reason}): {refusal.path}", err=True)

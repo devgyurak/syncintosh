@@ -22,6 +22,7 @@ Standard library only (``AGENTS.md`` §2.1).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -29,7 +30,7 @@ from urllib.parse import urlsplit
 
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
-from syncintosh.core.paths import duplicate_paths
+from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.tree import KeyPath
 
 # The syntax checkers a preset may name. A value is serialized verbatim, so it is a `Literal`
@@ -42,6 +43,93 @@ ValidatorName = Literal["json", "zsh"]
 # The formats whose parse produces a key-path tree. `noise`/`excluded` are only expressible for
 # these; `text` and `binary` are compared as a whole file and have no keys to strip.
 KEYED_FORMATS: tuple[FileFormat, ...] = ("jsonc", "toml", "yaml", "xml", "plist")
+
+# The one place a glob may appear and the one character that is refused. `*` and `?` are allowed in
+# the **last** path element only; `**` is refused, because a recursive pattern would let one preset
+# claim a whole tree (including directories it does not own) and turn the collect-side expansion from
+# one directory listing into an unbounded walk.
+GLOB_METACHARACTERS: tuple[str, ...] = ("*", "?")
+_RECURSIVE_GLOB: Final = "**"
+
+# How many files a glob publishes. A glob over a directory that happens to hold thousands of files
+# is a configuration mistake, and holding back the ones past the bound (and saying so) is better than
+# publishing an unbounded set: the bound is the user's to raise by narrowing the pattern. It is a
+# **soft** guard — a file already a record keeps being collected, so a sync that pushes the total over
+# the bound cannot leave the glob permanently refused (`services/sync.py`).
+MAX_GLOB_EXPANSION: Final = 256
+
+
+def _has_glob(path: str) -> bool:
+    """True when the **last** element of `path` carries a glob metacharacter."""
+    return any(character in path.rpartition("/")[2] for character in GLOB_METACHARACTERS)
+
+
+def _glob_to_regex(name: str) -> str:
+    """The regex a last-element glob means: `*` any run, `?` one character, everything else literal."""
+    return "".join(
+        "[^/]*" if character == "*" else "[^/]" if character == "?" else re.escape(character) for character in name
+    )
+
+
+@dataclass(frozen=True)
+class PresetGlob:
+    """A preset path whose last element is a glob (`*`, `?`), never recursive.
+
+    A glob is how a preset owns a **directory** of files that differ per machine — VS Code's
+    `snippets/*.json`. The pattern is matched on the folded path (`collision_key`), the same way an
+    exact path is compared everywhere else, so `.JSON` and `.json` name one set on a
+    case-insensitive APFS. Only regular files and symlinks are ever listed (`LiveFiles.list_dir`);
+    a symlink is reported rather than followed. The last element is the only place a metacharacter
+    may sit, which is why the expansion is one listing rather than a walk.
+    """
+
+    path: str
+    directory: str
+    name: str
+    matcher: re.Pattern[str]
+
+    @classmethod
+    def create(cls, path: str) -> PresetGlob:
+        """Validate and freeze one glob; never assign fields afterwards."""
+        validated = validate_path(path)
+        directory, _, name = validated.rpartition("/")
+        if any(character in directory for character in GLOB_METACHARACTERS):
+            # A metacharacter outside the last element would name a literal directory (no walk
+            # happens, since the directory is listed verbatim), but a preset should never name such
+            # a directory, so it is refused rather than silently treated as an exact string.
+            raise ConfigError(f"a preset glob may only pattern the last path element: {validated!r}")
+        if _RECURSIVE_GLOB in name:
+            raise ConfigError(f"a preset glob must not be recursive: {validated!r}")
+        if not _has_glob(validated):
+            raise ConfigError(f"a preset glob must name a pattern: {validated!r}")
+        return cls(
+            path=validated,
+            directory=directory,
+            name=name,
+            matcher=re.compile(_glob_to_regex(collision_key(name))),
+        )
+
+    def matches(self, path: str) -> bool:
+        """True when `path` is a file this glob names: same directory and a matching last element.
+
+        A candidate whose **own** last element still holds a metacharacter is not a file this glob
+        names. Without that check the pattern text matches itself — ``*.json`` full-matches
+        ``[^/]*\\.json`` — so a record that arrived from the repo carrying the pattern as its path
+        could make `apply` create a file literally called ``*.json``.
+        """
+        directory, _, name = collision_key(path).rpartition("/")
+        if any(character in name for character in GLOB_METACHARACTERS):
+            return False
+        return directory == collision_key(self.directory) and self.matcher.fullmatch(name) is not None
+
+    def expand(self, names: Iterable[str]) -> tuple[str, ...]:
+        """The concrete `directory/name` paths among `names` this glob matches, sorted.
+
+        `names` are the last elements a directory listing reported (`LiveFiles.list_dir`), so the
+        result is the paths a collect can treat exactly like an item's own path.
+        """
+        matched = sorted(name for name in names if self.matcher.fullmatch(collision_key(name)) is not None)
+        return tuple(f"{self.directory}/{name}" if self.directory else name for name in matched)
 
 
 @dataclass(frozen=True)
@@ -62,6 +150,7 @@ class PresetFile:
     noise: frozenset[KeyPath]
     excluded: frozenset[KeyPath]
     validator: ValidatorName | None
+    glob: PresetGlob | None
 
     @classmethod
     def create(
@@ -79,6 +168,11 @@ class PresetFile:
             validated_format = validate_format(format)
         except ManifestCorrupt as exc:
             raise ConfigError(f"invalid preset file: {exc}") from exc
+        glob = PresetGlob.create(validated_path) if _has_glob(validated_path) else None
+        if glob is None and any(character in validated_path for character in GLOB_METACHARACTERS):
+            # A metacharacter outside the last element is neither an exact path nor a glob, so it is
+            # refused rather than read as a literal directory name.
+            raise ConfigError(f"a glob metacharacter may only appear in the last path element: {validated_path!r}")
         noise_paths = frozenset(noise)
         excluded_paths = frozenset(excluded)
         if () in noise_paths or () in excluded_paths:
@@ -96,7 +190,19 @@ class PresetFile:
             noise=noise_paths,
             excluded=excluded_paths,
             validator=validator,
+            glob=glob,
         )
+
+    @property
+    def is_glob(self) -> bool:
+        """True when this file names a directory pattern rather than one exact path."""
+        return self.glob is not None
+
+    def matches(self, path: str) -> bool:
+        """True when `path` is this file: the glob it names, or the exact path it names."""
+        if self.glob is not None:
+            return self.glob.matches(path)
+        return collision_key(self.path) == collision_key(path)
 
     @property
     def stripped(self) -> frozenset[KeyPath]:
@@ -203,11 +309,14 @@ EMPTY_CATALOG: Final = EmptyCatalog()
 
 __all__ = [
     "EMPTY_CATALOG",
+    "GLOB_METACHARACTERS",
     "KEYED_FORMATS",
+    "MAX_GLOB_EXPANSION",
     "DownloadTrust",
     "EmptyCatalog",
     "Preset",
     "PresetFile",
+    "PresetGlob",
     "ValidatorName",
     "download_trust",
 ]

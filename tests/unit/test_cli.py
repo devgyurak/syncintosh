@@ -204,10 +204,13 @@ def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeyp
     # when
     result = runner.invoke(main_module.app, ["sync"])
 
-    # then — reported on stdout as its own case (not the word a dangerous path gets), and the exit
+    # then — reported on stdout with its reason (not the word a dangerous path gets), and the exit
     # code says the cycle did its job
     assert result.exit_code == 0
-    assert "not tracked here: Library/Application Support/Code/User/settings.json" in _combined(result)
+    assert (
+        "not synced (the path is not in this machine's config): "
+        "Library/Application Support/Code/User/settings.json" in _combined(result)
+    )
 
 
 def test_every_validator_name_is_wired_to_an_implementation() -> None:
