@@ -106,6 +106,7 @@ def write_repo(
     head: Manifest | None,
     new: Manifest,
     contents: Mapping[str, bytes],
+    force_reseal: bool = False,
 ) -> None:
     """Turn `head` into `new`, sealing each object and the manifest under the scan.
 
@@ -117,21 +118,25 @@ def write_repo(
     `new` must be the **complete** manifest: the orphan sweep deletes every stored object absent
     from it, so a manifest filtered to this machine's records would delete another machine's
     objects.
+
+    `force_reseal` re-encrypts **every** record's object, not only the ones whose digest changed.
+    A rotation needs it: the plaintexts are unchanged, so `plan_writes` alone would rewrite only
+    the manifest and leave every object bound to the retired generation
+    (``docs/design/05-key-generations.md``).
     """
     plan = plan_writes(head, new)
+    objects_to_write = tuple(sorted(new.records)) if force_reseal else plan.objects_to_write
     manifest_plaintext = dumps_manifest(new)
-    missing = sorted(file_id for file_id in plan.objects_to_write if file_id not in contents)
+    missing = sorted(file_id for file_id in objects_to_write if file_id not in contents)
     if missing:
         raise ValueError(f"no plaintext supplied for objects: {missing}")
-    _verify_digests(new, plan.objects_to_write, contents)
+    _verify_digests(new, objects_to_write, contents)
 
     # Scan everything first: a refusal must leave the repo untouched.
-    for subject, plaintext, fmt in _payloads(
-        new, contents, plan.objects_to_write, manifest_plaintext, plan.write_manifest
-    ):
+    for subject, plaintext, fmt in _payloads(new, contents, objects_to_write, manifest_plaintext, plan.write_manifest):
         scanner.scan(plaintext, subject=subject, format=fmt)
 
-    for file_id in plan.objects_to_write:
+    for file_id in objects_to_write:
         blob = cipher.seal(contents[file_id], domain="object", file_id=file_id, key_id=new.key_generation)
         files.write(object_path(file_id), blob)
     if plan.write_manifest:

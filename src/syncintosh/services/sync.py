@@ -33,14 +33,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
-from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
-    CommitmentsCorrupt,
     ContentDigestMismatch,
     GitError,
-    KeyGenerationMismatch,
     PendingConflict,
     ProjectionError,
     SyntaxInvalid,
@@ -75,8 +72,9 @@ from syncintosh.core.ports import (
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
-from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes, wrap_path
+from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
 from syncintosh.core.tree import KeyPath, path_label
+from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
@@ -862,65 +860,6 @@ def _merge_stale(
 # --------------------------------------------------------------------------- publish
 
 
-def _read_commitments(transport: GitTransport, commit: str) -> dict[int, str]:
-    """The published commitment map at `commit`, refusing a repo that publishes none.
-
-    The map is required, not optional: a commitment exists for every generation, and treating an
-    absent file as "nothing to compare" would let a remote disable the only check that covers an
-    out-of-band rotation by deleting one file (``docs/design/05-key-generations.md``).
-    """
-    blob = transport.read_blob(commit, COMMITMENTS_PATH)
-    if blob is None:
-        raise CommitmentsCorrupt(f"the repo publishes no {COMMITMENTS_PATH}")
-    return loads_commitments(blob)
-
-
-def _absorb_wraps(
-    *,
-    transport: GitTransport,
-    wrapper: GenerationWrap,
-    codec: RingCodec,
-    store: KeyStore,
-    commit: str,
-    published: Mapping[int, str],
-) -> None:
-    """Add every generation the remote distributes and this machine does not yet hold.
-
-    A hygiene rotation publishes `keys/<new_id>.wrap` `KG_{n+1}` sealed under `KG_n`. The
-    commitment map lists every generation, so it is the index of which wraps to try; a generation
-    this machine already holds is never overwritten (a second key for one id is a hard error, and
-    `_verify_commitments` reports it). The unwrapped key is checked against the published
-    commitment **before** it reaches the ring, so a wrap that carries the wrong key is refused
-    rather than stored (``docs/design/05-key-generations.md``).
-    """
-    for key_id in sorted(published):
-        if store.get(key_id) is not None:
-            continue
-        blob = transport.read_blob(commit, wrap_path(key_id))
-        if blob is None:
-            # An out-of-band rotation publishes no wrap; the commitment still exists for it.
-            continue
-        key = wrapper.unwrap(blob, key_id=key_id)
-        if codec.commitment(key) != published[key_id]:
-            raise KeyGenerationMismatch(key_id, "the published commitment is not the key the wrap carries for it")
-        store.put(key_id, key)
-
-
-def _verify_commitments(codec: RingCodec, store: KeyStore, published: Mapping[int, str]) -> None:
-    """Compare every held generation against the committed map.
-
-    A held generation the repo does not commit to is the same disable-the-check lever as deleting
-    the file, one level finer, so it is refused too.
-    """
-    for key_id in store.generations():
-        expected = published.get(key_id)
-        if expected is None:
-            raise CommitmentsCorrupt(f"the repo publishes no commitment for generation {key_id}")
-        key = store.get(key_id)
-        if key is not None and codec.commitment(key) != expected:
-            raise KeyGenerationMismatch(key_id, "the published commitment is not this machine's key for it")
-
-
 def _merge_base(transport: GitTransport, local: str, remote: str) -> str | None:
     bases = transport.merge_bases(local, remote)
     if len(bases) > 1:
@@ -1071,6 +1010,10 @@ class _Publish:
     conflicts: tuple[PendingConflictRecord, ...] = ()
     base_commit: str | None = None
     remote_commit: str | None = None
+    # Set when the remote had rotated ahead of our collect commit: the branch was moved to the
+    # remote tip and the caller must re-collect on the new generation
+    # (``docs/design/05-key-generations.md``).
+    restart: bool = False
 
 
 def _publish(
@@ -1097,8 +1040,8 @@ def _publish(
             # Absorb a distributed generation first, then check every held generation against the
             # published commitments — so a generation this fetch delivered is covered by the same
             # check as one this machine already held.
-            published = _read_commitments(transport, remote_commit)
-            _absorb_wraps(
+            published = read_commitments(transport, remote_commit)
+            absorb_wraps(
                 transport=transport,
                 wrapper=wrapper,
                 codec=codec,
@@ -1106,7 +1049,7 @@ def _publish(
                 commit=remote_commit,
                 published=published,
             )
-            _verify_commitments(codec, store, published)
+            verify_commitments(codec, store, published)
         local = transport.head()
         if remote_commit is None:
             outcome = _push_or_raise(transport, config.remote, branch, local_commit)
@@ -1126,6 +1069,15 @@ def _publish(
             if outcome == "ok":
                 return _Publish(published=local, remote_commit=remote_commit)
             continue
+        remote_manifest = _read_manifest(transport, cipher, remote_commit)
+        if remote_manifest is not None and local_manifest.key_generation < remote_manifest.key_generation:
+            # The remote rotated ahead of our collect commit. Rotation is never merged, and the
+            # collect commit's objects are bound to the retired generation, so adopt the remote tip
+            # and let the caller re-collect on the new generation — the live edits are still here,
+            # and change detection is against the ledger, not HEAD (``core/ledger.py``).
+            transport.update_ref(branch, remote_commit)
+            transport.materialize(remote_commit)
+            return _Publish(restart=True, remote_commit=remote_commit)
         merged = _merge_diverged(
             config=config,
             transport=transport,
@@ -1553,6 +1505,7 @@ def _cycle(
     home: str,
     branch: str,
     adopt: AdoptChoice | None,
+    _restarted: bool = False,
 ) -> SyncReport:
     ledger = dict(ledger_store.load())
     head_commit = transport.head()
@@ -1644,6 +1597,34 @@ def _cycle(
         local_commit=local_commit,
         local_manifest=new_manifest,
     )
+    if outcome.restart:
+        # `_publish` adopted a remote that had rotated ahead of our collect commit; re-collect on
+        # the new generation. One restart settles it (the adopted tip is the remote's generation),
+        # so a second request means the remote rotated again mid-cycle.
+        if _restarted:
+            raise GitError("the remote rotated again while this machine adopted it; re-run `syncintosh sync`")
+        return _cycle(
+            transport=transport,
+            files=files,
+            cipher=cipher,
+            scanner=scanner,
+            store=store,
+            codec=codec,
+            wrapper=wrapper,
+            driver=driver,
+            presets=presets,
+            live=live,
+            ledger_store=ledger_store,
+            pending_store=pending_store,
+            deny=deny,
+            apps=apps,
+            source=source,
+            config=config,
+            home=home,
+            branch=branch,
+            adopt=adopt,
+            _restarted=True,
+        )
     if outcome.conflicts:
         pending_store.record(
             PendingState.create(

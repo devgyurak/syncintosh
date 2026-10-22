@@ -110,7 +110,8 @@ class GenerationDivergence(ManifestError):
         self.remote_generation = remote_generation
         super().__init__(
             f"local key generation {local_generation} diverges from remote {remote_generation}; "
-            "rotation is fast-forward only and is never merged"
+            "rotation is fast-forward only and is never merged. If a local rotation was never "
+            "published, run `syncintosh key rotate` — it adopts the remote and discards it"
         )
 
 
