@@ -21,6 +21,7 @@ from syncintosh.core.errors import GenerationDivergence
 from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
+from syncintosh.core.resolution import CollisionChoice, CollisionKey, RecordChoice
 
 # The three record-level conflicts; the kind decides the user's choice
 # (docs/design/03-manifest.md).
@@ -126,12 +127,20 @@ def merge_records(
     base: Mapping[str, ManifestRecord] | None,
     local: Mapping[str, ManifestRecord],
     remote: Mapping[str, ManifestRecord],
+    *,
+    choices: Mapping[str, RecordChoice] | None = None,
+    collision_choices: Mapping[CollisionKey, CollisionChoice] | None = None,
 ) -> RecordMergeResult:
     """Merge record maps keyed by `file_id` (``base = None`` means an empty base).
 
     `base`/`local`/`remote` may be a `Manifest.records` map or any record mapping. A record
     whose content changed on both sides while its metadata merged cleanly is returned as a
     `ContentMergeTask`, not as a conflict — only the content merge decides content.
+
+    `choices` settles a record conflict by its `file_id`; `collision_choices` settles a
+    `PathCollision` by its `CollisionKey`. A choice for something that is not a conflict or a
+    collision is ignored. Settling a record can dissolve a collision, so the collisions are
+    recomputed after the record choices, and the collision choices apply to what remains.
     """
     base_records: Mapping[str, ManifestRecord] = base or {}
     merged: dict[str, ManifestRecord] = {}
@@ -160,8 +169,31 @@ def merge_records(
         else:
             _merge_both_changed(file_id, base_record, local_record, remote_record, merged, conflicts, content_merges)
 
+    picks = choices or {}
+    unsettled: list[RecordConflict] = []
+    for conflict in conflicts:
+        if conflict.file_id in picks:
+            _settle_conflict(conflict, picks[conflict.file_id], merged, deleted)
+        else:
+            unsettled.append(conflict)
+    conflicts = unsettled
+
     deduplicated: list[str] = []
     collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
+    chosen = collision_choices or {}
+    settled = [collision for collision in collisions if _collision_key(collision) in chosen]
+    if settled:
+        losers = {
+            file_id
+            for collision in settled
+            for file_id in _losers(collision, chosen[_collision_key(collision)], local, remote)
+        }
+        for file_id in losers:
+            merged.pop(file_id, None)
+        content_merges = [task for task in content_merges if task.file_id not in losers]
+        conflicts = [conflict for conflict in conflicts if conflict.file_id not in losers]
+        collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
+
     return RecordMergeResult(
         merged=MappingProxyType(merged),
         conflicts=tuple(conflicts),
@@ -170,6 +202,58 @@ def merge_records(
         deleted=tuple(sorted(deleted)),
         deduplicated=tuple(sorted(deduplicated)),
     )
+
+
+def _settle_conflict(
+    conflict: RecordConflict,
+    choice: RecordChoice,
+    merged: dict[str, ManifestRecord],
+    deleted: list[str],
+) -> None:
+    """Apply one record choice: the chosen side's record survives, or the path is untracked.
+
+    A choice that does not fit the conflict's kind is a caller error, not something to guess at.
+    """
+    if conflict.kind == "delete/modify":
+        if choice == "delete":
+            deleted.append(conflict.file_id)
+            return
+        if choice != "keep":
+            raise ValueError(f"a delete/modify conflict takes keep or delete, not {choice!r}")
+        survivor = conflict.local if conflict.local is not None else conflict.remote
+        if survivor is not None:
+            merged[conflict.file_id] = survivor
+        return
+    if choice == "drop" and conflict.kind == "add/add":
+        return
+    if choice not in ("local", "remote"):
+        raise ValueError(f"a {conflict.kind} conflict takes local or remote, not {choice!r}")
+    picked = conflict.local if choice == "local" else conflict.remote
+    if picked is not None:
+        merged[conflict.file_id] = picked
+
+
+def _collision_key(collision: PathCollision) -> CollisionKey:
+    """The key a collision is settled under: the same folded key the record merge groups by."""
+    return (collision.scope, collision.machine, collision_key(collision.path))
+
+
+def _losers(
+    collision: PathCollision,
+    choice: CollisionChoice,
+    local: Mapping[str, ManifestRecord],
+    remote: Mapping[str, ManifestRecord],
+) -> tuple[str, ...]:
+    """The file IDs a collision choice drops; the survivor is the smallest ID the chosen side holds.
+
+    A side that holds none of the colliding IDs leaves the path untracked, the same as `drop`.
+    """
+    if choice == "drop":
+        return collision.file_ids
+    side = local if choice == "local" else remote
+    survivors = [file_id for file_id in collision.file_ids if file_id in side]
+    keep = min(survivors) if survivors else None
+    return tuple(file_id for file_id in collision.file_ids if file_id != keep)
 
 
 def merge_manifests(base: Manifest | None, local: Manifest, remote: Manifest) -> RecordMergeResult:
