@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from rich.console import Console
 
 from syncintosh.core.errors import DomainError
 from syncintosh.core.tree import path_label
 from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
+from syncintosh.services import diff_repo as diff_repo_service
 from syncintosh.services import doctor as doctor_service
 from syncintosh.services import export_ring as export_ring_service
 from syncintosh.services import import_ring as import_ring_service
@@ -46,6 +48,17 @@ BRANCH = "main"
 # Environment override for non-interactive runs (tests, the daemon). A passphrase on argv would
 # land in shell history, so it is read from the environment or prompted, never from an option.
 PASSPHRASE_ENV = "SYNCINTOSH_PASSPHRASE"
+
+# Rich renders the reports. `soft_wrap` and `markup=False` keep the printed text exactly the string
+# passed in — never wrapped or read as markup — so a report is the same whether or not a terminal
+# is attached (``AGENTS.md`` §2.3).
+_CONSOLE = Console(soft_wrap=True, markup=False, emoji=False)
+_CONSOLE_ERR = Console(stderr=True, soft_wrap=True, markup=False, emoji=False)
+
+
+def _say(message: str, *, err: bool = False) -> None:
+    """Print one report line through Rich, unchanged."""
+    (_CONSOLE_ERR if err else _CONSOLE).print(message, highlight=False)
 
 
 @app.callback()
@@ -346,6 +359,73 @@ def doctor() -> None:
 
 
 @app.command()
+def diff(values: bool = typer.Option(False, "--values", help="also show a unified diff of the changed values")) -> None:
+    """Show how this machine's tracked files differ from the repo. Read-only; never writes.
+
+    Values are hidden by default: the report names the file and the changed key paths. `--values`
+    adds a unified diff of the plaintext, which is the explicit opt-in to see the settings.
+    """
+    from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.crypto.cipher import EnvelopeCipher
+    from syncintosh.presets import BuiltinCatalog
+    from syncintosh.system.config import load_config
+    from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.live_files import SystemLiveFiles
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.vcs.git import GitCLITransport
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        transport = GitCLITransport(paths.repo_dir)
+        # Only the read-only ports: no scanner, so a `diff` on a fresh machine does not materialize
+        # the scan allowlist (`load_scan_allow` writes one when it is absent), and no lock.
+        report = diff_repo_service(
+            transport=transport,
+            cipher=EnvelopeCipher(_key_store(config.remote)),
+            live=SystemLiveFiles(),
+            config=config,
+            home=str(paths.home),
+            deny=SystemDenyList(),
+            branch=transport.branch() or BRANCH,
+            catalog=BuiltinCatalog.default(),
+            adapters={"jsonc": JsoncAdapter()},
+            validators=validators(),
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    _render_diff(report, values=values)
+
+
+def _render_diff(report, *, values: bool) -> None:
+    """Render a `DiffReport`; nothing here decides *what* differs (``AGENTS.md`` §2.3)."""
+    import difflib
+
+    if not report.entries:
+        _say("nothing is tracked here yet")
+        return
+    _say(report.source)
+    for entry in report.entries:
+        keys = ", ".join(path_label(path) for path in entry.key_paths)
+        suffix = f" [{keys}]" if keys else ""
+        _say(f"{entry.status}: {entry.path}{suffix}")
+    if not values:
+        return
+    for entry in report.entries:
+        if entry.status != "changed" or entry.here is None or entry.repo is None:
+            continue
+        for line in difflib.unified_diff(
+            entry.repo.splitlines(),
+            entry.here.splitlines(),
+            fromfile=f"{entry.path} (repo)",
+            tofile=f"{entry.path} (here)",
+            lineterm="",
+        ):
+            _say(line)
+
+
+@app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
 
@@ -590,14 +670,14 @@ def watch(
 def _render(report: SyncReport, config) -> None:
     """Print the cycle's outcome; the wording is the user's only account of what happened."""
     if report.first_sight:
-        typer.echo("these files exist here and in the repo with different content:")
+        _say("these files exist here and in the repo with different content:")
         for path in report.first_sight:
-            typer.echo(f"  {path}")
-        typer.echo("re-run with `sync --adopt local` (keep these) or `sync --adopt remote` (take the repo's)")
+            _say(f"  {path}")
+        _say("re-run with `sync --adopt local` (keep these) or `sync --adopt remote` (take the repo's)")
     if report.conflicts:
-        typer.echo("conflicts stopped the sync; nothing was applied:", err=True)
+        _say("conflicts stopped the sync; nothing was applied:", err=True)
         for conflict in report.conflicts:
-            typer.echo(f"  {conflict.path or conflict.file_id}: {conflict.detail}", err=True)
+            _say(f"  {conflict.path or conflict.file_id}: {conflict.detail}", err=True)
     for label, paths in (
         ("created", report.created),
         ("collected", report.collected),
@@ -608,31 +688,31 @@ def _render(report: SyncReport, config) -> None:
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:
-            typer.echo(f"{label}: {path}")
+            _say(f"{label}: {path}")
     for deferral in report.deferred:
         # A deferral is not a failure (the next sync on a machine that has the app writes it), so it
         # goes to stdout, with the app's own download page when that is why it was deferred.
-        typer.echo(f"deferred ({deferral.reason}): {deferral.path}")
+        _say(f"deferred ({deferral.reason}): {deferral.path}")
         if deferral.download_url:
-            typer.echo(f"  download: {deferral.download_url}")
+            _say(f"  download: {deferral.download_url}")
         if deferral.cask:
-            typer.echo(f"  or: brew install --cask {deferral.cask}")
+            _say(f"  or: brew install --cask {deferral.cask}")
     for refusal in report.refused:
         if refusal.blocking:
             # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
-            typer.echo(f"refused ({refusal.reason}): {refusal.path}", err=True)
+            _say(f"refused ({refusal.reason}): {refusal.path}", err=True)
         else:
             # Not `skipped`: that word already means a dangerous path here, and the two call for very
             # different reactions. The reason is shown too, so "the glob is full" is not mistaken for
             # "this machine does not track the path".
-            typer.echo(f"not synced ({refusal.reason}): {refusal.path}")
+            _say(f"not synced ({refusal.reason}): {refusal.path}")
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
-            typer.echo(f"{label} ({refusal.reason}): {refusal.path}", err=True)
+            _say(f"{label} ({refusal.reason}): {refusal.path}", err=True)
     if report.unchanged:
-        typer.echo("nothing changed")
+        _say("nothing changed")
     elif report.published_commit:
-        typer.echo(f"published {report.published_commit[:12]}")
+        _say(f"published {report.published_commit[:12]}")
 
 
 def main() -> None:

@@ -32,11 +32,13 @@ from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest
 from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
 from syncintosh.core.ports import LiveFiles, PushOutcome
+from syncintosh.core.presets import EMPTY_CATALOG
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
+from syncintosh.services.diff import DiffReport, diff_repo
 from syncintosh.services.keys import (
     export_ring,
     import_ring,
@@ -972,6 +974,66 @@ def test_prune_drops_a_generation_no_reachable_object_uses(tmp_path, memory_key_
 
     # then
     assert a.store.generations() == (1,)
+
+
+# --------------------------------------------------------------------------- diff
+
+
+def _diff(machine: Machine) -> DiffReport:
+    return diff_repo(
+        transport=GitCLITransport(machine.repo),
+        cipher=EnvelopeCipher(machine.store),
+        live=SystemLiveFiles(),
+        config=load_config(machine.config_file),
+        home=str(machine.home),
+        deny=SystemDenyList(),
+        branch=BRANCH,
+        catalog=EMPTY_CATALOG,
+        adapters={},
+        validators={},
+    )
+
+
+def test_diff_reports_an_in_sync_file(tmp_path, memory_key_store) -> None:
+    # given — two machines in sync
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    report = _diff(a)
+
+    # then
+    assert [(entry.path, entry.status) for entry in report.entries] == [(ZSH, "in-sync")]
+
+
+def test_diff_reports_a_local_change_without_exposing_it_through_key_paths(tmp_path, memory_key_store) -> None:
+    # given — the live file differs from what the repo holds
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nCHANGED\nthree\n")
+
+    # when
+    report = _diff(a)
+
+    # then — reported as changed, with no key paths for a whole-file (text) format
+    entry = next(entry for entry in report.entries if entry.path == ZSH)
+    assert entry.status == "changed"
+    assert entry.key_paths == ()
+
+
+def test_diff_compares_the_live_file_with_the_fetched_remote_tip(tmp_path, memory_key_store) -> None:
+    # given — A published a change; B fetched it but never applied it
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"from A\n")
+    _run(a)
+    GitCLITransport(b.repo).fetch(b.remote, BRANCH)
+
+    # when
+    report = _diff(b)
+
+    # then — the diff names the repo side as the fetched commit and both plaintexts
+    entry = next(entry for entry in report.entries if entry.path == ZSH)
+    assert entry.status == "changed"
+    assert entry.repo == "from A\n"
+    assert entry.here == "one\ntwo\nthree\n"
 
 
 def test_collected_and_applied_files_are_regular_files(tmp_path, memory_key_store) -> None:

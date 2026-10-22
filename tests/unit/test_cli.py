@@ -504,3 +504,57 @@ def test_doctor_exits_non_zero_when_a_check_fails(monkeypatch) -> None:
     # then
     assert result.exit_code == 1
     assert "[FAIL] lock: held" in _combined(result)
+
+
+def _changed_diff(path: str = ".zshrc"):
+    from syncintosh.services import DiffReport, FileDiff
+
+    return DiffReport(entries=(FileDiff(path, "changed", here="SECRET=1\n", repo="SECRET=0\n"),))
+
+
+def test_diff_hides_values_by_default(monkeypatch) -> None:
+    # given — a changed file whose plaintext holds a value
+    _doctor_config()
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda **_kwargs: _changed_diff())
+
+    # when
+    result = runner.invoke(main_module.app, ["diff"])
+
+    # then — the file and status show, the value does not
+    assert result.exit_code == 0
+    assert "changed: .zshrc" in _combined(result)
+    assert "SECRET" not in _combined(result)
+
+
+def test_diff_values_shows_the_plaintext_labeled_by_side(monkeypatch) -> None:
+    # given — the same changed file
+    _doctor_config()
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda **_kwargs: _changed_diff())
+
+    # when
+    result = runner.invoke(main_module.app, ["diff", "--values"])
+
+    # then — the opt-in shows the value, and the headers name the right side each way
+    assert result.exit_code == 0
+    output = _combined(result)
+    assert "SECRET=1" in output
+    assert "--- .zshrc (repo)" in output
+    assert "+++ .zshrc (here)" in output
+
+
+def test_diff_prints_a_colon_name_literally(monkeypatch) -> None:
+    # given — a path whose name looks like an emoji shortcode
+    _doctor_config()
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda **_kwargs: _changed_diff(path=":rocket:.json"))
+
+    # when
+    result = runner.invoke(main_module.app, ["diff"])
+
+    # then — the name is printed as a name, never turned into an emoji
+    assert result.exit_code == 0
+    output = _combined(result)
+    assert ":rocket:.json" in output
+    assert "🚀" not in output
