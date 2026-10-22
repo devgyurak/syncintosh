@@ -20,12 +20,14 @@ from syncintosh.core.errors import DomainError
 from syncintosh.core.tree import path_label
 from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
+from syncintosh.services import doctor as doctor_service
 from syncintosh.services import export_ring as export_ring_service
 from syncintosh.services import import_ring as import_ring_service
 from syncintosh.services import prune_generation as prune_generation_service
 from syncintosh.services import remote_commitments as remote_commitments_service
 from syncintosh.services import rotate_repo as rotate_repo_service
 from syncintosh.services import sync as sync_service
+from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 
 if TYPE_CHECKING:  # both names appear only in a return annotation
     from syncintosh.core.ports import SyntaxValidator
@@ -68,6 +70,13 @@ def _key_store(remote: str):
     from syncintosh.crypto.keyring_store import KeyringKeyStore
 
     return KeyringKeyStore(f"syncintosh:{remote}")
+
+
+def _launchd_daemon(home):
+    """The launchd daemon for `home`. A seam, so a test drives the commands without `launchctl`."""
+    from syncintosh.system.daemon import LaunchdDaemon
+
+    return LaunchdDaemon(home)
 
 
 def _fail(exc: DomainError) -> None:
@@ -258,6 +267,84 @@ def key_prune(generation: int = typer.Argument(..., help="the generation id to d
     typer.echo(f"generation {generation} is not needed by reachable history")
 
 
+# The launchd job group. `install` recurs every time so the plist always embeds the current build.
+daemon_app = typer.Typer(help="Install and remove the background sync job.", no_args_is_help=True)
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.command("install")
+def daemon_install(
+    poll: int = typer.Option(DEFAULT_POLL_SECONDS, "--poll", min=1, help="seconds between remote-polling syncs"),
+) -> None:
+    """Install (or refresh) the launchd job that runs `syncintosh watch` in the background.
+
+    The plist embeds this build's **absolute** entry point and is rewritten every install, so a
+    stale path left by a different Python or install method cannot survive. `syncintosh doctor`
+    verifies it.
+    """
+    from syncintosh.system.daemon import entry_point
+    from syncintosh.system.paths import MachinePaths
+
+    entry = entry_point()
+    if entry is None:
+        raise typer.BadParameter("`syncintosh` is not on PATH; install it before the daemon")
+    try:
+        _launchd_daemon(MachinePaths.default().home).install(entry_point=entry, poll_seconds=poll)
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"installed the background job; it runs {entry} watch --poll {poll}")
+
+
+@daemon_app.command("uninstall")
+def daemon_uninstall() -> None:
+    """Stop the launchd job and remove its plist."""
+    from syncintosh.system.paths import MachinePaths
+
+    try:
+        _launchd_daemon(MachinePaths.default().home).uninstall()
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo("removed the background job")
+
+
+@app.command()
+def doctor() -> None:
+    """Check that this machine's install can actually sync. Exits 1 when a check fails."""
+    from syncintosh.system.config import load_config
+    from syncintosh.system.daemon import entry_point
+    from syncintosh.system.lock import FileLock
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.pending import DirectoryPendingStore
+    from syncintosh.vcs.git import GitCLITransport
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        transport = GitCLITransport(paths.repo_dir)
+        daemon = _launchd_daemon(paths.home)
+        report = doctor_service(
+            transport=transport,
+            store=_key_store(config.remote),
+            # A short wait: doctor asks whether the lock is held, not to take it for a long while.
+            lock=FileLock(paths.lock_file, timeout_seconds=0.5),
+            pending=DirectoryPendingStore(paths.pending_dir),
+            remote=config.remote,
+            branch=transport.branch() or BRANCH,
+            plist_entry_point=daemon.recorded_entry_point(),
+            expected_entry_point=entry_point(),
+            job_loaded=daemon.is_loaded(),
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    for check in report.checks:
+        typer.echo(f"[{'ok' if check.ok else 'FAIL'}] {check.name}: {check.detail}")
+    if not report.healthy:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
@@ -440,10 +527,17 @@ def watch(
     quiet: float = typer.Option(
         DEFAULT_QUIET_SECONDS, "--quiet", help="seconds of quiet before a change triggers a sync"
     ),
+    poll: float | None = typer.Option(
+        None,
+        "--poll",
+        min=1,
+        help="seconds between remote-polling syncs (the daemon sets this); omit for event-driven only",
+    ),
 ) -> None:
     """Watch the tracked paths and sync after a change settles. Runs in the foreground.
 
-    Registering this with launchd and running it on a schedule is #8; this is the loop itself.
+    `syncintosh daemon install` runs this under launchd with `--poll`, so a change on another Mac
+    also arrives without a local edit.
     """
     from syncintosh.core.watch import WatchFilter
     from syncintosh.services import watch as watch_service
@@ -480,6 +574,7 @@ def watch(
             targets=targets,
             run=run,
             quiet_seconds=quiet,
+            poll_seconds=poll,
             on_report=lambda report: _render(report, config),
             on_error=error,
         )

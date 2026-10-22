@@ -400,6 +400,14 @@ class GitTransport(Protocol):
         """
         ...
 
+    def remote_reachable(self, remote: str) -> bool:
+        """True when `remote` answers (``git ls-remote``), without fetching or writing anything.
+
+        Used by `doctor`: a remote that cannot be reached is a real failure to report, but a
+        diagnostic must not move refs or pull objects to find out.
+        """
+        ...
+
 
 @runtime_checkable
 class SyncLock(Protocol):

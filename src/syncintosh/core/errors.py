@@ -226,6 +226,14 @@ class PruneRefused(DomainError):
     """
 
 
+class DaemonError(DomainError):
+    """The launchd job could not be installed or removed.
+
+    The plist embeds the absolute path of the entry point (``docs/design/README.md``, launchd), so
+    a `launchctl` failure means the daemon is not running the build the user just installed.
+    """
+
+
 class ScanAllowCorrupt(DomainError):
     """The machine-local scan allowlist is unreadable or not a valid allowlist.
 

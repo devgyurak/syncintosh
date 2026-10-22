@@ -82,6 +82,9 @@ class _UnusedTransport:
     def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
         raise AssertionError("unused")
 
+    def remote_reachable(self, remote: str) -> bool:
+        raise AssertionError("unused")
+
 
 class _UnusedCipher:
     """A `Cipher` whose every method fails: a refused record is never decrypted."""

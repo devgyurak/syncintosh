@@ -7,6 +7,7 @@ infrastructure class — `cli` injects the implementation (``AGENTS.md`` §2.2).
 
 from __future__ import annotations
 
+from syncintosh.services.doctor import Check, DoctorReport, doctor
 from syncintosh.services.keys import (
     export_ring,
     import_ring,
@@ -23,10 +24,13 @@ from syncintosh.services.sync import Deferral, Refusal, SyncReport, sync
 from syncintosh.services.watch import watch
 
 __all__ = [
+    "Check",
     "Deferral",
+    "DoctorReport",
     "Refusal",
     "RenderedMerge",
     "SyncReport",
+    "doctor",
     "export_ring",
     "import_ring",
     "init_new_repo",
