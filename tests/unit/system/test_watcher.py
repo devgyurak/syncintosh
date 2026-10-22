@@ -149,6 +149,27 @@ def test_a_dead_observer_is_rebuilt(tmp_path) -> None:
         watcher.stop()
 
 
+def test_a_replaced_watched_directory_is_rebuilt_from_its_identity_alone(tmp_path, monkeypatch) -> None:
+    # given — a directory removed and recreated under the same name. Whether that shows up as a new
+    # inode is the platform's business (Linux reuses the freed one), so the identity is stubbed here;
+    # the real check is exercised end to end in `tests/integration/test_watcher_observer.py`.
+    home = tmp_path / "home"
+    (home / "snippets").mkdir(parents=True)
+    watcher = WatchdogFileWatch(home=str(home), directories=("snippets",))
+    watcher.start()
+    try:
+        watcher._seen = watcher._snapshot()
+        monkeypatch.setattr(watcher, "_snapshot", lambda: {"snippets": (1, 2)})
+
+        # when
+        watcher.wait(0.1)
+
+        # then — reported, so the service catches up on whatever the rebuild dropped
+        assert watcher.rebuilt() is True
+    finally:
+        watcher.stop()
+
+
 def test_no_watched_directories_report_no_change(tmp_path) -> None:
     # given — a watch whose only directory does not exist
     home = tmp_path / "home"
