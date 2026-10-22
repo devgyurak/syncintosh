@@ -11,6 +11,8 @@ App:       Visual Studio Code (stable)
 Bundle ID: com.microsoft.VSCode        (the Homebrew cask's zap paths)
 Paths:     ~/Library/Application Support/Code/User/settings.json    (JSONC object)
            ~/Library/Application Support/Code/User/keybindings.json (JSONC array, compared whole)
+           ~/Library/Application Support/Code/User/snippets/*.json          (language snippets)
+           ~/Library/Application Support/Code/User/snippets/*.code-snippets (global snippets)
 Format:    JSONC (comments and trailing commas; `setProperty` edits preserve both)
 Noise:     the keys `userDataSync` computes as "not synced" — see below
 Excluded:  http.proxyAuthorization
@@ -29,6 +31,11 @@ Sources:
   `src/vs/platform/files/node/diskFileSystemProvider.ts` (an atomic `.vsctmp` + rename save, so a
   copy-based collect never reads a half-written file).
 - `code.visualstudio.com/docs/configure/settings` and `brew info --cask visual-studio-code`.
+- `code.visualstudio.com/docs/editor/userdefinedsnippets` — "Create your own snippets": user
+  snippets live under `Code/User/snippets/`, a language snippet file is `javascript.json`, the files
+  are "written in JSON, support C-style comments", and a global snippet file is "JSON with the file
+  suffix `.code-snippets`". That is two globs rather than exact paths: which snippet files exist is a
+  per-machine fact, so this preset names the directory and the two suffixes.
 
 ## What is noise, and why it is safe to name a key that never matches
 
@@ -55,9 +62,12 @@ with this preset.
   than guessed at.
 - `settingsSync.ignoredSettings` is not consulted: reproducing VS Code's own ignore list would
   mean reading a setting the sync never applies, and it is a follow-up (issue #6, V3).
-- `snippets/`, `tasks.json`, `mcp.json`, Insiders, portable mode, and `--user-data-dir` are not
-  tracked. `mcp.json` in particular holds server `env` and `headers`, which are credentials, and
-  it needs its own exclusion pass before it can be collected safely.
+- A snippet file is synced as ordinary JSONC with no strip list, and the secret scan is the backstop
+  for a credential inlined in a `body`. `tasks.json`, `mcp.json`, Insiders, portable mode,
+  `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under
+  the `$HOME` user directory) are not tracked. `mcp.json` in particular holds server `env` and
+  `headers`, which are credentials, and it needs its own exclusion pass before it can be collected
+  safely.
 """
 
 from __future__ import annotations
@@ -67,6 +77,8 @@ from syncintosh.core.tree import KeyPath
 
 SETTINGS = "Library/Application Support/Code/User/settings.json"
 KEYBINDINGS = "Library/Application Support/Code/User/keybindings.json"
+SNIPPETS_JSON = "Library/Application Support/Code/User/snippets/*.json"
+SNIPPETS_GLOBAL = "Library/Application Support/Code/User/snippets/*.code-snippets"
 
 # Machine-local settings: the ones `userDataSync.getIgnoredSettings` excludes (a registration with
 # `ignoreSync`, or `scope: MACHINE` / `MACHINE_OVERRIDABLE`). They are cut on the collect side, so
@@ -114,10 +126,26 @@ VSCODE = Preset.create(
         # is correct — the array's order carries meaning (a later entry overrides an earlier one),
         # so identifying entries by key would silently change behaviour (decision V6).
         PresetFile.create(path=KEYBINDINGS, format="jsonc"),
+        # User snippets: a **directory** of per-machine files, so a glob rather than an exact path.
+        # The two patterns do not overlap — one file is either a language `.json` snippet or a global
+        # `.code-snippets` one — and a file the other machine created is written here only because
+        # this machine's own config names the same glob (`core/config.LocalGlob`). No strip list: a
+        # snippet is the user's own text, and the secret scan is the backstop for a token inlined in
+        # a `body`.
+        PresetFile.create(path=SNIPPETS_JSON, format="jsonc"),
+        PresetFile.create(path=SNIPPETS_GLOBAL, format="jsonc"),
     ),
     bundle_id="com.microsoft.VSCode",
     download_url="https://code.visualstudio.com/download",
     cask="visual-studio-code",
 )
 
-__all__ = ["EXCLUDED", "KEYBINDINGS", "NOISE", "SETTINGS", "VSCODE"]
+__all__ = [
+    "EXCLUDED",
+    "KEYBINDINGS",
+    "NOISE",
+    "SETTINGS",
+    "SNIPPETS_GLOBAL",
+    "SNIPPETS_JSON",
+    "VSCODE",
+]

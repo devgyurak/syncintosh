@@ -16,7 +16,7 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | # | Step | Notes |
 |---|---|---|
 | 1 | **lock** | Take the advisory lock at `~/.local/share/syncintosh/sync.lock`. **Every** mutating operation takes it — `sync`, `resolve`, `rollback`, and `key rotate` — so a rotation cannot race a sync. The daemon and the CLI share it; a second caller waits for a bounded time, then reports "another sync is running" instead of racing. Read-only commands (`status`, `diff`) do not take it. |
-| 2 | **collect** | Read the preset paths into the plaintext mirror as **regular files, never symlinks** (§2.4). Dangerous paths are refused here, before anything is read (§3.4). |
+| 2 | **collect** | Read the tracked paths into memory — there is **no plaintext mirror on disk** (``AGENTS.md`` §3.3; the collected bytes are held only long enough to seal them) — as **regular files, never symlinks** (§2.4). A preset **glob** (`snippets/*.json`) is expanded here to the files this machine has. Dangerous paths are refused before anything is read (§3.4). |
 | 3 | **scan** | The secret scan runs over the collected plaintext (§3.4). It is part of the **encrypt boundary**, not a step that can be skipped — see below. |
 | 4 | **stage** | Encrypt the records whose **live file changed against the apply ledger** — never against `HEAD` ([below](#change-detection-is-against-the-apply-ledger)). If nothing changed, write nothing and jump to step 6. |
 | 5 | **commit** | Commit the staged ciphertext on the local branch. This is the backup commit §3.5 requires. |
@@ -72,6 +72,21 @@ guards the write regardless.
 
 **Criss-cross history is a hard error.** If `git merge-base --all` returns more than one
 commit, sync stops and reports it rather than inventing a recursive merge.
+
+## Preset globs
+
+A preset's path may pattern the **last** element only (`snippets/*.json`); `**`, or a pattern in a
+directory element, is refused when the catalog is built, so an expansion is one directory listing
+and never a walk. Only regular files and symlinks are listed; each expanded file then goes through the
+**same** deny → ownership → symlink → projection checks an exact item gets: the directory is listed,
+but every file inside it is judged on its own. `core.presets.MAX_GLOB_EXPANSION` bounds how many files
+a glob **publishes**, as a soft guard: a file that is already a record keeps being collected, new files
+fill the slots that are left, and only the ones past that are held back and reported by name.
+
+A record for a path inside a glob is written on another machine **only because that machine's own
+config names a glob** (`core/config.LocalGlob`). The file is per-machine — this Mac has
+`javascript.json`, that one has `python.json` — so an exact allowlist item cannot express it, and the
+glob is what bounds what a record that arrived from the repo may touch (``docs/design/03-manifest.md``).
 
 ## Change detection is against the apply ledger
 

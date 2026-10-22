@@ -151,8 +151,9 @@ UV_VALUE_FLAGS = (
 _SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 REASON = (
-    "Blocked: syncintosh secrets and plaintext working copies are off-limits to agents. "
-    "This includes ~/.local/share/syncintosh/work/ (plaintext mirror), key exports, "
+    "Blocked: syncintosh secrets and machine-local state are off-limits to agents. "
+    "This includes ~/.local/share/syncintosh/ (the clone, the apply ledger, the pending "
+    "plaintext, and the scan allowlist's key), key exports, "
     "*.key/*.pem, ~/.ssh, ~/.aws, ~/.kube, ~/.docker/config.json (auths), ~/Library/Cookies, "
     ".env, and the login keychain. Reading them risks leaking the user's secrets or the "
     "unrecoverable master key. Use tests/fixtures/ instead, and read the code to learn the "

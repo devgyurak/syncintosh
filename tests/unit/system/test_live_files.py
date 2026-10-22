@@ -115,3 +115,46 @@ def test_a_write_flushes_to_storage_and_syncs_the_directory(tmp_path, monkeypatc
 
     # then
     assert calls == ["storage", "dir"]
+
+
+def test_list_dir_returns_the_non_directory_entries_sorted(tmp_path) -> None:
+    # given — two files and a subdirectory, which a glob never recurses into
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    live = SystemLiveFiles()
+
+    # when
+    names = live.list_dir(str(tmp_path))
+
+    # then
+    assert names == ("a.json", "b.json")
+
+
+def test_list_dir_includes_a_symlink_that_points_at_a_directory(tmp_path) -> None:
+    # given — a symlink to a directory is a symlink first, so the collector must see it and report it
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link.json").symlink_to(tmp_path / "real")
+    live = SystemLiveFiles()
+
+    # when & then
+    assert live.list_dir(str(tmp_path)) == ("link.json",)
+
+
+def test_list_dir_of_a_missing_or_non_directory_is_empty(tmp_path) -> None:
+    # given — the app is not installed, or the path is a file rather than a directory
+    (tmp_path / "file.json").write_text("{}", encoding="utf-8")
+    live = SystemLiveFiles()
+
+    # when & then
+    assert live.list_dir(str(tmp_path / "missing")) == ()
+    assert live.list_dir(str(tmp_path / "file.json")) == ()
+
+
+def test_list_dir_excludes_a_named_pipe(tmp_path) -> None:
+    # given — a FIFO is not a settings file, and a blocking read of one would hang the collect
+    os.mkfifo(tmp_path / "pipe.json")
+    (tmp_path / "real.json").write_text("{}", encoding="utf-8")
+
+    # when & then
+    assert SystemLiveFiles().list_dir(str(tmp_path)) == ("real.json",)

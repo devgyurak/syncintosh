@@ -157,6 +157,8 @@ hold:
   directory cannot be used to escape;
 - `path` is one of the known paths of the preset named by the record's `preset`, according to
   the **local** preset catalog ([presets.md](presets.md));
+- `path` is in this machine's **local allowlist** — an exact tracked item, or a directory **glob**
+  the machine's own config names ([01-sync-model.md](01-sync-model.md), "Preset globs");
 - the record's `scope` and `machine` say this machine may write it
   ([02-base-and-merge.md](02-base-and-merge.md)).
 
@@ -175,6 +177,18 @@ naming a path its preset does not own (a hand-edited config, or a catalog that c
 would publish a record that every machine's apply then refuses — including the one that published
 it, so it would never get a ledger entry and every later sync would ask for `--adopt` again.
 Collect refuses it and reports it, so nothing is published in the first place.
+
+### Directory globs in the local allowlist
+
+The local allowlist is the config's `items` (exact paths) plus its `globs` (directory patterns). A
+glob is what lets a preset own a **directory** of per-machine files — VS Code's `snippets/*.json` —
+which an exact item cannot express, because the file names differ between Macs. The pattern may only
+sit in the last element (`**` and a pattern in a directory element are refused), so an expansion is
+one listing and never a walk, and each expanded file runs the same deny → ownership → symlink →
+projection checks an exact item does. A record is written under a glob **only because this machine's
+own config names the same pattern** (`core/config.LocalGlob`), matched on the record's path and never
+on its `preset` — which is what keeps a synced manifest from reaching a path the local config did not
+choose.
 
 ### `~/.zshrc` that is a symlink
 

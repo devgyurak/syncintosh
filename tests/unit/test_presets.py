@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.errors import ConfigError
-from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, download_trust
+from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, PresetGlob, download_trust
 from syncintosh.presets import BuiltinCatalog, docker, vscode, zsh
 
 
@@ -162,12 +162,17 @@ def test_a_key_path_at_the_document_root_is_refused() -> None:
         _file(excluded={()})
 
 
-def test_the_vscode_preset_names_both_user_files() -> None:
+def test_the_vscode_preset_names_its_user_files_and_snippet_globs() -> None:
     # when
     paths = [file.path for file in vscode.VSCODE.files]
 
-    # then
-    assert paths == ["Library/Application Support/Code/User/settings.json", vscode.KEYBINDINGS]
+    # then — the two exact files, then the two snippet globs (a directory of per-machine files)
+    assert paths == [
+        vscode.SETTINGS,
+        vscode.KEYBINDINGS,
+        vscode.SNIPPETS_JSON,
+        vscode.SNIPPETS_GLOBAL,
+    ]
 
 
 def test_the_vscode_preset_keeps_noise_and_the_proxy_credential_apart() -> None:
@@ -288,3 +293,148 @@ def test_preset_for_folds_case_and_normalization() -> None:
 def test_the_empty_catalog_owns_no_path() -> None:
     # when & then
     assert EMPTY_CATALOG.preset_for(vscode.SETTINGS) is None
+
+
+# --------------------------------------------------------------------------- globs
+
+
+def test_a_glob_only_sits_in_the_last_element() -> None:
+    # given — a pattern in a directory element would name a whole tree, not one directory
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetGlob.create("Library/*/snippets/file.json")
+
+
+def test_a_recursive_glob_is_refused() -> None:
+    # given — `**` would turn the expansion from one listing into an unbounded walk
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetGlob.create("Library/Application Support/Code/User/snippets/**")
+
+
+def test_a_glob_that_names_no_pattern_is_refused() -> None:
+    # given — an exact path belongs in a `PresetFile`, not a `PresetGlob`
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetGlob.create("Library/Application Support/Code/User/settings.json")
+
+
+def test_a_glob_matches_its_directory_and_last_element() -> None:
+    # given
+    glob = PresetGlob.create("Library/Application Support/Code/User/snippets/*.json")
+
+    # when & then — the comparison is folded, so a differently-cased path names the same file
+    assert glob.matches("Library/Application Support/Code/User/snippets/javascript.json") is True
+    assert glob.matches("library/application support/code/user/snippets/JAVASCRIPT.json") is True
+    assert glob.matches("Library/Application Support/Code/User/snippets/global.code-snippets") is False
+    assert glob.matches("Library/Application Support/Code/User/settings.json") is False
+
+
+def test_a_question_mark_matches_one_character() -> None:
+    # given
+    glob = PresetGlob.create("dir/v?.json")
+
+    # when & then
+    assert glob.expand(["v1.json", "v12.json", "v.json"]) == ("dir/v1.json",)
+
+
+def test_expand_prefixes_the_directory_and_sorts() -> None:
+    # given
+    glob = PresetGlob.create("a/b/*.json")
+
+    # when
+    expanded = glob.expand(["z.json", "a.json", "note.txt"])
+
+    # then
+    assert expanded == ("a/b/a.json", "a/b/z.json")
+
+
+def test_expand_of_a_home_root_glob_has_no_prefix() -> None:
+    # given — a glob in `$HOME` itself, so the directory element is empty
+    glob = PresetGlob.create("*.json")
+
+    # when & then
+    assert glob.expand(["a.json"]) == ("a.json",)
+
+
+def test_a_preset_file_knows_whether_it_is_a_glob() -> None:
+    # given
+    exact = PresetFile.create(path="a/b.json", format="jsonc")
+    globbed = PresetFile.create(path="a/*.json", format="jsonc")
+
+    # when & then
+    assert exact.is_glob is False
+    assert globbed.is_glob is True
+    assert globbed.matches("a/x.json") is True
+    assert exact.matches("a/b.json") is True
+    assert exact.matches("a/c.json") is False
+
+
+def test_a_glob_over_another_presets_exact_path_is_refused() -> None:
+    # given — a glob that owns a directory a built-in preset already owns one file of
+    overlapping = Preset.create(
+        name="overlap",
+        files=(PresetFile.create(path="Library/Application Support/Code/User/*.json", format="jsonc"),),
+    )
+
+    # when & then
+    with pytest.raises(ConfigError):
+        BuiltinCatalog.create((*BuiltinCatalog.default().presets, overlapping))
+
+
+def test_the_catalog_matches_a_path_a_glob_owns() -> None:
+    # given
+    catalog = BuiltinCatalog.default()
+    snippet = vscode.SNIPPETS_JSON.replace("*", "javascript")
+
+    # when
+    policy = catalog.policy_for(snippet)
+    preset = catalog.preset_for(snippet)
+
+    # then — the glob's policy is the snippet file's, and the owning preset is reported so a
+    # deferral for a snippet carries its download page and cask too
+    assert policy is not None
+    assert policy.is_glob is True
+    assert preset is not None
+    assert preset.name == "vscode"
+    assert catalog.knows("vscode", snippet) is True
+    assert catalog.knows("zsh", snippet) is False
+
+
+def test_a_glob_in_a_directory_element_is_refused() -> None:
+    # given — a metacharacter outside the last element would name a literal directory
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetGlob.create("a/**/b/*.json")
+
+
+def test_a_preset_file_with_a_metacharacter_outside_the_last_element_is_refused() -> None:
+    # given — neither an exact path nor a last-element glob
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetFile.create(path="a/*/b.json", format="jsonc")
+
+
+def test_a_glob_does_not_match_its_own_pattern_text() -> None:
+    # given — a record that arrived from the repo carrying the pattern as its path
+    glob = PresetGlob.create("d/*.json")
+
+    # when & then — the pattern text is not a file the glob names, so `apply` cannot create one
+    assert glob.matches("d/*.json") is False
+    assert glob.matches("d/?x.json") is False
+    assert glob.matches("d/x.json") is True
+
+
+def test_a_glob_over_its_own_presets_exact_path_is_refused() -> None:
+    # given — one preset declaring both a directory glob and a file inside it
+    ambiguous = Preset.create(
+        name="ambiguous",
+        files=(
+            PresetFile.create(path="d/*.json", format="jsonc"),
+            PresetFile.create(path="d/secret.json", format="jsonc", excluded={("token",)}),
+        ),
+    )
+
+    # when & then — which policy applied would depend on declaration order, so it is refused
+    with pytest.raises(ConfigError):
+        BuiltinCatalog.create((ambiguous,))

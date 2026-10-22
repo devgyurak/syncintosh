@@ -54,7 +54,29 @@ class BuiltinCatalog:
                 }
             )
             raise ConfigError(f"two built-in presets claim one path: {list(clashes)} ({', '.join(breeders)})")
+        cls._refuse_glob_over_exact(presets)
         return cls(presets=presets)
+
+    @staticmethod
+    def _refuse_glob_over_exact(presets: tuple[Preset, ...]) -> None:
+        """Refuse a glob that covers an exact path any preset already owns.
+
+        A glob owns a directory, and an exact path must not fall inside it — not another preset's,
+        and not the same preset's: two entries would claim one file, and which policy applied (for
+        one, which credential keys are stripped) would depend on catalog order. Detected here rather
+        than at collect, so a catalog cannot be built that is ambiguous.
+        """
+        exact = [(preset.name, file.path) for preset in presets for file in preset.files if not file.is_glob]
+        covered = sorted(
+            f"{preset.name} glob {file.path} covers {other}:{path}"
+            for preset in presets
+            for file in preset.files
+            if file.glob is not None
+            for other, path in exact
+            if file.glob.matches(path)
+        )
+        if covered:
+            raise ConfigError(f"a preset glob covers another preset's path: {covered}")
 
     @classmethod
     def default(cls) -> BuiltinCatalog:
@@ -69,13 +91,10 @@ class BuiltinCatalog:
         """The policy for `path`, matched on the folded path, or `None` when unowned.
 
         Matched on path — never on the preset name a record carries — so a synced record cannot
-        choose a weaker policy by naming a different preset (``docs/design/03-manifest.md``).
+        choose a weaker policy by naming a different preset (``docs/design/03-manifest.md``). A
+        glob entry matches by its directory and last element.
         """
-        folded = collision_key(path)
-        return next(
-            (file for preset in self.presets for file in preset.files if collision_key(file.path) == folded),
-            None,
-        )
+        return next((file for preset in self.presets for file in preset.files if file.matches(path)), None)
 
     def knows(self, preset: str, path: str) -> bool:
         """True when `path` is one `preset` may name here.
@@ -87,19 +106,17 @@ class BuiltinCatalog:
         builtin = self.get(preset)
         if builtin is None:
             return True
-        folded = collision_key(path)
-        return any(collision_key(file.path) == folded for file in builtin.files)
+        return any(file.matches(path) for file in builtin.files)
 
     def preset_for(self, path: str) -> Preset | None:
         """The built-in preset that owns `path`, or `None` when none does.
 
-        Matched on the folded path, the same way `policy_for` is, so a deferral report can carry
-        the owning app's download page and cask without trusting the `preset` name a record
-        arrived with (``AGENTS.md`` §3.6).
+        Matched on the folded path, the same way `policy_for` is — including a **glob** entry, so a
+        file expanded from `snippets/*.json` still reports the preset, its download page, and its
+        cask — and never on the `preset` name a record arrived with (``AGENTS.md`` §3.6).
         """
-        folded = collision_key(path)
         return next(
-            (preset for preset in self.presets if any(collision_key(file.path) == folded for file in preset.files)),
+            (preset for preset in self.presets if any(file.matches(path) for file in preset.files)),
             None,
         )
 

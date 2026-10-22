@@ -79,6 +79,22 @@ class SystemLiveFiles:
         """True when `path` is a symbolic link."""
         return Path(path).is_symlink()
 
+    def list_dir(self, path: str) -> tuple[str, ...]:
+        """The last elements of the non-directory entries in `path`, sorted.
+
+        A symbolic link is included even when it points at a directory, so the collector can see
+        and report it rather than silently drop it. A subdirectory is excluded: a glob matches the
+        last element only and never recurses (`core/presets.PresetGlob`). So is anything that is
+        neither a regular file nor a symlink — a FIFO or a socket is not a settings file, and a
+        blocking read of one would hang the collect. A path that is missing or is not a directory
+        answers empty, the same way `read` answers `None` for a missing file.
+        """
+        try:
+            entries = list(Path(path).iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return ()
+        return tuple(sorted(entry.name for entry in entries if entry.is_symlink() or entry.is_file()))
+
     def remove(self, path: str) -> None:
         """Remove the file if present. A missing file is not a failure of intent."""
         Path(path).unlink(missing_ok=True)

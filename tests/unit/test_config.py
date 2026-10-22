@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from syncintosh.core.config import LocalItem, SyncConfig, allows
+from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.manifest import ManifestRecord
 from syncintosh.core.models import Scope
@@ -135,6 +135,77 @@ def test_a_malformed_config_is_a_domain_error(tmp_path: Path, payload: str) -> N
     # given
     path = tmp_path / "config.json"
     path.write_text(payload, encoding="utf-8")
+
+    # when & then
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+# --------------------------------------------------------------------------- globs
+
+
+def _glob(path: str, *, scope: Scope = "common", machine: str | None = None) -> LocalGlob:
+    return LocalGlob.create(path=path, preset="vscode", scope=scope, machine=machine, format="jsonc")
+
+
+def test_a_glob_allows_a_record_inside_its_directory() -> None:
+    # given — the local allowlist names a directory pattern, not one exact file
+    config = _config()
+    config = SyncConfig.create(
+        remote=config.remote,
+        machine_id=config.machine_id,
+        items=config.items,
+        globs=(_glob("Code/User/snippets/*.json"),),
+    )
+
+    # when & then — a snippet the other machine created is allowed; anything else is not
+    assert allows_path(config, scope="common", machine=None, path="Code/User/snippets/javascript.json") is True
+    assert allows_path(config, scope="common", machine=None, path="Code/User/snippets/global.code-snippets") is False
+    assert allows_path(config, scope="common", machine=None, path="Code/User/settings.json") is False
+
+
+def test_a_machine_scope_glob_must_name_this_machine() -> None:
+    # given
+    entry = _glob("Code/User/snippets/*.json", scope="machine", machine="other-mac")
+
+    # when & then
+    with pytest.raises(ConfigError):
+        SyncConfig.create(remote="r", machine_id="mac-studio", items=(), globs=(entry,))
+
+
+def test_a_glob_and_an_item_are_written_and_read_back(tmp_path) -> None:
+    # given
+    config = SyncConfig.create(
+        remote="git@example.com:me/settings.git",
+        machine_id="mac-studio",
+        items=(GOOD_ITEM,),
+        globs=(_glob("Code/User/snippets/*.json"),),
+    )
+    path = tmp_path / "config.json"
+
+    # when
+    save_config(config, path)
+    reloaded = load_config(path)
+
+    # then
+    assert reloaded.items == config.items
+    assert [entry.glob.path for entry in reloaded.globs] == ["Code/User/snippets/*.json"]
+    assert reloaded.globs[0].preset == "vscode"
+
+
+@pytest.mark.parametrize(
+    "globs",
+    [
+        "{}",
+        '[{"path": "Code/User/snippets/*.json"}]',
+        '[{"path": "Code/User/snippets/**", "preset": "vscode", "scope": "common", "format": "jsonc"}]',
+        '[{"path": "Code/User/snippets/*.json", "preset": "vscode", "scope": "common", "format": "jsonc", "x": 1}]',
+    ],
+)
+def test_a_malformed_glob_list_is_refused(globs: str, tmp_path: Path) -> None:
+    # given
+    path = tmp_path / "config.json"
+    path.write_text('{"remote": "r", "machine_id": "m", "items": [], "globs": ' + globs + "}", encoding="utf-8")
 
     # when & then
     with pytest.raises(ConfigError):

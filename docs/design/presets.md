@@ -14,7 +14,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | Preset | Paths (relative to `$HOME`) | Format | Noise keys | Excluded in code | Bundle ID | Download URL | Cask |
 |---|---|---|---|---|---|---|---|
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
-| `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
+| `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` · `…/snippets/*.json` · `…/snippets/*.code-snippets` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 
 ### `docker` notes
@@ -85,10 +85,18 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 - A key that a machine never set simply does not arrive: a machine that has never had the file gets
   the synced settings without the machine-local ones, which then take VS Code's own defaults. That
   is what "not synced" means for a machine that never chose a value.
+- User snippets are two **globs** (`snippets/*.json` and `snippets/*.code-snippets`), verified
+  against `code.visualstudio.com/docs/editor/userdefinedsnippets`: a language snippet is
+  `snippets/javascript.json`, a global one is `snippets/<name>.code-snippets`, and the files are
+  "written in JSON, support C-style comments". Which files exist is per-machine, so the preset names
+  the directory and the two suffixes rather than exact paths; a snippet the other machine created is
+  written here only because this machine's own config names the same glob
+  ([01-sync-model.md](01-sync-model.md), "Preset globs").
 - **Out of scope:** a non-default profile (`User/profiles/<id>/`, refused by the apply-side catalog
-  check rather than guessed at), `settingsSync.ignoredSettings`, `snippets/`, `tasks.json`,
-  `mcp.json` (its server `env` and `headers` need their own exclusion pass before it can be
-  collected safely), Insiders, portable mode, and `--user-data-dir`.
+  check rather than guessed at), `settingsSync.ignoredSettings`, `tasks.json`, `mcp.json` (its server
+  `env` and `headers` need their own exclusion pass before it can be collected safely), Insiders,
+  portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which
+  are not under the `$HOME` user directory).
 
 ## How a row gets filled
 
