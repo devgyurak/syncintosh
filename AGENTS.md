@@ -145,12 +145,13 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
 
 ### 3.3 Plaintext never enters git
 
-- The plaintext working copy lives **outside** the git directory, under
-  `~/.local/share/syncintosh/work/`, and is git-ignored.
-- The **apply ledger** (`~/.local/share/syncintosh/applied.json`, content digests only) and the
-  pending-conflict state (`~/.local/share/syncintosh/pending/`) are siblings of `work/` and
-  never live inside the repo.
-- Nothing under that path, and no decrypted object, may be committed. The `guard-secrets`
+- There is **no plaintext working copy on disk**. Collection reads a tracked file into memory,
+  seals it, and drops the bytes; what does land as plaintext is a live file written on `apply` and
+  the pending-conflict state below.
+- The state directory (`~/.local/share/syncintosh/`) holds the apply ledger (`applied.json`,
+  content digests only), the pending-conflict state (`pending/`, plaintext), the scan allowlist,
+  and the clone — all **outside** the git directory, and the repo itself is a child of it.
+- Nothing under the state directory, and no decrypted object, may be committed. The `guard-secrets`
   hook blocks this; do not work around it.
 
 ### 3.4 Secrets are excluded by construction
@@ -289,8 +290,9 @@ raise), and a master key that fails to unwrap.
 
 ## 6. Security for agents
 
-- **Do not read or print** the plaintext work directory
-  (`~/.local/share/syncintosh/work/`), key exports, `*.key`, `*.pem`, `~/.ssh`,
+- **Do not read or print** the machine-local state directory
+  (`~/.local/share/syncintosh/`: the clone, the apply ledger, the pending plaintext, and the scan
+  allowlist's key), key exports, `*.key`, `*.pem`, `~/.ssh`,
   `~/.aws`, `~/.kube`, `~/.docker/config.json`, `~/Library/Cookies`, or `.env`. The
   `guard-secrets` hook blocks these. If it blocks you, do not work around it — use
   fixtures.
