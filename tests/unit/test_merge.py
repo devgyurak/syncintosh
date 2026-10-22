@@ -340,3 +340,18 @@ def test_an_empty_object_that_gained_a_child_is_not_a_conflict() -> None:
     # (docs/design/02-base-and-merge.md; `merge._fold_structure` documents this rule)
     assert result.conflicts == ()
     assert result.merged.to_value() == {"x": 1, "a": {"b": 2}}
+
+
+def test_a_merge_that_deletes_every_key_is_an_empty_object_document() -> None:
+    # given — each key is deleted on one side and left alone on the other, so the result is empty
+    base = tree_from_value({"": None, "0": None})
+    local = tree_from_value({"": None})
+    remote = tree_from_value({"0": None})
+
+    # when
+    result = merge_tree(base, local, remote)
+
+    # then — the root is an `EmptyObject`, the shape a parse of `{}` produces, so the rendered
+    # result re-parses to the same tree instead of a bare `{}` that no parse can return
+    assert result.merged == tree_from_value({})
+    assert result.merged.entries == {(): EmptyObject()}
