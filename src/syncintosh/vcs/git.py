@@ -22,11 +22,13 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from syncintosh.core.errors import GitError
 from syncintosh.core.ports import REMOTE_REF_PREFIX, PushOutcome
+from syncintosh.core.repo import MANIFEST_PATH, object_file_id
+from syncintosh.crypto.envelope import header_generation
 
 # The commits syncintosh writes are machine-generated and deterministic; a fixed identity keeps
 # them reproducible and keeps a test off the developer's real git config.
@@ -212,3 +214,81 @@ class GitCLITransport:
         if "non-fast-forward" in combined or "fetch first" in combined or "stale info" in combined:
             return "non-fast-forward"
         return "rejected"
+
+    def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
+        """The generations in every stored envelope reachable from `tips` (``rev-list`` + `cat-file`).
+
+        Only the cleartext key-generation header is read, so no key is needed. `rev-list --objects`
+        lists each reachable blob once with the path it is first found under; the envelope slots are
+        filtered out, their blobs are read in one `cat-file --batch`, and each header's generation is
+        collected.
+        """
+        if not tips:
+            return ()
+        listing = self._checked(["rev-list", "--objects", *tips])
+        oids: list[str] = []
+        for line in listing.stdout.decode("ascii", "replace").splitlines():
+            oid, separator, path = line.partition(" ")
+            # The repo's own slot recogniser decides what is an envelope: `objects/<id>.enc` or
+            # `manifest.enc`. `object_file_id` full-matches the slot, so a nested or unrelated
+            # path never counts (``core/repo.py``).
+            if separator and (path == MANIFEST_PATH or object_file_id(path) is not None):
+                oids.append(oid)
+        return _envelope_generations(self._batch_contents(tuple(dict.fromkeys(oids))))
+
+    def _batch_contents(self, oids: tuple[str, ...]) -> list[bytes]:
+        """The content of each object in `oids`, in one `git cat-file --batch`."""
+        if not oids:
+            return []
+        argv = ["git", "-c", "commit.gpgsign=false", "cat-file", "--batch"]
+        result = subprocess.run(
+            argv,
+            cwd=str(self._workdir),
+            env=self._env(),
+            input=("\n".join(oids) + "\n").encode("ascii"),
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = _redact(result.stderr.decode("utf-8", "replace"))
+            raise GitError(f"`git cat-file --batch` failed (exit {result.returncode}): {detail}")
+        try:
+            return _split_batch(result.stdout)
+        except (ValueError, IndexError) as exc:
+            # A malformed stream is a git failure, not a caller error; keep it a `DomainError`.
+            raise GitError("could not parse `git cat-file --batch` output") from exc
+
+
+def _split_batch(data: bytes) -> list[bytes]:
+    """Split `git cat-file --batch` output into each object's content bytes.
+
+    The stream is `<oid> SP <type> SP <size> LF <size bytes> LF` per object, and `<oid> SP missing
+    LF` for one that is absent; a missing object contributes nothing.
+    """
+    contents: list[bytes] = []
+    position = 0
+    total = len(data)
+    while position < total:
+        newline = data.index(b"\n", position)
+        header = data[position:newline].split(b" ")
+        position = newline + 1
+        if len(header) < 3:
+            continue
+        size = int(header[2])
+        contents.append(data[position : position + size])
+        position += size + 1  # skip the content's trailing LF
+    return contents
+
+
+def _envelope_generations(contents: Iterable[bytes]) -> tuple[int, ...]:
+    """The distinct, positive key generations named in the first header of each envelope.
+
+    The header parse has one owner — `crypto.envelope.header_generation` — so a format change
+    cannot silently make this walk miss a generation and let `key prune` drop a needed key.
+    """
+    generations: set[int] = set()
+    for content in contents:
+        key_id = header_generation(content)
+        if key_id is not None:
+            generations.add(key_id)
+    return tuple(sorted(generations))

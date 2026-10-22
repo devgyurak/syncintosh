@@ -41,6 +41,19 @@ def pack_header(key_id: int) -> bytes:
     return bytes([VERSION]) + be32(key_id)
 
 
+def header_generation(blob: bytes) -> int | None:
+    """The cleartext key generation an envelope names, or `None` when the bytes are not one.
+
+    Reads only the fixed header, so it needs **no key** — which is what lets `key prune` decide
+    reachability without one (``docs/design/05-key-generations.md``). A blob shorter than the
+    header, of an unknown version, or naming the invalid generation 0 is not an envelope.
+    """
+    if len(blob) < HEADER_SIZE or blob[0] != VERSION:
+        return None
+    key_id = from_be32(blob[1:HEADER_SIZE])
+    return None if key_id == 0 else key_id
+
+
 def _resolve_subject(domain: Domain, file_id: str) -> bytes:
     """Validate `file_id` against `domain` and return the AAD `subject`."""
     if domain == "object":

@@ -282,6 +282,9 @@ def test_git_transport_port_is_structural() -> None:
         def push(self, remote: str, branch: str, commit: str) -> str:
             return "ok"
 
+        def generations_in_reachable_objects(self, tips: tuple[str, ...]) -> tuple[int, ...]:
+            return ()
+
     # when
     matches = isinstance(FakeTransport(), GitTransport)
 
