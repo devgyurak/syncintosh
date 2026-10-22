@@ -109,8 +109,9 @@ class Preset:
     """A built-in app preset: its files and the metadata for detecting and pointing at the app.
 
     `download_url` is the vendor's official page. Only a URL hard-coded here is trusted
-    (``AGENTS.md`` §3.6), so the field is restricted to `https` and consumed only through
-    :func:`download_trust`.
+    (``AGENTS.md`` §3.6), so the field is restricted to `https`. A deferral report reads it
+    directly (`services.sync`); a URL that arrived from anywhere else is screened through
+    :func:`download_trust`. Both call sites rely on the caller passing the **shipped** catalog.
     """
 
     name: str
@@ -190,6 +191,9 @@ class EmptyCatalog:
         return True
 
     def get(self, name: str) -> Preset | None:
+        return None
+
+    def preset_for(self, path: str) -> Preset | None:
         return None
 
 

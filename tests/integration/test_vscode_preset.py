@@ -22,6 +22,7 @@ from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import SecretScanError
 from syncintosh.core.ledger import AdoptChoice
+from syncintosh.core.ports import AppDetector
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
@@ -30,7 +31,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import KEYBINDINGS, SETTINGS
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -67,6 +68,18 @@ class Machine:
     machine_id: str
     recovery: Path | None = None
     codec: KeyMaterial = field(default_factory=lambda: KeyMaterial(params=CHEAP, allowed=ALLOWED))
+
+
+class _StubApps:
+    """A fixed `AppDetector` verdict, so the apply rule can be driven without `mdfind`."""
+
+    def __init__(self, verdict: bool | None) -> None:
+        self._verdict = verdict
+        self.queried: list[str] = []
+
+    def installed(self, bundle_id: str) -> bool | None:
+        self.queried.append(bundle_id)
+        return self._verdict
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -133,7 +146,7 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
-def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
+def _run(machine: Machine, *, adopt: AdoptChoice | None = None, apps: AppDetector | None = None) -> SyncReport:
     active = GitCLITransport(machine.repo)
     return sync(
         transport=active,
@@ -150,6 +163,7 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
         pending_store=DirectoryPendingStore(machine.pending),
         lock=FileLock(machine.lock, timeout_seconds=5),
         deny=SystemDenyList(),
+        apps=NO_APP_INFO if apps is None else apps,
         source=SecureFileIdSource(),
         config=load_config(machine.config_file),
         home=str(machine.home),
@@ -388,7 +402,72 @@ def test_a_machine_without_vscode_installed_defers(tmp_path, memory_key_store) -
     report = _run(b)
 
     # then — reported, and no directory tree was created
-    assert sorted(report.deferred) == sorted((SETTINGS, KEYBINDINGS))
+    assert sorted(deferral.path for deferral in report.deferred) == sorted((SETTINGS, KEYBINDINGS))
+    assert (b.home / "Library").exists() is False
+
+
+def test_an_uninstalled_app_defers_with_the_vendors_download_page(tmp_path, memory_key_store) -> None:
+    # given — A published, B has no VS Code, and the detector says the app is not installed
+    a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    b = _machine(tmp_path, memory_key_store, "machine-uninstalled", a.remote)
+    _initialize(b, import_from=a.recovery)
+    apps = _StubApps(False)
+
+    # when
+    report = _run(b, apps=apps)
+
+    # then — deferred with the built-in preset's own page and cask, and no tree created
+    assert sorted(deferral.path for deferral in report.deferred) == sorted((SETTINGS, KEYBINDINGS))
+    assert {deferral.reason for deferral in report.deferred} == {"the app is not installed on this machine"}
+    assert {deferral.download_url for deferral in report.deferred} == {"https://code.visualstudio.com/download"}
+    assert {deferral.cask for deferral in report.deferred} == {"visual-studio-code"}
+    assert (b.home / "Library").exists() is False
+    # one query for the whole preset, not one per file
+    assert apps.queried == ["com.microsoft.VSCode"]
+
+
+def test_a_missing_bundle_does_not_defer_when_the_directory_exists(tmp_path, memory_key_store) -> None:
+    # given — B has VS Code's directory, but Spotlight reports the app missing (indexing off, or the
+    # app under an excluded path): the directory is the stronger signal
+    a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    b = _machine(tmp_path, memory_key_store, "machine-spotlight-blind", a.remote)
+    _initialize(b, import_from=a.recovery)
+    (b.home / "Library" / "Application Support" / "Code" / "User").mkdir(parents=True)
+
+    # when
+    report = _run(b, apps=_StubApps(False))
+
+    # then — written, not deferred forever on a detector the user cannot fix
+    assert report.deferred == ()
+    assert sorted(report.applied) == sorted((SETTINGS, KEYBINDINGS))
+
+
+def test_an_installed_app_creates_the_directory_and_the_file(tmp_path, memory_key_store) -> None:
+    # given — the directory does not exist, but the detector says VS Code is installed
+    a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    b = _machine(tmp_path, memory_key_store, "machine-installed", a.remote)
+    _initialize(b, import_from=a.recovery)
+
+    # when
+    report = _run(b, apps=_StubApps(True))
+
+    # then — the documented change: the parent directory is created and the file is written
+    assert report.deferred == ()
+    assert sorted(report.applied) == sorted((SETTINGS, KEYBINDINGS))
+    assert (b.home / "Library" / "Application Support" / "Code" / "User" / "settings.json").exists() is True
+
+
+def test_an_undeterminable_app_falls_back_to_the_directory_heuristic(tmp_path, memory_key_store) -> None:
+    # given — a detector that could not answer (no `mdfind`, or a timeout)
+    a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    b = _machine(tmp_path, memory_key_store, "machine-unknown", a.remote)
+    _initialize(b, import_from=a.recovery)
+
+    # when
+    report = _run(b, apps=_StubApps(None))
+
+    # then — the directory is absent, so the old behaviour holds: deferred, nothing created
+    assert sorted(deferral.path for deferral in report.deferred) == sorted((SETTINGS, KEYBINDINGS))
     assert (b.home / "Library").exists() is False
 
 

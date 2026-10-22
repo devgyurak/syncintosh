@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.ports import (
+    AppDetector,
     Cipher,
     ContentAdapter,
     DenyList,
@@ -356,6 +357,19 @@ def test_deny_list_port_is_structural() -> None:
     assert matches is True
 
 
+def test_app_detector_port_is_structural() -> None:
+    # given
+    class FakeApps:
+        def installed(self, bundle_id: str) -> bool | None:
+            return None
+
+    # when
+    matches = isinstance(FakeApps(), AppDetector)
+
+    # then
+    assert matches is True
+
+
 def test_ring_codec_port_is_structural() -> None:
     # given
     class FakeCodec:
@@ -385,6 +399,9 @@ def test_preset_catalog_port_is_structural() -> None:
             return True
 
         def get(self, name: str) -> Preset | None:
+            return None
+
+        def preset_for(self, path: str) -> Preset | None:
             return None
 
     # when

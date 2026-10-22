@@ -216,6 +216,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
     from syncintosh.presets import BuiltinCatalog
+    from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.ledger import JsonLedgerStore
@@ -253,6 +254,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
             pending_store=DirectoryPendingStore(paths.pending_dir),
             lock=FileLock(paths.lock_file),
             deny=SystemDenyList(),
+            apps=MdfindAppDetector(),
             source=SecureFileIdSource(),
             config=config,
             home=str(paths.home),
@@ -287,7 +289,6 @@ def _render(report: SyncReport, config) -> None:
         ("created", report.created),
         ("collected", report.collected),
         ("applied", report.applied),
-        ("deferred (app not installed)", report.deferred),
         ("suppressed (removed here)", report.suppressed),
         ("skipped (dangerous path)", report.skipped),
         ("skipped (symbolic link)", report.symlinks),
@@ -295,6 +296,14 @@ def _render(report: SyncReport, config) -> None:
     ):
         for path in paths:
             typer.echo(f"{label}: {path}")
+    for deferral in report.deferred:
+        # A deferral is not a failure (the next sync on a machine that has the app writes it), so it
+        # goes to stdout, with the app's own download page when that is why it was deferred.
+        typer.echo(f"deferred ({deferral.reason}): {deferral.path}")
+        if deferral.download_url:
+            typer.echo(f"  download: {deferral.download_url}")
+        if deferral.cask:
+            typer.echo(f"  or: brew install --cask {deferral.cask}")
     for refusal in report.refused:
         if refusal.blocking:
             # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).

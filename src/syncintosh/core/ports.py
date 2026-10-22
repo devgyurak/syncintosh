@@ -115,6 +115,17 @@ class PresetCatalog(Protocol):
         """The built-in preset called `name`, or `None` when there is no such preset."""
         ...
 
+    def preset_for(self, path: str) -> Preset | None:
+        """The built-in preset that owns `path`, or `None` when none does.
+
+        Read for a deferral report, to carry the app's download page and cask. Matched on path,
+        never on the preset name a record carries (that name arrives from the repo), and the
+        caller must pass the **shipped** catalog: a `Preset` has no marker distinguishing a
+        built-in from a synced one, so a community catalog here would label a community URL
+        trusted (``AGENTS.md`` §3.6, ``docs/design/03-manifest.md``).
+        """
+        ...
+
 
 @runtime_checkable
 class SyntaxValidator(Protocol):
@@ -244,6 +255,29 @@ class DenyList(Protocol):
 
     def escapes(self, home: str, relpath: str) -> bool:
         """True when resolving `home/relpath` (parent first) leaves `home`."""
+        ...
+
+
+@runtime_checkable
+class AppDetector(Protocol):
+    """Whether a macOS app is installed, by bundle ID.
+
+    `apply` asks this before creating a file whose app is absent, so a record for an app this
+    machine does not have **defers** instead of writing into a directory that does not exist
+    (``docs/design/01-sync-model.md`` step 14). The verdict is deliberately three-valued:
+
+    * `True` — installed: `apply` may create the parent directory and the file;
+    * `False` — not installed: `apply` defers and reports the app's download page;
+    * `None` — undeterminable (no `mdfind`, a query that fails): the caller falls back to the
+      directory heuristic, because a detector that guessed `False` would defer a file forever on a
+      machine that actually has the app.
+
+    One lookup per bundle ID per cycle is the caller's job (``system/app_detector.py`` is the
+    implementation; `services` never imports it — ``AGENTS.md`` §2.2).
+    """
+
+    def installed(self, bundle_id: str) -> bool | None:
+        """True/False when the app's presence is known, `None` when it cannot be determined."""
         ...
 
 

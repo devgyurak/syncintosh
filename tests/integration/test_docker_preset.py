@@ -313,7 +313,7 @@ def test_a_machine_without_the_docker_directory_defers(tmp_path, memory_key_stor
     report = _run(b)
 
     # then — reported instead of creating a directory tree (the app is not installed)
-    assert sorted(report.deferred) == sorted((CONFIG, DAEMON))
+    assert sorted(deferral.path for deferral in report.deferred) == sorted((CONFIG, DAEMON))
     assert (b.home / ".docker").exists() is False
 
 
