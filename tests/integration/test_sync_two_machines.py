@@ -20,6 +20,7 @@ from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
     CommitmentsCorrupt,
+    ConflictsNotCovered,
     ContentDigestMismatch,
     GitError,
     KeyGenerationMismatch,
@@ -34,6 +35,7 @@ from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
 from syncintosh.core.ports import LiveFiles, PushOutcome
 from syncintosh.core.presets import EMPTY_CATALOG
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
+from syncintosh.core.resolution import Decide
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -47,6 +49,7 @@ from syncintosh.services.keys import (
     remote_commitments,
     rotate_repo,
 )
+from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -150,11 +153,23 @@ def _config_items(machine: Machine, path: str = ZSH, fmt: FileFormat = "text") -
     )
 
 
+def _config_for_paths(machine: Machine, paths: tuple[str, ...]) -> SyncConfig:
+    """A config that tracks several text files, all owned by the zsh preset."""
+    items = tuple(LocalItem.create(path=path, preset="zsh", scope="common", format="text") for path in paths)
+    return SyncConfig.create(remote=machine.remote, machine_id=machine.machine_id, items=items)
+
+
 def _initialize(
-    machine: Machine, *, import_from: Path | None = None, path: str = ZSH, fmt: FileFormat = "text"
+    machine: Machine,
+    *,
+    import_from: Path | None = None,
+    path: str = ZSH,
+    fmt: FileFormat = "text",
+    paths: tuple[str, ...] | None = None,
 ) -> None:
     machine.home.mkdir(parents=True, exist_ok=True)
-    save_config(_config_items(machine, path=path, fmt=fmt), machine.config_file)
+    config = _config_items(machine, path=path, fmt=fmt) if paths is None else _config_for_paths(machine, paths)
+    save_config(config, machine.config_file)
     transport = GitCLITransport(machine.repo)
     if import_from is None:
         transport.init()
@@ -186,6 +201,8 @@ def _run(
     transport: GitCLITransport | None = None,
     live: LiveFiles | None = None,
     adapters: dict | None = None,
+    resolving: bool = False,
+    decide: Decide | None = None,
 ) -> SyncReport:
     active = transport or GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
@@ -209,6 +226,8 @@ def _run(
         home=str(machine.home),
         branch=active.branch() or BRANCH,
         adopt=adopt,
+        resolving=resolving,
+        decide=decide,
     )
 
 
@@ -1417,3 +1436,250 @@ def test_jsonc_that_does_not_parse_is_a_conflict(tmp_path, memory_key_store) -> 
     # then
     assert report.has_conflicts is True
     assert _read_jsonc(b) == bad
+
+
+# --------------------------------------------------------------------------- resolve
+
+
+class FailingPushTransport(GitCLITransport):
+    """A transport whose push is refused as a non-fast-forward race that never settles.
+
+    The resolve run merges and then pushes; a push that loses leaves the pending state in place.
+    """
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        return "rejected"
+
+
+def test_resolve_take_remote_settles_the_conflict_and_both_machines_converge(tmp_path, memory_key_store) -> None:
+    # given — B's edit to the same line as A's is pending
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote")))
+
+    # then — the remote's line is the outcome, B's live file follows, and nothing stays pending
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\nFROM A\nthree\n"
+    assert DirectoryPendingStore(b.pending).is_pending() is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM A\nthree\n"
+
+
+def test_resolve_take_local_publishes_the_local_edit(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=decision(take_chooser("local")))
+
+    # then — B's edit wins everywhere, including on A
+    assert report.has_conflicts is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM B\nthree\n"
+
+
+def test_a_pick_whose_fingerprint_no_longer_matches_leaves_the_conflict_pending(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when — the decision was made against some other conflict
+    report = _run(b, resolving=True, decide=lambda views, answered: {"stale-fingerprint": "remote"})
+
+    # then — the conflict that the stale pick did not match stays, and the state stays pending
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+
+def test_a_declined_approval_publishes_nothing(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote"), approve=lambda views, picks: False))
+
+    # then — the conflict is still there, nothing was written to the live file, and the pending holds
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+
+def test_resolve_with_nothing_pending_is_refused(tmp_path, memory_key_store) -> None:
+    # given — a converged pair with no pending state
+    _, b, _ = _pair(tmp_path, memory_key_store)
+
+    # when & then
+    with pytest.raises(PendingConflict):
+        _run(b, resolving=True, decide=decision(take_chooser("remote")))
+
+
+def test_a_push_that_loses_keeps_the_pending_state(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when & then — the merge cannot be published, so the conflict must still be settleable
+    with pytest.raises(GitError):
+        _run(b, transport=FailingPushTransport(b.repo), resolving=True, decide=decision(take_chooser("remote")))
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+
+
+def test_a_scoped_resolve_that_names_no_conflict_publishes_nothing(tmp_path, memory_key_store) -> None:
+    # given — B is stopped on a conflict on .zshrc
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when — the run is scoped to another file, so the conflict has no decision
+    with pytest.raises(ConflictsNotCovered):
+        _run(b, resolving=True, decide=decision(scoped_chooser((".gitconfig",), (), home=str(b.home))))
+
+    # then — nothing is written, and the conflict is still pending
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+
+
+def test_a_scoped_resolve_naming_the_conflict_settles_it(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=decision(scoped_chooser((".zshrc",), (), home=str(b.home))))
+
+    # then
+    assert report.has_conflicts is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM B\nthree\n"
+
+
+def test_a_decision_is_asked_again_for_a_conflict_that_was_not_yet_answered(tmp_path, memory_key_store) -> None:
+    # given — two keys conflict in one settings file; the first decision answers only the first key
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15").replace("4\n", "5\n"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "12").replace("4\n", "6\n"), encoding="utf-8")
+    _run(b)
+    asked: list[int] = []
+
+    def first_key_only(views, answered):
+        pending = [view for view in views if view.fingerprint not in answered]
+        asked.append(len(pending))
+        return {pending[0].fingerprint: "remote"} if pending else None
+
+    # when
+    report = _run(b, resolving=True, decide=first_key_only)
+
+    # then — the second round asks about the key the first round left open, and both keys settle
+    assert report.has_conflicts is False
+    assert asked == [2, 1]
+    assert '"editor.fontSize": 15' in _read_jsonc(b)
+    assert '"editor.tabSize": 5' in _read_jsonc(b)
+
+
+# --------------------------------------------------------------------------- resolve across files
+
+PROFILE = ".zprofile"
+TRACKED = (ZSH, PROFILE)
+
+
+def _two_file_pair(tmp_path: Path, make_store) -> tuple[Machine, Machine]:
+    """Two machines in sync on two tracked files: A published both, B cloned and applied them."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a, paths=TRACKED)
+    _write_file(a, ZSH, b"one\ntwo\nthree\n")
+    _write_file(a, PROFILE, b"alpha\nbeta\n")
+    _run(a)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery, paths=TRACKED)
+    _run(b)
+    return a, b
+
+
+def test_one_resolve_settles_a_stale_and_a_diverged_conflict_in_turn(tmp_path, memory_key_store) -> None:
+    # given — ZSH is stale on B (its apply was aborted), PROFILE is diverged between the machines
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"one\nFROM A\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_file(b, ZSH, b"one\nFROM B\nthree\n")
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    stopped = _run(b)
+    asked: list[list[str]] = []
+    take_remote = decision(take_chooser("remote"))
+
+    def counting(views, answered):
+        asked.append(sorted(view.path for view in views if view.fingerprint not in answered))
+        return take_remote(views, answered)
+
+    # when — one resolve run answers the stale conflict, then the diverged one it exposes
+    report = _run(b, resolving=True, decide=counting)
+
+    # then — each conflict was asked in its own round, both took the remote side, and A converges
+    assert stopped.has_conflicts is True
+    assert asked == [[ZSH], [PROFILE]]
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\nFROM A\nthree\n"
+    assert (b.home / PROFILE).read_bytes() == b"alpha\nFROM A\n"
+    assert _run(a).has_conflicts is False
+    assert (a.home / PROFILE).read_bytes() == b"alpha\nFROM A\n"
+
+
+def test_local_and_remote_paths_settle_each_file_to_its_own_side(tmp_path, memory_key_store) -> None:
+    # given — both tracked files conflict on both machines
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"one\nFROM A\nthree\n")
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, ZSH, b"one\nFROM B\nthree\n")
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    _run(b)
+
+    # when & then — naming only one of the two conflicts leaves the other without a choice: nothing moves
+    with pytest.raises(ConflictsNotCovered):
+        _run(b, resolving=True, decide=decision(scoped_chooser((ZSH,), (), home=str(b.home))))
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+    # when — each file is named for the side it should take
+    report = _run(
+        b,
+        resolving=True,
+        decide=decision(scoped_chooser((ZSH,), (PROFILE,), home=str(b.home))),
+    )
+
+    # then — B keeps its own edit of the first file and takes A's edit of the second, and A converges
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+    assert (b.home / PROFILE).read_bytes() == b"alpha\nFROM A\n"
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM B\nthree\n"
+    assert (a.home / PROFILE).read_bytes() == b"alpha\nFROM A\n"

@@ -12,7 +12,8 @@ Pure: standard library only (``AGENTS.md`` §2.1).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 from syncintosh.core.models import Scope
@@ -58,12 +59,23 @@ def fingerprint(file_id: str, key_path: KeyPath | None, base: str, local: str, r
     return hashlib.sha256(material).hexdigest()
 
 
+# Any decision an operator (or a proposer) can make on one conflict.
+Choice = Side | RecordChoice | CollisionChoice
+
+# Decisions keyed by the conflict's fingerprint. A decision applies only to a conflict whose
+# fingerprint it was made against.
+Picks = Mapping[str, Choice]
+
+
 @dataclass(frozen=True)
 class ConflictView:
     """One conflict as a chooser sees it: where it is, what kind it is, and its fingerprint.
 
     `key_path` is set only for a key-level conflict; a record or file conflict has `None`.
-    The view carries no values, so it is safe to log or to hand to a proposer.
+    `local_present`/`remote_present` say whether that side holds the record at all, which decides
+    what "take local" means for a delete/modify. The `*_text` and `diff` fields are the values a
+    person reads before choosing. They are plaintext and excluded from `repr`, so a log or a
+    traceback never prints them (``AGENTS.md`` §4).
     """
 
     kind: ConflictKind
@@ -71,3 +83,16 @@ class ConflictView:
     path: str
     key_path: KeyPath | None
     fingerprint: str
+    local_present: bool = True
+    remote_present: bool = True
+    base_text: str = field(default="", repr=False)
+    local_text: str = field(default="", repr=False)
+    remote_text: str = field(default="", repr=False)
+    diff: str = field(default="", repr=False)
+
+
+# Called with every conflict the cycle currently finds, and the picks this run already made. It
+# returns the new picks (never the answered ones again), or `None` to stop without publishing. The
+# views carry plaintext (`*_text`, `diff`). A decision that sends any of it to a model or a network
+# must mask it first (``AGENTS.md`` §3.5); the interactive chooser only shows it.
+Decide = Callable[[tuple[ConflictView, ...], Picks], Picks | None]

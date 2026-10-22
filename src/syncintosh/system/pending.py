@@ -48,6 +48,10 @@ class DirectoryPendingStore:
         """Write the state and the unresolved plaintexts."""
         live = SystemLiveFiles()
         content = self._root / CONTENT_DIR
+        # A state being replaced must not leave its plaintext behind: a conflict the last run settled
+        # would otherwise still be read back, as a base, if the same file ID conflicts again.
+        if content.exists():
+            shutil.rmtree(content)
         conflicts = []
         for conflict in state.conflicts:
             entry = {"file_id": conflict.file_id, "path": conflict.path, "detail": conflict.detail}

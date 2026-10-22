@@ -20,10 +20,11 @@ other format adapters, LLM assistance, and conflict resolution are still to come
 
 ## Limitations
 
-- **Conflict resolution is not implemented yet.** A merge conflict stops the sync and records
-  the unresolved sides under `~/.local/share/syncintosh/pending/`; every later `sync` refuses
-  until the pending state is cleared. Until `resolve` lands, leave the pending state alone and
-  report what happened.
+- **A merge conflict stops the sync until it is resolved.** The unresolved sides are kept under
+  `~/.local/share/syncintosh/pending/`, and every later `sync` refuses until `syncintosh resolve`
+  settles them: `--take local|remote` settles every conflict to one side, or `--local PATH` and
+  `--remote PATH` settle each named conflict. A run that leaves any conflict without a choice
+  publishes nothing.
 - **A tracked file that is a symlink is reported, not synced.** If `~/.zshrc` is a link into a
   dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or

@@ -367,6 +367,9 @@ def test_pending_store_port_is_structural() -> None:
 
         def record(self, state: PendingState) -> None: ...
 
+        def load(self) -> PendingState | None:
+            return None
+
         def clear(self) -> None: ...
 
     # when

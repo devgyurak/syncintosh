@@ -14,6 +14,10 @@ class DomainError(Exception):
     """Base class for every domain failure that crosses a layer boundary."""
 
 
+class ConflictsNotCovered(DomainError):
+    """A resolve run has no decision for some pending conflicts, so nothing is published."""
+
+
 class CryptoError(DomainError):
     """Base class for every crypto failure."""
 

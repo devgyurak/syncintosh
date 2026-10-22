@@ -463,6 +463,10 @@ class PendingStore(Protocol):
         """Write `state` and its unresolved plaintexts. Raises on failure."""
         ...
 
+    def load(self) -> PendingState | None:
+        """Read the pending state back, or `None` when there is none. Raises when it is corrupt."""
+        ...
+
     def clear(self) -> None:
         """Remove the pending state, if any. Raises on failure."""
         ...
