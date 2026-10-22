@@ -28,18 +28,30 @@ class _Backend(Protocol):
 
     def set_password(self, service: str, username: str, password: str) -> None: ...
 
+    def delete_password(self, service: str, username: str) -> None: ...
+
 
 class KeyringKeyStore:
     """A generation-addressed key ring stored in the platform keyring.
 
     Each generation lives under `<namespace> / gen-<key_id>` as a lowercase-hex string; the
     index entry `<namespace> / generations` is the JSON list the keyring cannot otherwise give
-    back. `put` writes the key before the index, so a crash loses an index entry at worst, not
-    a key.
+    back. **The index is the source of truth**, with one deliberate exception: **generation 1**,
+    the master generation.
+
+    For every other generation `put` writes the key before the index and `drop` removes the index
+    entry before the key, so a crash at either point leaves an *orphan* key the index does not
+    list — which `get` hides and a later `put` overwrites. That is what keeps an abandoned,
+    distributed generation from answering `get(n)` for another machine's genuine generation `n`.
+
+    Gen 1 is never wrapped, distributed, or dropped, so it can never be an abandoned rotation, and
+    hiding it would let a lost index entry turn the live master key into an entry `init` then
+    overwrites. For gen 1 the raw entry always counts, so `init` refuses and `put` cannot clobber
+    it; the only way an index-less gen 1 arises is `init`'s own `put` crashing, and `init --import`
+    repairs it.
 
     The index is read-modify-write, so `put` is only safe while the caller holds the repo lock
-    (`docs/design/01-sync-model.md`). Constraining that — the key import and rotation path —
-    is the rotation slice's job (#8).
+    (`docs/design/01-sync-model.md`).
     """
 
     def __init__(self, namespace: str, backend: _Backend | None = None) -> None:
@@ -82,9 +94,18 @@ class KeyringKeyStore:
     def get(self, key_id: int) -> bytes | None:
         """Return generation `key_id`, or `None` when this machine does not hold it.
 
-        A present-but-unreadable entry raises `KeyStoreCorrupt`, not a bare `ValueError`, so a
-        caller that branches on `CryptoError` sees "re-import it" rather than a crash.
+        The index decides **presence**, with one deliberate exception: **generation 1**, which is
+        never wrapped, distributed, or dropped, so its raw entry always counts — that is what keeps
+        a lost index entry from turning the live master key into an entry `init` overwrites. Every
+        other generation whose key entry the index does not list is an orphan a crash left, and it
+        is invisible here: that keeps an abandoned, distributed generation from answering `get(n)`
+        for another machine's genuine generation `n` (``docs/design/05-key-generations.md``), and
+        lets a later `put` repair the orphan instead of colliding with it. A present-but-unreadable
+        entry raises `KeyStoreCorrupt`, not a bare `ValueError`, so a caller that branches on
+        `CryptoError` sees "re-import it" rather than a crash.
         """
+        if key_id != 1 and key_id not in self._read_index():
+            return None
         raw = self._active_backend().get_password(self._namespace, self._key_username(key_id))
         if raw is None:
             return None
@@ -106,11 +127,16 @@ class KeyringKeyStore:
         if existing is not None and existing != key:
             # Two keys for one generation id is a hard error, never something to reconcile:
             # published objects are already bound to one of them
-            # (docs/design/05-key-generations.md). The dedicated error lands with #8.
+            # (docs/design/05-key-generations.md). For generation 1 this is also what stops a fresh
+            # `init` from clobbering a live master key whose index entry was lost; for any other
+            # generation only an *indexed* id can conflict, since an unindexed orphan is invisible
+            # to `get` and repaired by the write below.
             raise ValueError(f"generation {key_id} already holds a different key")
-        # A corrupt stored entry also raises here (via get()); whether an import may overwrite
-        # one is the import/rotation slice's decision (#8), not a silent behaviour of this store.
+        # A corrupt entry that `get` can see (indexed, or generation 1) raises above; a corrupt
+        # *orphan* is invisible and overwritten here, repairing it.
         if existing is None:
+            # A fresh generation, or an orphan a crash left: write the key before the index, so a
+            # crash keeps leaving an orphan the index hides.
             self._active_backend().set_password(self._namespace, self._key_username(key_id), key.hex())
         self._index(key_id)
 
@@ -120,3 +146,26 @@ class KeyringKeyStore:
             return
         updated = sorted((*generations, key_id))
         self._active_backend().set_password(self._namespace, INDEX_USERNAME, json.dumps(updated))
+
+    def drop(self, key_id: int) -> None:
+        """Remove generation `key_id` from the ring, leaving the store unchanged when absent.
+
+        Generation 1 is refused: it is the master generation, and a ring without it cannot be
+        exported for recovery (``docs/design/05-key-generations.md``). The index is updated
+        **before** the key entry is removed, so a crash between the two leaves at worst an
+        orphaned key the ring does not list — never an index entry whose key is missing, which
+        would make every later export or rotation fail as `KeyStoreCorrupt`.
+        """
+        if key_id == 1:
+            raise ValueError("generation 1 is the master generation and cannot be dropped")
+        generations = self._read_index()
+        if key_id not in generations:
+            return
+        backend = self._active_backend()
+        backend.set_password(
+            self._namespace, INDEX_USERNAME, json.dumps([entry for entry in generations if entry != key_id])
+        )
+        if backend.get_password(self._namespace, self._key_username(key_id)) is not None:
+            # A prior crash can leave the key without its index entry; deleting an absent entry
+            # raises on macOS, so only delete one that is really there.
+            backend.delete_password(self._namespace, self._key_username(key_id))

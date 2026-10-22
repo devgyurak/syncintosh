@@ -57,6 +57,7 @@ from syncintosh.core.ports import (
     ContentAdapter,
     DenyList,
     FileIdSource,
+    GenerationWrap,
     GitTransport,
     KeyStore,
     LedgerStore,
@@ -74,7 +75,7 @@ from syncintosh.core.ports import (
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
 from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
-from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes, wrap_path
 from syncintosh.core.tree import KeyPath, path_label
 from syncintosh.services.repo_writer import write_repo
 
@@ -861,8 +862,8 @@ def _merge_stale(
 # --------------------------------------------------------------------------- publish
 
 
-def _verify_commitments(transport: GitTransport, codec: RingCodec, store: KeyStore, commit: str) -> None:
-    """Compare every held generation against the committed map at `commit`.
+def _read_commitments(transport: GitTransport, commit: str) -> dict[int, str]:
+    """The published commitment map at `commit`, refusing a repo that publishes none.
 
     The map is required, not optional: a commitment exists for every generation, and treating an
     absent file as "nothing to compare" would let a remote disable the only check that covers an
@@ -871,12 +872,49 @@ def _verify_commitments(transport: GitTransport, codec: RingCodec, store: KeySto
     blob = transport.read_blob(commit, COMMITMENTS_PATH)
     if blob is None:
         raise CommitmentsCorrupt(f"the repo publishes no {COMMITMENTS_PATH}")
-    published = loads_commitments(blob)
+    return loads_commitments(blob)
+
+
+def _absorb_wraps(
+    *,
+    transport: GitTransport,
+    wrapper: GenerationWrap,
+    codec: RingCodec,
+    store: KeyStore,
+    commit: str,
+    published: Mapping[int, str],
+) -> None:
+    """Add every generation the remote distributes and this machine does not yet hold.
+
+    A hygiene rotation publishes `keys/<new_id>.wrap` `KG_{n+1}` sealed under `KG_n`. The
+    commitment map lists every generation, so it is the index of which wraps to try; a generation
+    this machine already holds is never overwritten (a second key for one id is a hard error, and
+    `_verify_commitments` reports it). The unwrapped key is checked against the published
+    commitment **before** it reaches the ring, so a wrap that carries the wrong key is refused
+    rather than stored (``docs/design/05-key-generations.md``).
+    """
+    for key_id in sorted(published):
+        if store.get(key_id) is not None:
+            continue
+        blob = transport.read_blob(commit, wrap_path(key_id))
+        if blob is None:
+            # An out-of-band rotation publishes no wrap; the commitment still exists for it.
+            continue
+        key = wrapper.unwrap(blob, key_id=key_id)
+        if codec.commitment(key) != published[key_id]:
+            raise KeyGenerationMismatch(key_id, "the published commitment is not the key the wrap carries for it")
+        store.put(key_id, key)
+
+
+def _verify_commitments(codec: RingCodec, store: KeyStore, published: Mapping[int, str]) -> None:
+    """Compare every held generation against the committed map.
+
+    A held generation the repo does not commit to is the same disable-the-check lever as deleting
+    the file, one level finer, so it is refused too.
+    """
     for key_id in store.generations():
         expected = published.get(key_id)
         if expected is None:
-            # A commitment exists for every generation; a held generation the repo does not
-            # commit to is the same disable-the-check lever as deleting the file, one level finer.
             raise CommitmentsCorrupt(f"the repo publishes no commitment for generation {key_id}")
         key = store.get(key_id)
         if key is not None and codec.commitment(key) != expected:
@@ -970,8 +1008,16 @@ def _merge_diverged(
     if conflicts:
         return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
 
+    # Seal the merged result under the newer of the two sides' generations, never the older:
+    # a rotation must not be undone by a content merge. A pairwise generation divergence is
+    # refused earlier by `merge_manifests` (rotation is fast-forward only), so this floor is
+    # defensive; a genuine cross-generation merge would need the full re-seal `key rotate`
+    # performs, because `plan_writes` rewrites only objects whose digest changed
+    # (``docs/design/05-key-generations.md``).
     merged_manifest = Manifest.create(
-        schema=MANIFEST_SCHEMA, key_generation=local_manifest.key_generation, records=records
+        schema=MANIFEST_SCHEMA,
+        key_generation=max(local_manifest.key_generation, remote_manifest.key_generation),
+        records=records,
     )
     plan = plan_writes(local_manifest, merged_manifest)
     for file_id in plan.objects_to_write:
@@ -1036,6 +1082,7 @@ def _publish(
     driver: MergeDriver,
     presets: _Presets,
     codec: RingCodec,
+    wrapper: GenerationWrap,
     store: KeyStore,
     config: SyncConfig,
     branch: str,
@@ -1047,7 +1094,19 @@ def _publish(
         transport.fetch(config.remote, branch)
         remote_commit = transport.resolve(remote_ref(branch))
         if remote_commit is not None:
-            _verify_commitments(transport, codec, store, remote_commit)
+            # Absorb a distributed generation first, then check every held generation against the
+            # published commitments — so a generation this fetch delivered is covered by the same
+            # check as one this machine already held.
+            published = _read_commitments(transport, remote_commit)
+            _absorb_wraps(
+                transport=transport,
+                wrapper=wrapper,
+                codec=codec,
+                store=store,
+                commit=remote_commit,
+                published=published,
+            )
+            _verify_commitments(codec, store, published)
         local = transport.head()
         if remote_commit is None:
             outcome = _push_or_raise(transport, config.remote, branch, local_commit)
@@ -1423,6 +1482,7 @@ def sync(
     scanner: SecretScanner,
     store: KeyStore,
     codec: RingCodec,
+    wrapper: GenerationWrap,
     driver: MergeDriver,
     live: LiveFiles,
     ledger_store: LedgerStore,
@@ -1454,6 +1514,7 @@ def sync(
             scanner=scanner,
             store=store,
             codec=codec,
+            wrapper=wrapper,
             driver=driver,
             presets=presets,
             live=live,
@@ -1479,6 +1540,7 @@ def _cycle(
     scanner: SecretScanner,
     store: KeyStore,
     codec: RingCodec,
+    wrapper: GenerationWrap,
     driver: MergeDriver,
     presets: _Presets,
     live: LiveFiles,
@@ -1575,6 +1637,7 @@ def _cycle(
         driver=driver,
         presets=presets,
         codec=codec,
+        wrapper=wrapper,
         store=store,
         config=config,
         branch=branch,

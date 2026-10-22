@@ -48,6 +48,8 @@ def test_serialization_is_independent_of_insertion_order() -> None:
         b'{"1":"short"}',
         b'{"1":7}',
         b'{"1":"' + HEX_A.encode() + b'","1":"' + HEX_B.encode() + b'"}',
+        b'{"4294967296":"' + HEX_A.encode() + b'"}',
+        b'{"' + b"9" * 5000 + b'":"' + HEX_A.encode() + b'"}',
         b"\xff\xfe",
     ],
 )
@@ -63,6 +65,7 @@ def test_a_corrupt_map_is_refused(payload: bytes) -> None:
         {0: HEX_A},
         {1: "short"},
         {1: 7},
+        {2**32: HEX_A},
     ],
 )
 def test_the_encoder_refuses_what_the_parser_would_refuse(commitments) -> None:

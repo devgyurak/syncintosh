@@ -132,13 +132,15 @@ def _initialize(machine: Machine, config: SyncConfig, *, import_from: Path | Non
 
 def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
     active = GitCLITransport(machine.repo)
+    cipher = EnvelopeCipher(machine.store)
     return sync(
         transport=active,
         files=FileRepo(machine.repo),
-        cipher=EnvelopeCipher(machine.store),
+        cipher=cipher,
         scanner=PatternSecretScanner(),
         store=machine.store,
         codec=machine.codec,
+        wrapper=cipher,
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()},
         catalog=BuiltinCatalog.default(),

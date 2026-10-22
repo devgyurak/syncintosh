@@ -259,10 +259,14 @@ def _sync_ports(config, paths) -> dict:
 
     store = _key_store(config.remote)
     transport = GitCLITransport(paths.repo_dir)
+    # One object is both the `Cipher` and the `GenerationWrap`: the fetch absorbs a distributed
+    # generation through the same ring the objects are opened with.
+    cipher = EnvelopeCipher(store)
     return {
         "transport": transport,
         "files": FileRepo(paths.repo_dir),
-        "cipher": EnvelopeCipher(store),
+        "cipher": cipher,
+        "wrapper": cipher,
         # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it lives
         # outside the repo, so it never leaves this machine.
         "scanner": PatternSecretScanner(load_scan_allow(paths.scan_allow_file)),

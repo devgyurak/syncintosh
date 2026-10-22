@@ -34,6 +34,12 @@ class MemoryKeyStore:
             raise ValueError(f"generation {key_id} already holds a different key")
         self._keys[key_id] = key
 
+    def drop(self, key_id: int) -> None:
+        # Mirror the real store: generation 1 is the master generation and is never dropped.
+        if key_id == 1:
+            raise ValueError("generation 1 is the master generation and cannot be dropped")
+        self._keys.pop(key_id, None)
+
 
 @pytest.fixture(scope="session")
 def memory_key_store():

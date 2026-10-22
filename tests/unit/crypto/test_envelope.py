@@ -201,8 +201,8 @@ def test_a_manifest_subject_must_be_empty() -> None:
         envelope.encrypt(b"x", file_id=FILE_ID, key=KEY, key_id=KEY_ID, domain="manifest")
 
 
-def test_the_key_wrap_domain_is_not_encryptable_until_the_wrap_slice() -> None:
-    # when & then
+def test_the_generic_encrypt_never_takes_the_key_wrap_domain() -> None:
+    # when & then — key-wrap is built by wrap_generation(), which supplies the generation-id subject
     with pytest.raises(ValueError):
         envelope.encrypt(b"x", file_id="", key=KEY, key_id=KEY_ID, domain="key-wrap")
 

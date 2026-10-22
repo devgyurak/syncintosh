@@ -14,7 +14,7 @@ import pytest
 
 from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.errors import CommitmentsCorrupt, InitRefused, KeyGenerationMismatch, MasterKeyUnwrapError
-from syncintosh.core.ports import GitTransport
+from syncintosh.core.ports import GitTransport, KeyStore
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
@@ -123,6 +123,29 @@ class UndeletableLive(VanishingLive):
 
     def remove(self, path: str) -> None:
         raise OSError("read-only filesystem")
+
+
+class _UnlistedMasterKey:
+    """A store whose index lost generation 1 while the master key entry is still there.
+
+    `generations()` reports nothing, but `get(1)` returns the key — the state the index-as-truth
+    rule must not hide, or `init` would overwrite the live master key.
+    """
+
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def generations(self) -> tuple[int, ...]:
+        return ()
+
+    def get(self, key_id: int) -> bytes | None:
+        return self._key if key_id == 1 else None
+
+    def put(self, key_id: int, key: bytes) -> None:
+        raise AssertionError("init must refuse before writing")
+
+    def drop(self, key_id: int) -> None:
+        raise AssertionError("unused")
 
 
 def _codec() -> KeyMaterial:
@@ -278,6 +301,22 @@ def test_init_refuses_a_second_run_on_the_same_store(memory_key_store) -> None:
         )
     assert store.get(1) == first_key
     assert live.read(RECOVERY_PATH) == first_export
+
+
+def test_init_refuses_an_index_less_master_key() -> None:
+    # given — the master key entry is present but the index no longer lists generation 1
+    store = _UnlistedMasterKey(KEY_ONE)
+
+    # when & then — init must refuse rather than mint a fresh gen 1 over the live master key
+    with pytest.raises(InitRefused):
+        init_new_repo(
+            store=cast(KeyStore, store),
+            codec=_codec(),
+            files=InMemoryRepoFiles(),
+            live=InMemoryLive(),
+            recovery_path=RECOVERY_PATH,
+            passphrase=PASSPHRASE,
+        )
 
 
 def test_init_refuses_when_the_recovery_path_is_already_taken(memory_key_store) -> None:

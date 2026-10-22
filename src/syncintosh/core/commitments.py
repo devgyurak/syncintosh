@@ -24,8 +24,13 @@ from syncintosh.core.manifest_codec import canonical_json_bytes
 
 # 64 lowercase hex characters — the hex of a SHA-256 MAC.
 _COMMITMENT_RE = re.compile(r"[0-9a-f]{64}")
-# A generation id is written as its decimal string, and generation 0 does not exist.
-_GENERATION_RE = re.compile(r"[1-9][0-9]*")
+# A generation id is written as its decimal string, and generation 0 does not exist. The digit
+# count is bounded so a hand-edited `commitments.json` cannot reach `int()`'s string-conversion
+# limit (a `ValueError`, not a `CommitmentsCorrupt`) before the range check below.
+_GENERATION_RE = re.compile(r"[1-9][0-9]{0,9}")
+# A generation id is a big-endian `uint32` in every envelope header (docs/design/04-envelope-v1.md),
+# so an id the header cannot carry is refused here rather than crashing when a wrap is built from it.
+MAX_GENERATION_ID = 0xFFFF_FFFF
 
 
 def dumps_commitments(commitments: Mapping[int, str]) -> bytes:
@@ -37,8 +42,10 @@ def dumps_commitments(commitments: Mapping[int, str]) -> bytes:
     """
     payload: dict[str, str] = {}
     for key_id, commitment in commitments.items():
-        if not isinstance(key_id, int) or isinstance(key_id, bool) or key_id < 1:
-            raise CommitmentsCorrupt(f"generation id must be a positive integer, got {key_id!r}")
+        if not isinstance(key_id, int) or isinstance(key_id, bool) or not 1 <= key_id <= MAX_GENERATION_ID:
+            raise CommitmentsCorrupt(
+                f"generation id must be a positive integer no greater than {MAX_GENERATION_ID}, got {key_id!r}"
+            )
         if not isinstance(commitment, str) or _COMMITMENT_RE.fullmatch(commitment) is None:
             raise CommitmentsCorrupt(f"commitment for generation {key_id} is not 64 lowercase hex characters")
         payload[str(key_id)] = commitment
@@ -57,9 +64,13 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _parse_entry(raw: object, key: str) -> tuple[int, str]:
     if _GENERATION_RE.fullmatch(key) is None:
         raise CommitmentsCorrupt(f"commitments key {key!r} is not a positive generation id")
+    generation = int(key)
+    if generation > MAX_GENERATION_ID:
+        # An id the envelope header cannot carry must not reach `be32` and crash a key-wrap build.
+        raise CommitmentsCorrupt(f"commitments key {key!r} exceeds the maximum generation id {MAX_GENERATION_ID}")
     if not isinstance(raw, str) or _COMMITMENT_RE.fullmatch(raw) is None:
         raise CommitmentsCorrupt(f"commitment for generation {key} is not 64 lowercase hex characters")
-    return int(key), raw
+    return generation, raw
 
 
 def loads_commitments(data: bytes) -> dict[int, str]:

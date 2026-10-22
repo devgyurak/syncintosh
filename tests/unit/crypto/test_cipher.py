@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.errors import AuthenticationError, UnknownKeyGeneration
-from syncintosh.core.ports import Cipher
+from syncintosh.core.ports import Cipher, GenerationWrap
 from syncintosh.crypto.cipher import EnvelopeCipher
 
 KEY = bytes(range(32))
@@ -61,3 +61,11 @@ def test_the_cipher_satisfies_the_port(memory_key_store) -> None:
 
     # then
     assert isinstance(cipher, Cipher)
+
+
+def test_the_cipher_also_satisfies_the_generation_wrap_port(memory_key_store) -> None:
+    # when — one object is both the `Cipher` and the `GenerationWrap` the sync wires together
+    cipher = EnvelopeCipher(memory_key_store({1: KEY}))
+
+    # then
+    assert isinstance(cipher, GenerationWrap)
