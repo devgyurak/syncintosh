@@ -341,3 +341,55 @@ def test_sync_prints_a_deferrals_reason_and_install_hint(tmp_path, monkeypatch) 
     )
     assert "https://code.visualstudio.com/download" in _combined(result)
     assert "brew install --cask visual-studio-code" in _combined(result)
+
+
+def test_watch_wires_the_loop_and_runs_it(tmp_path, monkeypatch) -> None:
+    # given — a valid config and no tracked paths, so the command has nothing to observe
+    from syncintosh.core.config import SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=()),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(main_module, "sync_service", lambda **_kwargs: SyncReport())
+    ran: dict[str, object] = {}
+    monkeypatch.setattr("syncintosh.services.watch", lambda **kwargs: ran.update(kwargs))
+
+    # when
+    result = runner.invoke(main_module.app, ["watch"])
+
+    # then — the loop was handed the watcher, the filter, and a sync call, and returned cleanly
+    assert result.exit_code == 0
+    assert set(ran) == {"watch", "targets", "run", "quiet_seconds", "on_report", "on_error"}
+    assert "watching" in _combined(result)
+
+
+def test_watch_exits_non_zero_when_the_loop_cannot_start(tmp_path, monkeypatch) -> None:
+    # given — a valid config, and a loop that cannot establish the watch at all
+    from syncintosh.core.config import SyncConfig
+    from syncintosh.core.errors import WatchError
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=()),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+
+    def _refuse(**_kwargs) -> None:
+        raise WatchError("the watcher could not start: cannot watch")
+
+    monkeypatch.setattr("syncintosh.services.watch", _refuse)
+
+    # when
+    result = runner.invoke(main_module.app, ["watch"])
+
+    # then — a hard failure, rendered as an error rather than as a recovered-from cycle outcome
+    assert result.exit_code == 1
+    assert "the watcher could not start" in _combined(result)

@@ -18,6 +18,7 @@ import typer
 
 from syncintosh.core.errors import DomainError
 from syncintosh.core.tree import path_label
+from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
 from syncintosh.services import sync as sync_service
 
@@ -210,57 +211,15 @@ def init(
 @app.command()
 def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote, for a first-sight file")) -> None:
     """Collect, merge, publish, and apply. Exits 1 when conflicts remain."""
-    from syncintosh.adapters.jsonc import JsoncAdapter
-    from syncintosh.adapters.text_merge import TextMergeDriver
-    from syncintosh.crypto.cipher import EnvelopeCipher
-    from syncintosh.crypto.file_ids import SecureFileIdSource
-    from syncintosh.crypto.key_material import KeyMaterial
-    from syncintosh.presets import BuiltinCatalog
-    from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.config import load_config
-    from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.ledger import JsonLedgerStore
-    from syncintosh.system.live_files import SystemLiveFiles
-    from syncintosh.system.lock import FileLock
     from syncintosh.system.paths import MachinePaths
-    from syncintosh.system.pending import DirectoryPendingStore
-    from syncintosh.system.repo_files import FileRepo
-    from syncintosh.system.scan_allow import load_scan_allow
-    from syncintosh.system.secret_scan import PatternSecretScanner
-    from syncintosh.vcs.git import GitCLITransport
 
     if adopt not in (None, "local", "remote"):
         raise typer.BadParameter("--adopt must be `local` or `remote`")
     paths = MachinePaths.default()
     try:
         config = load_config(paths.config_file)
-        store = _key_store(config.remote)
-        transport = GitCLITransport(paths.repo_dir)
-        report = sync_service(
-            transport=transport,
-            files=FileRepo(paths.repo_dir),
-            cipher=EnvelopeCipher(store),
-            # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it
-            # lives outside the repo, so it never leaves this machine.
-            scanner=PatternSecretScanner(load_scan_allow(paths.scan_allow_file)),
-            store=store,
-            codec=KeyMaterial(),
-            driver=TextMergeDriver(),
-            adapters={"jsonc": JsoncAdapter()},
-            catalog=BuiltinCatalog.default(),
-            validators=validators(),
-            live=SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(paths.ledger_file),
-            pending_store=DirectoryPendingStore(paths.pending_dir),
-            lock=FileLock(paths.lock_file),
-            deny=SystemDenyList(),
-            apps=MdfindAppDetector(),
-            source=SecureFileIdSource(),
-            config=config,
-            home=str(paths.home),
-            branch=transport.branch() or BRANCH,
-            adopt=adopt,
-        )
+        report = sync_service(**_sync_ports(config, paths), adopt=adopt)
     except DomainError as exc:
         _fail(exc)
         return
@@ -272,6 +231,115 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         # "all is well". A record this machine simply does not track is *not* that — it is a normal
         # state (every machine carries every record) and is reported on stdout instead.
         raise typer.Exit(code=1)
+
+
+def _sync_ports(config, paths) -> dict:
+    """Every port one `sync` cycle needs, from this machine's paths and config.
+
+    Shared by `sync` and `watch`, so the two cannot drift on which catalog, scanner, or adapter map
+    they wire (``AGENTS.md`` §7). The imports stay inside, so CLI startup does not pay for a heavy
+    dependency (``AGENTS.md`` §4).
+    """
+    from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.adapters.text_merge import TextMergeDriver
+    from syncintosh.crypto.cipher import EnvelopeCipher
+    from syncintosh.crypto.file_ids import SecureFileIdSource
+    from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.presets import BuiltinCatalog
+    from syncintosh.system.app_detector import MdfindAppDetector
+    from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.ledger import JsonLedgerStore
+    from syncintosh.system.live_files import SystemLiveFiles
+    from syncintosh.system.lock import FileLock
+    from syncintosh.system.pending import DirectoryPendingStore
+    from syncintosh.system.repo_files import FileRepo
+    from syncintosh.system.scan_allow import load_scan_allow
+    from syncintosh.system.secret_scan import PatternSecretScanner
+    from syncintosh.vcs.git import GitCLITransport
+
+    store = _key_store(config.remote)
+    transport = GitCLITransport(paths.repo_dir)
+    return {
+        "transport": transport,
+        "files": FileRepo(paths.repo_dir),
+        "cipher": EnvelopeCipher(store),
+        # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it lives
+        # outside the repo, so it never leaves this machine.
+        "scanner": PatternSecretScanner(load_scan_allow(paths.scan_allow_file)),
+        "store": store,
+        "codec": KeyMaterial(),
+        "driver": TextMergeDriver(),
+        "adapters": {"jsonc": JsoncAdapter()},
+        "catalog": BuiltinCatalog.default(),
+        "validators": validators(),
+        "live": SystemLiveFiles(),
+        "ledger_store": JsonLedgerStore(paths.ledger_file),
+        "pending_store": DirectoryPendingStore(paths.pending_dir),
+        "lock": FileLock(paths.lock_file),
+        "deny": SystemDenyList(),
+        "apps": MdfindAppDetector(),
+        "source": SecureFileIdSource(),
+        "config": config,
+        "home": str(paths.home),
+        "branch": transport.branch() or BRANCH,
+    }
+
+
+@app.command()
+def watch(
+    quiet: float = typer.Option(
+        DEFAULT_QUIET_SECONDS, "--quiet", help="seconds of quiet before a change triggers a sync"
+    ),
+) -> None:
+    """Watch the tracked paths and sync after a change settles. Runs in the foreground.
+
+    Registering this with launchd and running it on a schedule is #8; this is the loop itself.
+    """
+    from syncintosh.core.watch import WatchFilter
+    from syncintosh.services import watch as watch_service
+    from syncintosh.system.config import load_config
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.watcher import WatchdogFileWatch
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        ports = _sync_ports(config, paths)
+    except DomainError as exc:
+        _fail(exc)
+        return
+    targets = WatchFilter.create(config)
+
+    def run() -> SyncReport:
+        return sync_service(**ports)
+
+    def error(exc: Exception) -> None:
+        # Anything a **cycle** can fail with — another sync's lock, a pending conflict, a network
+        # failure, a file that cannot be read — is reported and recovered from; the loop only raises
+        # when the watch could not start at all (``services/watch.py``).
+        typer.echo(f"watch: {exc}", err=True)
+
+    watcher = WatchdogFileWatch(home=str(paths.home), directories=targets.directories())
+    typer.echo(
+        f"watching {', '.join(targets.directories()) or 'nothing (no tracked paths)'}"
+        "; a directory that does not exist yet is picked up when it appears"
+    )
+    try:
+        watch_service(
+            watch=watcher,
+            targets=targets,
+            run=run,
+            quiet_seconds=quiet,
+            on_report=lambda report: _render(report, config),
+            on_error=error,
+        )
+    except KeyboardInterrupt:
+        typer.echo("stopped watching")
+    except DomainError as exc:
+        # The loop recovers from every cycle failure itself, so the one it raises is a watch that
+        # could not start: a hard failure, rendered exactly as `sync` renders one rather than as a
+        # traceback.
+        _fail(exc)
 
 
 def _render(report: SyncReport, config) -> None:

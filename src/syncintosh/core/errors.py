@@ -193,6 +193,16 @@ class PendingConflict(DomainError):
     """
 
 
+class WatchError(DomainError):
+    """The file watch could not be established, so there is nothing to wait on.
+
+    Deliberately a domain error rather than a bare `OSError`: it is the one failure `watch` does
+    **not** recover from. The loop is built to keep going through a failed cycle, so returning
+    normally after a failed start would report success — and a supervisor (launchd `KeepAlive`,
+    issue #8) restarts on a failed exit, not on exit 0 (``services/watch.py``).
+    """
+
+
 class InitRefused(DomainError):
     """`init` would clobber a key or a recovery export that already exists.
 

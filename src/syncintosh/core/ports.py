@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     # runtime import here would close the cycle (``AGENTS.md`` §4).
     from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
+    from syncintosh.core.watch import FileEvent
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
 # (`docs/design/04-envelope-v1.md`). A value is serialized verbatim in the HKDF `info`, so it
@@ -454,6 +455,37 @@ class LiveFiles(Protocol):
 
     def remove(self, path: str) -> None:
         """Remove the file if present. Raises on any other failure."""
+        ...
+
+
+@runtime_checkable
+class FileWatch(Protocol):
+    """Filesystem activity in the watched directories, as `FileEvent`s.
+
+    `watchdog` is not stdlib, so it sits behind this port (``AGENTS.md`` §2.9). `services.watch`
+    owns the filter, the debounce, and the sync call; this port only reports what changed. `start`
+    and `stop` are separate from the constructor so building it does no I/O (``AGENTS.md`` §2.6).
+    """
+
+    def start(self) -> None:
+        """Begin watching. Raises on failure."""
+        ...
+
+    def stop(self) -> None:
+        """Stop watching and release the observer. Safe to call when it was never started."""
+        ...
+
+    def rebuilt(self) -> bool:
+        """True when the watched set changed since the previous call.
+
+        A watched directory can be replaced (deleted and recreated, or swapped in place) without its
+        name changing, and the observer is rebuilt then. Events that arrive during the rebuild are
+        lost, so the caller treats this as a change and syncs once.
+        """
+        ...
+
+    def wait(self, timeout: float) -> tuple[FileEvent, ...]:
+        """Return the events seen, blocking up to `timeout` seconds; may be empty."""
         ...
 
 
