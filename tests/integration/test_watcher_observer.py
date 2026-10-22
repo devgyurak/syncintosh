@@ -38,6 +38,22 @@ def _consume(watcher: WatchdogFileWatch, targets: WatchFilter, matched: threadin
                 return
 
 
+def _rebuilt_within(watcher: WatchdogFileWatch, seconds: float) -> bool:
+    """Wait for a rebuild, up to `seconds`: how a replaced directory is noticed is platform work.
+
+    On APFS the recreated directory is a **new inode**, so the identity check sees it at once. On
+    Linux the freed inode is **reused**, so the identity is unchanged and the only signal left is
+    the emitter's own death — inotify reports that the watched directory was deleted, which takes a
+    poll of its own. `rebuilt()` latches, so polling it loses nothing.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        watcher.wait(0.25)
+        if watcher.rebuilt():
+            return True
+    return False
+
+
 def _targets() -> WatchFilter:
     config = SyncConfig.create(
         remote="r",
@@ -110,7 +126,7 @@ def test_a_watched_directory_is_rescheduled_after_it_is_recreated(tmp_path: Path
 
 def test_a_directory_replaced_in_place_is_noticed(tmp_path: Path) -> None:
     # given — a watched directory that is removed and recreated **immediately**, so its name is
-    # unchanged and only its identity differs
+    # unchanged and only its identity, or its watch, differs
     home = tmp_path / "home"
     (home / "snippets").mkdir(parents=True)
     watcher = WatchdogFileWatch(home=str(home), directories=("snippets",))
@@ -120,10 +136,9 @@ def test_a_directory_replaced_in_place_is_noticed(tmp_path: Path) -> None:
         # when
         shutil.rmtree(home / "snippets")
         (home / "snippets").mkdir()
-        watcher.wait(0.1)
 
-        # then — `(st_dev, st_ino)` changed, so the observer was rebuilt rather than left dead
-        assert watcher.rebuilt() is True
+        # then — rebuilt rather than left dead, on the platform's own schedule
+        assert _rebuilt_within(watcher, 10.0) is True
     finally:
         watcher.stop()
 
