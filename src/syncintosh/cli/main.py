@@ -546,6 +546,41 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         raise typer.Exit(code=1)
 
 
+@app.command()
+def resolve(
+    take: str | None = typer.Option(None, "--take", help="local | remote: settle the conflicts to that side"),
+    yes: bool = typer.Option(False, "--yes", help="publish without the approval prompt"),
+    paths: list[str] | None = typer.Argument(None, help="with --take, settle only the conflicts on these paths"),
+) -> None:
+    """Settle the conflicts a stopped sync left pending, then sync. Exits 1 when conflicts remain."""
+    from syncintosh.services.resolve import take_decision
+    from syncintosh.system.config import load_config
+    from syncintosh.system.paths import MachinePaths
+
+    if take not in ("local", "remote"):
+        raise typer.BadParameter("--take must be `local` or `remote`")
+    machine = MachinePaths.default()
+    approve = None if yes else _confirm_resolution
+    try:
+        config = load_config(machine.config_file)
+        decide = take_decision(take, paths=tuple(paths or ()), approve=approve)
+        report = sync_service(**_sync_ports(config, machine), resolving=True, decide=decide)
+    except DomainError as exc:
+        _fail(exc)
+        return
+    _render(report, config)
+    if report.has_conflicts:
+        typer.echo("nothing was published; the conflicts that remain are still pending", err=True)
+        raise typer.Exit(code=1)
+
+
+def _confirm_resolution(views, picks) -> bool:
+    """Show what will be published and ask before anything is written to the remote."""
+    for view in views:
+        typer.echo(f"  {view.path}  {view.kind}  ->  {picks[view.fingerprint]}")
+    return typer.confirm("Publish these choices?", default=False)
+
+
 def _sync_ports(config, paths) -> dict:
     """Every port one `sync` cycle needs, from this machine's paths and config.
 

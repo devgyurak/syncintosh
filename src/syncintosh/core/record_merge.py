@@ -309,7 +309,14 @@ def _losers(
     return tuple(file_id for file_id in collision.file_ids if file_id != keep)
 
 
-def merge_manifests(base: Manifest | None, local: Manifest, remote: Manifest) -> RecordMergeResult:
+def merge_manifests(
+    base: Manifest | None,
+    local: Manifest,
+    remote: Manifest,
+    *,
+    choices: Mapping[str, RecordChoice] | None = None,
+    collision_choices: Mapping[CollisionKey, CollisionChoice] | None = None,
+) -> RecordMergeResult:
     """Merge two manifests, refusing to reconcile a key-generation divergence.
 
     Rotation is fast-forward only and is never merged (``docs/design/05-key-generations.md``),
@@ -319,7 +326,9 @@ def merge_manifests(base: Manifest | None, local: Manifest, remote: Manifest) ->
     if local.key_generation != remote.key_generation:
         raise GenerationDivergence(local.key_generation, remote.key_generation)
     base_records = None if base is None else base.records
-    return merge_records(base_records, local.records, remote.records)
+    return merge_records(
+        base_records, local.records, remote.records, choices=choices, collision_choices=collision_choices
+    )
 
 
 def _merge_addition(

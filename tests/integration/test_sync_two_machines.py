@@ -34,6 +34,7 @@ from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
 from syncintosh.core.ports import LiveFiles, PushOutcome
 from syncintosh.core.presets import EMPTY_CATALOG
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
+from syncintosh.core.resolution import Decide
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -47,6 +48,7 @@ from syncintosh.services.keys import (
     remote_commitments,
     rotate_repo,
 )
+from syncintosh.services.resolve import take_decision
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -186,6 +188,8 @@ def _run(
     transport: GitCLITransport | None = None,
     live: LiveFiles | None = None,
     adapters: dict | None = None,
+    resolving: bool = False,
+    decide: Decide | None = None,
 ) -> SyncReport:
     active = transport or GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
@@ -209,6 +213,8 @@ def _run(
         home=str(machine.home),
         branch=active.branch() or BRANCH,
         adopt=adopt,
+        resolving=resolving,
+        decide=decide,
     )
 
 
@@ -1417,3 +1423,109 @@ def test_jsonc_that_does_not_parse_is_a_conflict(tmp_path, memory_key_store) -> 
     # then
     assert report.has_conflicts is True
     assert _read_jsonc(b) == bad
+
+
+# --------------------------------------------------------------------------- resolve
+
+
+class FailingPushTransport(GitCLITransport):
+    """A transport whose push is refused as a non-fast-forward race that never settles.
+
+    The resolve run merges and then pushes; a push that loses leaves the pending state in place.
+    """
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        return "rejected"
+
+
+def test_resolve_take_remote_settles_the_conflict_and_both_machines_converge(tmp_path, memory_key_store) -> None:
+    # given — B's edit to the same line as A's is pending
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=take_decision("remote"))
+
+    # then — the remote's line is the outcome, B's live file follows, and nothing stays pending
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\nFROM A\nthree\n"
+    assert DirectoryPendingStore(b.pending).is_pending() is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM A\nthree\n"
+
+
+def test_resolve_take_local_publishes_the_local_edit(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=take_decision("local"))
+
+    # then — B's edit wins everywhere, including on A
+    assert report.has_conflicts is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nFROM B\nthree\n"
+
+
+def test_a_pick_whose_fingerprint_no_longer_matches_leaves_the_conflict_pending(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when — the decision was made against some other conflict
+    report = _run(b, resolving=True, decide=lambda views: {"stale-fingerprint": "remote"})
+
+    # then — the conflict that the stale pick did not match stays, and the state stays pending
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+
+def test_a_declined_approval_publishes_nothing(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when
+    report = _run(b, resolving=True, decide=take_decision("remote", approve=lambda views, picks: False))
+
+    # then — the conflict is still there, nothing was written to the live file, and the pending holds
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"one\nFROM B\nthree\n"
+
+
+def test_resolve_with_nothing_pending_is_refused(tmp_path, memory_key_store) -> None:
+    # given — a converged pair with no pending state
+    _, b, _ = _pair(tmp_path, memory_key_store)
+
+    # when & then
+    with pytest.raises(PendingConflict):
+        _run(b, resolving=True, decide=take_decision("remote"))
+
+
+def test_a_push_that_loses_keeps_the_pending_state(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when & then — the merge cannot be published, so the conflict must still be settleable
+    with pytest.raises(GitError):
+        _run(b, transport=FailingPushTransport(b.repo), resolving=True, decide=take_decision("remote"))
+    assert DirectoryPendingStore(b.pending).is_pending() is True
