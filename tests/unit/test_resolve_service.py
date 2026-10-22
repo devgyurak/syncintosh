@@ -7,7 +7,7 @@ import pytest
 
 from syncintosh.core.errors import ConflictsNotCovered
 from syncintosh.core.resolution import ConflictKind, ConflictView, Side
-from syncintosh.services.resolve import decision, normalize_path, scoped_chooser, take_chooser
+from syncintosh.services.resolve import decision, normalize_path, options_for, scoped_chooser, take_chooser
 
 FILE_ID = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 HOME = "/Users/someone"
@@ -153,3 +153,23 @@ def test_one_path_named_for_both_sides_is_refused() -> None:
     # when & then
     with pytest.raises(ValueError, match="both sides"):
         scoped_chooser(local=(".zshrc",), remote=("~/.zshrc",), home=HOME)
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("key", ("local", "remote")),
+        ("file", ("local", "remote")),
+        ("modify/modify", ("local", "remote")),
+        ("add/add", ("local", "remote", "drop")),
+        ("collision", ("local", "remote", "drop")),
+        ("delete/modify", ("keep", "delete")),
+    ],
+)
+def test_each_conflict_kind_offers_its_own_choices(kind: ConflictKind, expected: tuple[str, ...]) -> None:
+    # given
+    view = _view(kind)
+    # when
+    offered = options_for(view)
+    # then
+    assert offered == expected

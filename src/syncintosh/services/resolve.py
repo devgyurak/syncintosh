@@ -95,6 +95,21 @@ def normalize_path(raw: str, home: str) -> str:
     return expanded[len(prefix) :] if expanded.startswith(prefix) else expanded
 
 
+def options_for(view: ConflictView) -> tuple[Choice, ...]:
+    """The choices a conflict offers, in the order a chooser lists them.
+
+    An add/add and a path collision can also drop both claimants; a delete/modify keeps the
+    surviving record or deletes it. A missing object is not listed at all: it has no view.
+    """
+    match view.kind:
+        case "delete/modify":
+            return ("keep", "delete")
+        case "add/add" | "collision":
+            return ("local", "remote", "drop")
+        case _:
+            return ("local", "remote")
+
+
 def _take(view: ConflictView, side: Side) -> Choice:
     if view.kind == "delete/modify":
         present = view.local_present if side == "local" else view.remote_present
@@ -106,4 +121,4 @@ def _describe(views: list[ConflictView]) -> str:
     return ", ".join(f"{view.path} ({view.kind})" for view in views)
 
 
-__all__ = ["Approve", "Chooser", "decision", "normalize_path", "scoped_chooser", "take_chooser"]
+__all__ = ["Approve", "Chooser", "decision", "normalize_path", "options_for", "scoped_chooser", "take_chooser"]
