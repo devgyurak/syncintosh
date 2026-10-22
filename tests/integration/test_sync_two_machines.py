@@ -36,7 +36,13 @@ from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import import_ring, init_new_repo
+from syncintosh.services.keys import (
+    export_ring,
+    import_ring,
+    init_new_repo,
+    remote_commitments,
+    rotate_repo,
+)
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -611,6 +617,311 @@ def _rotate_by_hand(machine: Machine, *, new_key: bytes) -> None:
     commit = transport.commit((head,), "syncintosh: rotate", ALL_PATHS)
     transport.update_ref(BRANCH, commit)
     transport.push(machine.remote, BRANCH, commit)
+
+
+# --------------------------------------------------------------------------- key rotate
+
+
+def _rotate(
+    machine: Machine,
+    *,
+    out_of_band: bool = False,
+    transport: GitCLITransport | None = None,
+    scanner=None,
+) -> int:
+    active = transport or GitCLITransport(machine.repo)
+    cipher = EnvelopeCipher(machine.store)
+    return rotate_repo(
+        transport=active,
+        files=FileRepo(machine.repo),
+        cipher=cipher,
+        wrapper=cipher,
+        scanner=PatternSecretScanner() if scanner is None else scanner,
+        store=machine.store,
+        codec=machine.codec,
+        lock=FileLock(machine.lock, timeout_seconds=5),
+        pending=DirectoryPendingStore(machine.pending),
+        remote=machine.remote,
+        branch=active.branch() or BRANCH,
+        mode="out-of-band" if out_of_band else "hygiene",
+    )
+
+
+def _only_file_id(machine: Machine, rev: str = "HEAD") -> str:
+    blob = GitCLITransport(machine.repo).read_blob(rev, MANIFEST_PATH)
+    assert blob is not None
+    manifest = loads_manifest(EnvelopeCipher(machine.store).open(blob, domain="manifest", file_id=""))
+    return next(iter(manifest.records))
+
+
+def _object_generation(machine: Machine, rev: str, file_id: str) -> int:
+    blob = GitCLITransport(machine.repo).read_blob(rev, object_path(file_id))
+    assert blob is not None
+    return int.from_bytes(blob[1:5], "big")
+
+
+def test_a_hygiene_rotation_reseals_everything_and_reaches_the_other_machine(tmp_path, memory_key_store) -> None:
+    # given — A and B in sync under generation 1
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    before = _git(a.repo, "rev-parse", "HEAD").strip()
+    file_id = _only_file_id(a)
+
+    # when — A rotates
+    generation = _rotate(a)
+
+    # then — HEAD is bound to generation 2, while the old commit still decrypts under generation 1
+    assert generation == 2
+    assert _object_generation(a, "HEAD", file_id) == 2
+    assert _object_generation(a, before, file_id) == 1
+
+    # and — B absorbs the wrap and applies the re-sealed content
+    _run(b)
+    assert b.store.get(2) == a.store.get(2)
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_a_rotation_that_cannot_fast_forward_is_discarded_and_retryable(tmp_path, memory_key_store) -> None:
+    # given — B publishes a change A has not fetched
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(b, b"from B\n")
+    _run(b)
+    before = _git(a.repo, "rev-parse", "HEAD").strip()
+
+    # when — A rotates without seeing B's commit, so its push is not a fast-forward
+    with pytest.raises(GitError):
+        _rotate(a, transport=StaleFirstFetchTransport(a.repo))
+
+    # then — the rotation is discarded: no new generation, and the branch is restored
+    assert a.store.generations() == (1,)
+    assert _git(a.repo, "rev-parse", "HEAD").strip() == before
+
+    # and — a retry that fetches normally succeeds
+    assert _rotate(a) == 2
+
+
+def test_a_rotation_whose_push_is_rejected_is_discarded_and_retryable(tmp_path, memory_key_store) -> None:
+    # given — the remote rejects every push
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    hook = Path(remote) / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    # when & then — the rotation is discarded, leaving the ring as it was
+    with pytest.raises(GitError):
+        _rotate(a)
+    assert a.store.generations() == (1,)
+
+    # when the remote accepts again — the re-run succeeds and B converges
+    hook.unlink()
+    assert _rotate(a) == 2
+    _run(b)
+    assert b.store.get(2) == a.store.get(2)
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_an_out_of_band_rotation_publishes_no_wrap_and_needs_an_import(tmp_path, memory_key_store) -> None:
+    # given — A and B in sync
+    a, b, _ = _pair(tmp_path, memory_key_store)
+
+    # when — A rotates out of band
+    assert _rotate(a, out_of_band=True) == 2
+
+    # then — with no keys/2.wrap published, B cannot absorb the new generation
+    with pytest.raises(UnknownKeyGeneration):
+        _run(b)
+
+    # when — A exports the ring and B imports it out of band
+    exported = a.home / "ring.sntr"
+    export_ring(store=a.store, codec=a.codec, live=SystemLiveFiles(), path=str(exported), passphrase=PASSPHRASE)
+    import_ring(
+        store=b.store,
+        codec=b.codec,
+        blob=exported.read_bytes(),
+        passphrase=PASSPHRASE,
+        published=remote_commitments(GitCLITransport(b.repo), b.remote, BRANCH),
+    )
+
+    # then — B holds generation 2 and applies the re-sealed content
+    assert b.store.get(2) == a.store.get(2)
+    report = _run(b)
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+
+
+def test_rotate_on_a_machine_behind_a_rotation_absorbs_it_first(tmp_path, memory_key_store) -> None:
+    # given — A rotated while B was offline
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a)
+
+    # when — B rotates without having synced the rotation
+    generation = _rotate(b)
+
+    # then — B absorbed generation 2 first and rotated on top of it
+    assert generation == 3
+    assert b.store.get(2) == a.store.get(2)
+
+
+def test_rotate_refuses_before_moving_the_branch_when_it_lacks_the_remote_generation(
+    tmp_path, memory_key_store
+) -> None:
+    # given — A rotated out of band, so there is no wrap for B to absorb
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a, out_of_band=True)
+    before = _git(b.repo, "rev-parse", "HEAD").strip()
+
+    # when & then — B cannot read the remote manifest, so it refuses without moving the branch
+    with pytest.raises(UnknownKeyGeneration):
+        _rotate(b)
+    assert _git(b.repo, "rev-parse", "HEAD").strip() == before
+    assert b.store.generations() == (1,)
+
+
+def test_a_rotation_that_fails_before_the_push_drops_the_generation(tmp_path, memory_key_store) -> None:
+    # given — the re-seal's secret scan refuses
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    class RefusingScanner:
+        def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
+            raise SecretScanError("refused")
+
+    # when & then — the not-yet-published generation is taken back out of the ring
+    with pytest.raises(SecretScanError):
+        _rotate(a, scanner=RefusingScanner())
+    assert a.store.generations() == (1,)
+
+    # and — a normal retry succeeds
+    assert _rotate(a) == 2
+    assert a.store.generations() == (1, 2)
+
+
+class _LyingPushTransport(GitCLITransport):
+    """A transport whose push lands on the remote but is reported as rejected.
+
+    It reproduces a lost response: the server applied the ref, the client never heard so.
+    """
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        super().push(remote, branch, commit)
+        return "rejected"
+
+
+def test_a_push_that_lands_but_reports_failure_keeps_the_generation(tmp_path, memory_key_store) -> None:
+    # given — A and B in sync, and a transport whose push lands but reports a failure
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when — an out-of-band rotation is "rejected" although it reached the remote
+    generation = _rotate(a, out_of_band=True, transport=_LyingPushTransport(a.repo))
+
+    # then — the new generation is kept (it is the only copy) and the remote holds the rotation
+    assert generation == 2
+    assert a.store.get(2) is not None
+    assert _git(Path(a.remote), "rev-parse", BRANCH).strip() == _git(a.repo, "rev-parse", "HEAD").strip()
+
+
+class _RaisingPushTransport(GitCLITransport):
+    """A transport whose push lands on the remote and then raises, as an interrupt can."""
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        super().push(remote, branch, commit)
+        raise GitError("interrupted after the server applied it")
+
+
+def test_a_push_that_raises_after_landing_keeps_the_generation(tmp_path, memory_key_store) -> None:
+    # given — A and B in sync, and a transport whose push lands but then raises
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when — an out-of-band rotation's push raises although it reached the remote
+    generation = _rotate(a, out_of_band=True, transport=_RaisingPushTransport(a.repo))
+
+    # then — the new generation is kept (it is the only copy) and the remote holds the rotation
+    assert generation == 2
+    assert a.store.get(2) is not None
+
+
+def test_a_rotation_preserves_a_commitment_for_a_generation_this_machine_does_not_hold(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the repo publishes a commitment for a generation this machine never held
+    a, _, remote = _pair(tmp_path, memory_key_store)
+    files = FileRepo(a.repo)
+    stored = files.read(COMMITMENTS_PATH)
+    assert stored is not None
+    files.write(COMMITMENTS_PATH, dumps_commitments({**loads_commitments(stored), 9: "a" * 64}))
+    transport = GitCLITransport(a.repo)
+    seed = transport.commit((transport.head() or "",), "publish an extra commitment", ALL_PATHS)
+    transport.update_ref(BRANCH, seed)
+    transport.push(remote, BRANCH, seed)
+
+    # when
+    _rotate(a)
+
+    # then — the extra commitment survives
+    after = files.read(COMMITMENTS_PATH)
+    assert after is not None
+    assert loads_commitments(after).get(9) == "a" * 64
+
+
+def test_a_machine_behind_a_rotation_recovers_on_sync(tmp_path, memory_key_store) -> None:
+    # given — A rotated while B had an unsynced local edit
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a)
+    _write_live(b, b"one\nB EDIT\nthree\n")
+
+    # when — B syncs
+    report = _run(b)
+
+    # then — B adopted generation 2 and published its edit on it; no divergence error
+    assert report.has_conflicts is False
+    assert b.store.get(2) == a.store.get(2)
+    assert _read_live(b) == b"one\nB EDIT\nthree\n"
+    _run(a)
+    assert _read_live(a) == b"one\nB EDIT\nthree\n"
+
+
+def test_rotate_adopts_the_remote_when_a_stale_local_commit_diverged(tmp_path, memory_key_store) -> None:
+    # given — A rotated, and B has a local commit still on the retired generation
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a)
+    transport = GitCLITransport(b.repo)
+    stray = transport.commit((transport.head() or "",), "local", ALL_PATHS)
+    transport.update_ref(BRANCH, stray)
+
+    # when — B rotates
+    generation = _rotate(b)
+
+    # then — B adopted generation 2 and rotated on top of it
+    assert generation == 3
+    assert b.store.get(2) == a.store.get(2)
+
+
+def test_rotate_refuses_while_a_conflict_is_pending(tmp_path, memory_key_store) -> None:
+    # given — B is stopped on an unresolved conflict
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when & then — a rotation would rewind the collect commit the pending state points at
+    with pytest.raises(PendingConflict):
+        _rotate(b)
+
+
+def test_rotate_refuses_to_rewind_an_unpushed_collect_commit(tmp_path, memory_key_store) -> None:
+    # given — A has a collect commit it could not push
+    a, _, remote = _pair(tmp_path, memory_key_store)
+    hook = Path(remote) / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _write_live(a, b"changed\n")
+    with pytest.raises(GitError):
+        _run(a)
+    before = _git(a.repo, "rev-parse", "HEAD").strip()
+
+    # when & then — rotate refuses rather than silently rewinding the commit
+    with pytest.raises(GitError):
+        _rotate(a)
+    assert _git(a.repo, "rev-parse", "HEAD").strip() == before
 
 
 def test_collected_and_applied_files_are_regular_files(tmp_path, memory_key_store) -> None:

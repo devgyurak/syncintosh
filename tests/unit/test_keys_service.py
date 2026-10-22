@@ -18,7 +18,7 @@ from syncintosh.core.ports import GitTransport, KeyStore
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import import_ring, init_new_repo, published_commitments
+from syncintosh.services.keys import export_ring, import_ring, init_new_repo, published_commitments
 
 
 class _StubTransport:
@@ -319,6 +319,25 @@ def test_init_refuses_an_index_less_master_key() -> None:
         )
 
 
+def test_init_reports_an_index_less_master_key_as_importable() -> None:
+    # given — the master key is readable but the index no longer lists generation 1
+    store = _UnlistedMasterKey(KEY_ONE)
+
+    # when
+    with pytest.raises(InitRefused) as raised:
+        init_new_repo(
+            store=cast(KeyStore, store),
+            codec=_codec(),
+            files=InMemoryRepoFiles(),
+            live=InMemoryLive(),
+            recovery_path=RECOVERY_PATH,
+            passphrase=PASSPHRASE,
+        )
+
+    # then — the message points at the import that rebuilds the index, not at a fresh init
+    assert "key import" in str(raised.value)
+
+
 def test_init_refuses_when_the_recovery_path_is_already_taken(memory_key_store) -> None:
     # given — a free keyring, but the export path already holds a file
     live = InMemoryLive()
@@ -467,3 +486,56 @@ def test_import_refuses_a_generation_the_repo_does_not_commit_to(memory_key_stor
             published={},
         )
     assert store.generations() == ()
+
+
+def test_export_writes_a_blob_that_unwraps_to_the_held_ring(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY_ONE, 2: KEY_TWO})
+    live = InMemoryLive()
+    codec = _codec()
+
+    # when
+    export_ring(store=store, codec=codec, live=live, path=RECOVERY_PATH, passphrase=PASSPHRASE)
+
+    # then
+    written = live.read(RECOVERY_PATH)
+    assert written is not None
+    assert codec.unwrap(written, PASSPHRASE) == RING
+
+
+def test_export_refuses_when_the_path_is_already_taken(memory_key_store) -> None:
+    # given — never clobber a good backup
+    live = InMemoryLive()
+    live.write(RECOVERY_PATH, b"an existing export")
+
+    # when & then
+    with pytest.raises(InitRefused):
+        export_ring(
+            store=memory_key_store({1: KEY_ONE}), codec=_codec(), live=live, path=RECOVERY_PATH, passphrase=PASSPHRASE
+        )
+    assert live.read(RECOVERY_PATH) == b"an existing export"
+
+
+def test_export_refuses_an_empty_ring(memory_key_store) -> None:
+    # given — nothing to hand over
+    live = InMemoryLive()
+
+    # when
+    with pytest.raises(InitRefused) as raised:
+        export_ring(store=memory_key_store(), codec=_codec(), live=live, path=RECOVERY_PATH, passphrase=PASSPHRASE)
+
+    # then — the message points at the import that rebuilds a lost index, not at a fresh init
+    assert "key import" in str(raised.value)
+    assert RECOVERY_PATH not in live.files
+
+
+def test_export_discards_a_blob_that_does_not_verify(memory_key_store) -> None:
+    # given — the read-back does not match what was written
+    live = VanishingLive()
+
+    # when & then
+    with pytest.raises(MasterKeyUnwrapError):
+        export_ring(
+            store=memory_key_store({1: KEY_ONE}), codec=_codec(), live=live, path=RECOVERY_PATH, passphrase=PASSPHRASE
+        )
+    assert RECOVERY_PATH not in live.files

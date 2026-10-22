@@ -124,6 +124,42 @@ def test_writing_the_same_manifest_again_is_a_no_op() -> None:
     assert [entry[1] for entry in cipher.sealed] == [ID1, ""]
 
 
+def test_force_reseal_rewrites_an_unchanged_object_under_the_new_generation() -> None:
+    # given — the plaintext and its record digest are unchanged; only the generation moved
+    files, cipher, scanner = InMemoryRepoFiles(), FakeCipher(), RecordingScanner()
+    head = _manifest({ID1: _rec()})
+    rotated = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=2, records={ID1: _rec()})
+
+    # when
+    write_repo(
+        files=files,
+        cipher=cipher,
+        scanner=scanner,
+        head=head,
+        new=rotated,
+        contents={ID1: CONTENT},
+        force_reseal=True,
+    )
+
+    # then — the object and the manifest are both sealed under generation 2
+    assert ("object", ID1, 2, CONTENT) in cipher.sealed
+    assert cipher.sealed[-1][0] == "manifest"
+    assert cipher.sealed[-1][2] == 2
+
+
+def test_without_force_reseal_a_rotation_leaves_the_object_on_the_old_generation() -> None:
+    # given — the same generation-only change, but `plan_writes` sees an unchanged digest
+    files, cipher, scanner = InMemoryRepoFiles(), FakeCipher(), RecordingScanner()
+    head = _manifest({ID1: _rec()})
+    rotated = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=2, records={ID1: _rec()})
+
+    # when
+    write_repo(files=files, cipher=cipher, scanner=scanner, head=head, new=rotated, contents={ID1: CONTENT})
+
+    # then — only the manifest is rewritten, which is exactly why a rotation forces the reseal
+    assert ("object", ID1, 2, CONTENT) not in cipher.sealed
+
+
 def test_a_scan_refusal_writes_nothing() -> None:
     # given — the scanner refuses the object
     files, cipher, scanner = InMemoryRepoFiles(), FakeCipher(), RecordingScanner(refuse=".zshrc")

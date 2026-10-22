@@ -31,6 +31,13 @@ other format adapters, LLM assistance, and conflict resolution are still to come
 - The tracked set is whatever `~/.config/syncintosh/config.json` names, expanded from the
   built-in preset catalog (`zsh`, `vscode`, and `docker` today). `syncintosh init --preset`
   names one or more presets.
+- **Key rotation protects future data only.** `syncintosh key rotate --hygiene` mints a new
+  generation, re-encrypts every stored object and the manifest under it, and publishes the new
+  key wrapped under the old one (`keys/<new_id>.wrap`) so the other Macs absorb it on their next
+  `sync`. `--out-of-band` publishes no wrap: hand the new key over with `key export` / `key
+  import`. Rotation does **not** make old commits unreadable — anyone who already has the old key
+  can still read history, and a machine that held the old key keeps its access. On a compromise,
+  rotate out of band or migrate to a new repo; do not rely on rotation to remove a machine.
 
 ## Development
 

@@ -20,11 +20,16 @@ from syncintosh.core.errors import DomainError
 from syncintosh.core.tree import path_label
 from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
+from syncintosh.services import export_ring as export_ring_service
+from syncintosh.services import import_ring as import_ring_service
+from syncintosh.services import remote_commitments as remote_commitments_service
+from syncintosh.services import rotate_repo as rotate_repo_service
 from syncintosh.services import sync as sync_service
 
 if TYPE_CHECKING:  # both names appear only in a return annotation
     from syncintosh.core.ports import SyntaxValidator
     from syncintosh.core.presets import ValidatorName
+    from syncintosh.services.keys import RotationMode
 
 app = typer.Typer(
     help="Keep developer-environment settings in step across Macs.",
@@ -114,6 +119,113 @@ def scan_allow(
     typer.echo(f"allowed on this machine only: {path} ({label}) {fingerprint}")
 
 
+# The key-lifecycle command group. Rotation, and the out-of-band export/import that hands a
+# generation to another machine without publishing a wrap in the repo.
+key_app = typer.Typer(help="Rotate, export, and import key generations.", no_args_is_help=True)
+app.add_typer(key_app, name="key")
+
+
+@key_app.command("rotate")
+def key_rotate(
+    hygiene: bool = typer.Option(False, "--hygiene", help="publish the new key wrapped under the old one (routine)"),
+    out_of_band: bool = typer.Option(
+        False, "--out-of-band", help="publish no wrap; hand the new key over with `key export`"
+    ),
+) -> None:
+    """Rotate to a new key generation. Mutation is deliberate and rare.
+
+    `--hygiene` is a routine rotation with no known compromise and no machine being removed: the
+    new generation is published as `keys/<new_id>.wrap`, wrapped under the previous one, so every
+    machine that still holds the old key absorbs it on its next `sync`. `--out-of-band` publishes
+    no wrap, so the new key must be handed over with `key export` / `key import`.
+
+    Rotation protects **future** data only: commits already pushed stay decryptable with the old
+    key, and a machine that holds the old key keeps its access. On a compromise, rotate out of band
+    or migrate to a new repo — do not rely on a rotation to revoke anyone.
+    """
+    from syncintosh.system.config import load_config
+    from syncintosh.system.paths import MachinePaths
+
+    if hygiene == out_of_band:
+        raise typer.BadParameter("choose exactly one of --hygiene or --out-of-band")
+    mode: RotationMode = "hygiene" if hygiene else "out-of-band"
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        ports = _sync_ports(config, paths)
+        generation = rotate_repo_service(
+            transport=ports["transport"],
+            files=ports["files"],
+            cipher=ports["cipher"],
+            wrapper=ports["wrapper"],
+            scanner=ports["scanner"],
+            store=ports["store"],
+            codec=ports["codec"],
+            lock=ports["lock"],
+            pending=ports["pending_store"],
+            remote=config.remote,
+            branch=ports["branch"],
+            mode=mode,
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"rotated to key generation {generation}")
+    if out_of_band:
+        typer.echo("hand the new generation over with `syncintosh key export <path>` on each machine")
+
+
+@key_app.command("export")
+def key_export(path: Path = typer.Argument(..., help="where to write the wrapped key ring")) -> None:
+    """Write the whole ring to a file, wrapped under a passphrase, for an out-of-band hand-off."""
+    from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.system.config import load_config
+    from syncintosh.system.live_files import SystemLiveFiles
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        export_ring_service(
+            store=_key_store(config.remote),
+            codec=KeyMaterial(),
+            live=SystemLiveFiles(),
+            path=str(path),
+            passphrase=_passphrase(),
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"wrote the key ring to {path}; keep it somewhere safe")
+
+
+@key_app.command("import")
+def key_import(path: Path = typer.Argument(..., help="a wrapped ring written by `key export`")) -> None:
+    """Add the generations in an exported ring, checked against the repo's published commitments."""
+    from syncintosh.crypto.key_material import KeyMaterial
+    from syncintosh.system.config import load_config
+    from syncintosh.system.lock import FileLock
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.vcs.git import GitCLITransport
+
+    paths = MachinePaths.default()
+    try:
+        config = load_config(paths.config_file)
+        transport = GitCLITransport(paths.repo_dir)
+        import_ring_service(
+            store=_key_store(config.remote),
+            codec=KeyMaterial(),
+            blob=path.read_bytes(),
+            passphrase=_passphrase(),
+            published=remote_commitments_service(transport, config.remote, transport.branch() or BRANCH),
+            lock=FileLock(paths.lock_file),
+        )
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"imported the key ring from {path}")
+
+
 @app.command()
 def merge(base: Path, local: Path, remote: Path) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
@@ -166,6 +278,7 @@ def init(
     from syncintosh.services.setup import mint_machine_id, new_machine_config
     from syncintosh.system.config import save_config
     from syncintosh.system.live_files import SystemLiveFiles
+    from syncintosh.system.lock import FileLock
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.vcs.git import GitCLITransport
@@ -190,6 +303,7 @@ def init(
                 blob=import_file.read_bytes(),
                 passphrase=_passphrase(),
                 published=published_commitments(transport),
+                lock=FileLock(paths.lock_file),
             )
             typer.echo(f"imported the key ring from {import_file}")
         else:

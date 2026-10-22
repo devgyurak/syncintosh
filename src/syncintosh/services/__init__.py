@@ -7,7 +7,14 @@ infrastructure class — `cli` injects the implementation (``AGENTS.md`` §2.2).
 
 from __future__ import annotations
 
-from syncintosh.services.keys import import_ring, init_new_repo
+from syncintosh.services.keys import (
+    export_ring,
+    import_ring,
+    init_new_repo,
+    published_commitments,
+    remote_commitments,
+    rotate_repo,
+)
 from syncintosh.services.merge_service import RenderedMerge, merge_text
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.services.setup import mint_machine_id, new_machine_config
@@ -19,11 +26,15 @@ __all__ = [
     "Refusal",
     "RenderedMerge",
     "SyncReport",
+    "export_ring",
     "import_ring",
     "init_new_repo",
     "merge_text",
     "mint_machine_id",
     "new_machine_config",
+    "published_commitments",
+    "remote_commitments",
+    "rotate_repo",
     "sync",
     "watch",
     "write_repo",
