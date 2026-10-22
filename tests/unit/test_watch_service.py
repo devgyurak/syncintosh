@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from itertools import count
 
 import pytest
 
@@ -110,6 +111,43 @@ def test_a_settled_burst_runs_one_sync() -> None:
     assert len(reports) == 1
     assert watcher.started is True
     assert watcher.stopped is True
+
+
+def test_a_poll_interval_runs_a_sync_with_no_local_change() -> None:
+    # given — a clock that jumps past the poll interval, and no file events
+    stop = threading.Event()
+    watcher = _FakeWatch([()], stop)
+    run = _Run([], stop)
+    ticks = count(0, 100)
+
+    # when
+    watch(
+        watch=watcher,
+        targets=_targets(),
+        run=run,
+        quiet_seconds=0.0,
+        poll_seconds=50.0,
+        clock=lambda: float(next(ticks)),
+        stop=stop,
+    )
+
+    # then — one sync ran although nothing changed locally
+    assert run.calls == 1
+
+
+def test_a_sub_second_poll_interval_is_refused() -> None:
+    # given — a poll interval that would fetch and push in a loop
+    stop = threading.Event()
+
+    # when & then — refused at the service, so a hand-edited plist cannot cause it either
+    with pytest.raises(ValueError):
+        watch(
+            watch=_FakeWatch([], stop),
+            targets=_targets(),
+            run=lambda: SyncReport(),
+            poll_seconds=0.0,
+            stop=stop,
+        )
 
 
 def test_an_event_that_is_not_tracked_never_syncs() -> None:

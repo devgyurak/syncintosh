@@ -32,9 +32,9 @@ from syncintosh.services.sync import SyncReport
 
 # How long one `wait` blocks before the loop re-checks the clock and the stop signal. It bounds the
 # reaction time to a stop request; the debounce decides when a sync actually runs.
-DEFAULT_POLL_SECONDS = 0.25
+DEFAULT_WAIT_SECONDS = 0.25
 
-__all__ = ["DEFAULT_POLL_SECONDS", "watch"]
+__all__ = ["DEFAULT_WAIT_SECONDS", "watch"]
 
 
 def watch(
@@ -43,7 +43,8 @@ def watch(
     targets: WatchFilter,
     run: Callable[[], SyncReport],
     quiet_seconds: float = DEFAULT_QUIET_SECONDS,
-    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    poll_seconds: float | None = None,
+    poll_wait_seconds: float = DEFAULT_WAIT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     stop: threading.Event | None = None,
     on_report: Callable[[SyncReport], None] | None = None,
@@ -55,8 +56,18 @@ def watch(
     passes a closure over `sync`, and a test passes a plain callable. `on_report`/`on_error` render
     an outcome or a failure; every failure of a **cycle** is reported rather than raised, and the one
     failure that is raised is a watch that could not start (`WatchError`).
+
+    `poll_seconds` adds a remote-polling sync: even with no local change, the loop runs one every
+    `poll_seconds`, so a change on the other Mac arrives without a local edit (the daemon's job,
+    ``docs/design/README.md``). Any run — event-driven or polling — resets that timer, so a burst of
+    local edits does not stack a periodic sync on top of itself. A poll interval below one second is
+    refused here, not only in the CLI, so a hand-edited launchd plist cannot turn the daemon into a
+    fetch/push loop.
     """
+    if poll_seconds is not None and poll_seconds < 1:
+        raise ValueError("poll_seconds must be at least 1 second; a smaller interval polls in a loop")
     debounce = Debounce(quiet_seconds=quiet_seconds)
+    last_run = clock()
     try:
         try:
             watch.start()
@@ -67,7 +78,7 @@ def watch(
             raise WatchError(f"the watcher could not start: {str(exc) or type(exc).__name__}") from exc
         while stop is None or not stop.is_set():
             try:
-                events = watch.wait(poll_seconds)
+                events = watch.wait(poll_wait_seconds)
             except (OSError, RuntimeError) as exc:
                 # The observer could not start (a path vanished, permissions, a watchdog
                 # internal): report it and try again rather than ending the watch with a traceback.
@@ -82,10 +93,12 @@ def watch(
             for event in events:
                 if targets.matches(event):
                     debounce.touch(now)
-            if not debounce.due(clock()):
+            periodic_due = poll_seconds is not None and now - last_run >= poll_seconds
+            if not debounce.due(now) and not periodic_due:
                 continue
             debounce.clear()
             _run_once(run, debounce=debounce, clock=clock, on_report=on_report, on_error=on_error)
+            last_run = clock()
     finally:
         watch.stop()
 

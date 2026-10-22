@@ -236,6 +236,11 @@ class GitCLITransport:
                 oids.append(oid)
         return _envelope_generations(self._batch_contents(tuple(dict.fromkeys(oids))))
 
+    def remote_reachable(self, remote: str) -> bool:
+        """True when `remote` answers a read-only `git ls-remote`, without fetching objects."""
+        result = self._run(["ls-remote", "--quiet", remote], cwd=self._workdir)
+        return result.returncode == 0
+
     def _batch_contents(self, oids: tuple[str, ...]) -> list[bytes]:
         """The content of each object in `oids`, in one `git cat-file --batch`."""
         if not oids:

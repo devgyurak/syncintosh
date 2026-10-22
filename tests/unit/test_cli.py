@@ -364,7 +364,7 @@ def test_watch_wires_the_loop_and_runs_it(tmp_path, monkeypatch) -> None:
 
     # then — the loop was handed the watcher, the filter, and a sync call, and returned cleanly
     assert result.exit_code == 0
-    assert set(ran) == {"watch", "targets", "run", "quiet_seconds", "on_report", "on_error"}
+    assert set(ran) == {"watch", "targets", "run", "quiet_seconds", "poll_seconds", "on_report", "on_error"}
     assert "watching" in _combined(result)
 
 
@@ -393,3 +393,114 @@ def test_watch_exits_non_zero_when_the_loop_cannot_start(tmp_path, monkeypatch) 
     # then — a hard failure, rendered as an error rather than as a recovered-from cycle outcome
     assert result.exit_code == 1
     assert "the watcher could not start" in _combined(result)
+
+
+class _FakeDaemon:
+    """A `LaunchdDaemon` that records its calls instead of touching launchd."""
+
+    def __init__(self) -> None:
+        self.installs: list[tuple[str, int]] = []
+        self.uninstalled = False
+        self.entry: str | None = None
+
+    def install(self, *, entry_point: str, poll_seconds: int) -> None:
+        self.installs.append((entry_point, poll_seconds))
+        self.entry = entry_point
+
+    def uninstall(self) -> None:
+        self.uninstalled = True
+
+    def recorded_entry_point(self) -> str | None:
+        return self.entry
+
+    def is_loaded(self) -> bool:
+        return True
+
+
+def test_daemon_install_installs_with_the_current_entry_point(monkeypatch) -> None:
+    # given — syncintosh is on PATH
+    daemon = _FakeDaemon()
+    monkeypatch.setattr(main_module, "_launchd_daemon", lambda _home: daemon)
+    monkeypatch.setattr("shutil.which", lambda name: "/opt/homebrew/bin/syncintosh" if name == "syncintosh" else None)
+
+    # when
+    result = runner.invoke(main_module.app, ["daemon", "install", "--poll", "120"])
+
+    # then
+    assert result.exit_code == 0
+    assert daemon.installs == [("/opt/homebrew/bin/syncintosh", 120)]
+    assert "installed the background job" in _combined(result)
+
+
+def test_daemon_install_refuses_when_syncintosh_is_not_on_path(monkeypatch) -> None:
+    # given — nothing to embed in the plist
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    # when
+    result = runner.invoke(main_module.app, ["daemon", "install"])
+
+    # then
+    assert result.exit_code != 0
+    assert "not on PATH" in _combined(result)
+
+
+def test_daemon_uninstall_removes_the_job(monkeypatch) -> None:
+    # given
+    daemon = _FakeDaemon()
+    monkeypatch.setattr(main_module, "_launchd_daemon", lambda _home: daemon)
+
+    # when
+    result = runner.invoke(main_module.app, ["daemon", "uninstall"])
+
+    # then
+    assert result.exit_code == 0
+    assert daemon.uninstalled is True
+
+
+def _doctor_config() -> None:
+    from syncintosh.core.config import SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=()),
+        MachinePaths.default().config_file,
+    )
+
+
+def test_doctor_renders_each_check_and_passes(monkeypatch) -> None:
+    # given — a config and a healthy report
+    from syncintosh.services import Check, DoctorReport
+
+    _doctor_config()
+    monkeypatch.setattr(main_module, "_launchd_daemon", lambda _home: _FakeDaemon())
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module, "doctor_service", lambda **_kwargs: DoctorReport(checks=(Check("lock", True, "free"),))
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["doctor"])
+
+    # then
+    assert result.exit_code == 0
+    assert "[ok] lock: free" in _combined(result)
+
+
+def test_doctor_exits_non_zero_when_a_check_fails(monkeypatch) -> None:
+    # given — a report with one failing check
+    from syncintosh.services import Check, DoctorReport
+
+    _doctor_config()
+    monkeypatch.setattr(main_module, "_launchd_daemon", lambda _home: _FakeDaemon())
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module, "doctor_service", lambda **_kwargs: DoctorReport(checks=(Check("lock", False, "held"),))
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["doctor"])
+
+    # then
+    assert result.exit_code == 1
+    assert "[FAIL] lock: held" in _combined(result)
