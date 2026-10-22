@@ -20,11 +20,11 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.manifest import ManifestRecord
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.models import TextMerge
+from syncintosh.core.models import Scope, TextMerge
 from syncintosh.core.paths import collision_key
 from syncintosh.core.record_merge import merge_records
 from syncintosh.core.resolution import CollisionChoice, CollisionKey, RecordChoice, Side, digest_of, fingerprint
-from syncintosh.core.tree import KeyPath, Node, tree_from_value
+from syncintosh.core.tree import EmptyObject, KeyPath, Node, tree_from_value
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -62,15 +62,21 @@ def test_a_choice_on_a_path_that_does_not_conflict_is_ignored(base, local, remot
 
 
 @given(base=_trees, local=_trees, remote=_trees)
-def test_settling_every_conflict_to_local_reproduces_the_default_merge(base, local, remote) -> None:
-    # given
+def test_settling_every_conflict_to_local_takes_the_local_side(base, local, remote) -> None:
+    # given — the default candidate is not compared directly: when a local empty object sits above a
+    # remote child, the fold keeps the remote child, so only the local side's subtree is the contract
     plain = merge_tree(base, local, remote)
     picks: dict[KeyPath, Side] = {conflict.path: "local" for conflict in plain.conflicts}
     # when
     chosen = merge_tree(base, local, remote, choices=picks)
     # then
+    mismatched = [
+        conflict.path
+        for conflict in plain.conflicts
+        if _under(chosen.merged.entries, conflict.path) != _under(local.entries, conflict.path)
+    ]
     assert chosen.conflicts == ()
-    assert chosen.merged == plain.merged
+    assert mismatched == []
 
 
 @given(base=_trees, local=_trees, remote=_trees)
@@ -88,6 +94,57 @@ def test_settling_every_conflict_to_remote_takes_the_remote_side(base, local, re
     ]
     assert chosen.conflicts == ()
     assert mismatched == []
+
+
+# Small keys and empty objects, so the generated trees often hold an empty object above a child.
+_sparse_json = st.recursive(
+    st.integers(min_value=0, max_value=2),
+    lambda children: st.dictionaries(st.sampled_from(["a", "b"]), children, max_size=2),
+    max_leaves=8,
+)
+_sparse_trees = _sparse_json.map(tree_from_value)
+
+
+def _has_under(entries: Mapping[KeyPath, Node], path: KeyPath) -> bool:
+    return any(key[: len(path)] == path and len(key) > len(path) for key in entries)
+
+
+@given(base=_sparse_trees, local=_sparse_trees, remote=_sparse_trees)
+def test_settling_every_conflict_to_remote_keeps_the_remote_empty_parents(base, local, remote) -> None:
+    # given
+    plain = merge_tree(base, local, remote)
+    picks: dict[KeyPath, Side] = {conflict.path: "remote" for conflict in plain.conflicts}
+    # when
+    chosen = merge_tree(base, local, remote, choices=picks)
+    # then — each conflicted path reads as remote, and an empty object the remote holds above it survives
+    mismatched = [
+        conflict.path
+        for conflict in plain.conflicts
+        if _under(chosen.merged.entries, conflict.path) != _under(remote.entries, conflict.path)
+    ]
+    lost = [
+        ancestor
+        for conflict in plain.conflicts
+        for ancestor in (conflict.path[:depth] for depth in range(len(conflict.path)))
+        if isinstance(remote.entries.get(ancestor), EmptyObject)
+        and not isinstance(chosen.merged.entries.get(ancestor), EmptyObject)
+        and not _has_under(chosen.merged.entries, ancestor)
+    ]
+    assert chosen.conflicts == ()
+    assert mismatched == []
+    assert lost == []
+
+
+def test_choosing_a_remote_deletion_keeps_the_remote_empty_parent() -> None:
+    # given — the remote deleted the last child of `a`, leaving `a` an empty object
+    base = tree_from_value({"a": {"b": 1}, "c": 1})
+    local = tree_from_value({"a": {"b": 2}, "c": 1})
+    remote = tree_from_value({"a": {}, "c": 1})
+    # when
+    chosen = merge_tree(base, local, remote, choices={("a", "b"): "remote"})
+    # then
+    assert chosen.conflicts == ()
+    assert chosen.merged == tree_from_value({"a": {}, "c": 1})
 
 
 @given(base=_trees, local=_trees, remote=_trees)
@@ -310,3 +367,35 @@ def test_a_fingerprint_never_contains_the_plaintext_value() -> None:
     # then
     assert secret not in value
     assert digest_of(secret) != secret
+
+
+def _record(file_id: str, sha: str, scope: Scope, machine: str | None) -> ManifestRecord:
+    return ManifestRecord.create(
+        file_id=file_id, sha256=sha, path=".zshrc", preset="zsh", scope=scope, machine=machine, format="text"
+    )
+
+
+def test_a_modify_modify_takes_the_picked_metadata_but_keeps_the_other_content_change() -> None:
+    # given — both sides changed the scope; only remote changed the content
+    base = {ID1: _record(ID1, SHA1, "common", None)}
+    local = {ID1: _record(ID1, SHA1, "machine", "mac-a")}
+    remote = {ID1: _record(ID1, SHA2, "machine", "mac-b")}
+    # when
+    result = merge_records(base, local, remote, choices={ID1: "local"})
+    # then — local's scope wins, and remote's content change is not lost
+    assert result.conflicts == ()
+    assert result.content_merges == ()
+    assert result.merged[ID1] == _record(ID1, SHA2, "machine", "mac-a")
+
+
+def test_a_modify_modify_changed_on_both_sides_in_content_goes_to_the_content_merge() -> None:
+    # given — both sides changed the scope and both changed the content
+    base = {ID1: _record(ID1, SHA1, "common", None)}
+    local = {ID1: _record(ID1, SHA2, "machine", "mac-a")}
+    remote = {ID1: _record(ID1, SHA3, "machine", "mac-b")}
+    # when
+    result = merge_records(base, local, remote, choices={ID1: "remote"})
+    # then — the content is decided by the content merge, with the remote's metadata
+    assert result.conflicts == ()
+    assert [task.file_id for task in result.content_merges] == [ID1]
+    assert result.content_merges[0].machine == "mac-b"

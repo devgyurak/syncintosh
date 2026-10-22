@@ -232,6 +232,14 @@ def _choose_side(
             merged[deeper] = node
     if _is_terminal(merged.get(path)) and _keeps_local_subtree(path, ignore, local_entries):
         del merged[path]
+    # The chosen side's object that holds `path` may be an empty object there: an `EmptyObject` on
+    # that side is the only record that the object exists, so restore it unless the merge already
+    # has something beneath it. Without this, choosing the last child's deletion erases the parent.
+    for depth in range(len(path)):
+        ancestor = path[:depth]
+        empty_here = isinstance(chosen_entries.get(ancestor), EmptyObject)
+        if empty_here and ancestor not in merged and not _has_descendant(merged, ancestor):
+            merged[ancestor] = EmptyObject()
 
 
 def _keeps_local_subtree(path: KeyPath, ignore: IgnorePaths, local_entries: Mapping[KeyPath, Node]) -> bool:
