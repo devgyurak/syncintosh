@@ -181,12 +181,12 @@ def merge_records(
     deduplicated: list[str] = []
     collisions = _resolve_collisions(merged, conflicts, content_merges, deduplicated)
     chosen = collision_choices or {}
-    settled = [collision for collision in collisions if _collision_key(collision) in chosen]
+    settled = [collision for collision in collisions if collision_key_of(collision) in chosen]
     if settled:
         losers = {
             file_id
             for collision in settled
-            for file_id in _losers(collision, chosen[_collision_key(collision)], local, remote)
+            for file_id in _losers(collision, chosen[collision_key_of(collision)], local, remote)
         }
         for file_id in losers:
             merged.pop(file_id, None)
@@ -202,6 +202,12 @@ def merge_records(
         deleted=tuple(sorted(deleted)),
         deduplicated=tuple(sorted(deduplicated)),
     )
+
+
+def record_path_of(conflict: RecordConflict) -> str:
+    """The path a record conflict is about: the first side that holds a record, or empty."""
+    record = conflict.local or conflict.remote or conflict.base
+    return "" if record is None else record.path
 
 
 def _settle_conflict(
@@ -280,7 +286,7 @@ def _with_picked_metadata(
     )
 
 
-def _collision_key(collision: PathCollision) -> CollisionKey:
+def collision_key_of(collision: PathCollision) -> CollisionKey:
     """The key a collision is settled under: the same folded key the record merge groups by."""
     return (collision.scope, collision.machine, collision_key(collision.path))
 
