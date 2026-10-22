@@ -147,6 +147,11 @@ def _fold_structure(
     An ``EmptyObject`` that gained a child is not a conflict — the object is merely no longer
     empty — so it is dropped without a conflict. Deeper conflicts are subsumed so the user sees
     one decision, not a cascade.
+
+    A local ``{}`` at a key does not mean "the key is now empty": it is the local side's deletion of
+    the keys it had under that key. Keys the other side added beneath it survive, because only a
+    change both sides make to the same key is a conflict (``AGENTS.md`` §5.3). Keep this rule: a
+    "empty object replaces everything beneath it" rule would silently drop the other side's edits.
     """
     conflicts_by_path = list(conflicts)
     structural: list[Conflict] = []

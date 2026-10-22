@@ -18,6 +18,10 @@ from typing import Literal
 from syncintosh.core.models import Scope
 from syncintosh.core.tree import KeyPath
 
+# A fingerprint is never stored or sent outside the run that made it. It is an unsalted digest of
+# the conflict's values, so writing it to disk or to a network would let anyone with a short value
+# in the set test it by guessing. If that ever has to happen, key it with a per-run random key (HMAC).
+
 # Which side's value wins a conflict. Used for key paths and for whole-file content.
 Side = Literal["local", "remote"]
 

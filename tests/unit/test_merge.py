@@ -355,3 +355,24 @@ def test_a_merge_that_deletes_every_key_is_an_empty_object_document() -> None:
     # result re-parses to the same tree instead of a bare `{}` that no parse can return
     assert result.merged == tree_from_value({})
     assert result.merged.entries == {(): EmptyObject()}
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected", "conflicts"),
+    [
+        ({"a": {"x": 1, "y": 2}}, {"a": {"y": 2}}, ()),
+        ({"a": {"x": 3, "y": 2}}, {"a": {"y": 2}}, (("a", "x"),)),
+    ],
+)
+def test_a_local_empty_object_deletes_its_keys_and_keeps_the_other_sides_additions(
+    remote: dict, expected: dict, conflicts: tuple
+) -> None:
+    # given — local deleted the one key it had under `a`; remote kept `x` and added `y`
+    base = tree_from_value({"a": {"x": 1}})
+    local = tree_from_value({"a": {}})
+    remote_tree = tree_from_value(remote)
+    # when
+    result = merge_tree(base, local, remote_tree)
+    # then — remote's addition survives; only a change to the same key `x` is a conflict
+    assert result.merged == tree_from_value(expected)
+    assert tuple(conflict.path for conflict in result.conflicts) == conflicts
