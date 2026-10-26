@@ -23,7 +23,15 @@ from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import Scope, TextMerge
 from syncintosh.core.paths import collision_key
 from syncintosh.core.record_merge import merge_records
-from syncintosh.core.resolution import CollisionChoice, CollisionKey, RecordChoice, Side, digest_of, fingerprint
+from syncintosh.core.resolution import (
+    CollisionChoice,
+    CollisionKey,
+    ConflictView,
+    RecordChoice,
+    Side,
+    digest_of,
+    fingerprint,
+)
 from syncintosh.core.tree import EmptyObject, KeyPath, Node, tree_from_value
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
@@ -399,3 +407,23 @@ def test_a_modify_modify_changed_on_both_sides_in_content_goes_to_the_content_me
     assert result.conflicts == ()
     assert [task.file_id for task in result.content_merges] == [ID1]
     assert result.content_merges[0].machine == "mac-b"
+
+
+def test_a_conflict_view_repr_never_prints_its_plaintext_sides() -> None:
+    # given
+    secret = "hunter2-plaintext-side"
+    view = ConflictView(
+        kind="key",
+        file_id=ID1,
+        path=".zshrc",
+        key_path=("token",),
+        fingerprint="f" * 64,
+        base_text=secret,
+        local_text=secret,
+        remote_text=secret,
+        diff=secret,
+    )
+    # when
+    rendered = repr(view)
+    # then
+    assert secret not in rendered

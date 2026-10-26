@@ -122,3 +122,14 @@ def test_clear_on_a_missing_directory_is_a_noop(tmp_path: Path) -> None:
 
     # then
     assert result is None
+
+
+def test_the_pending_state_file_holds_no_fingerprint_and_no_decision(tmp_path: Path) -> None:
+    # given — a stopped sync with one unresolved conflict
+    root = tmp_path / "pending"
+    # when
+    DirectoryPendingStore(root).record(_state())
+    # then — the file names the commits and the conflict; a decision lives only in the run that made it
+    written = (root / "state.json").read_text(encoding="utf-8")
+    assert "fingerprint" not in written
+    assert "choice" not in written

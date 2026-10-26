@@ -70,6 +70,31 @@ conflict and exits); the daemon treats that as a no-op and surfaces it. Only `re
 failed sync become part of the new local side instead of being overwritten; step 14's check
 guards the write regardless.
 
+**`resolve` procedure.**
+
+1. Take the lock and load the pending state. With no pending state, `resolve` stops.
+2. Re-run the cycle from step 2 (collect → fetch → classify → merge). The conflicts are the ones
+   that exist *now*; the pending state is not replayed.
+3. If there are no conflicts, the cycle completes as an ordinary sync and the pending state is cleared.
+4. Otherwise each conflict is offered for a decision, once. A decision that settles some conflicts
+   reruns the cycle, and the conflicts it exposed are offered in the next round; a round that
+   answers nothing new stops the run with its conflicts pending. A decision is identified by a
+   **fingerprint** of the conflict's place and its three side digests (the record's file ID,
+   or the key path, plus the digests of the base, local, and remote sides). Decisions are never
+   written to disk; they live for this run only.
+5. Settle the merge with the decisions, show what will be published, and ask for approval.
+   The chosen result goes through the same checks as any merge: render round-trip, projection,
+   syntax, secret scan, and the apply compare-and-swap.
+6. Publish, apply, and clear the pending state only after the push succeeds.
+7. If a push loses a race and the cycle retries, a decision applies again only to a conflict
+   with the same fingerprint. A conflict whose inputs changed becomes a new pending state, and
+   the run exits 1.
+
+Choices by conflict kind: a key-level or whole-file conflict takes `local` or `remote`; an
+add/add or a path collision takes `local`, `remote`, or `drop` (the winning side's file ID is
+kept); a delete/modify takes `keep` or `delete`; a modify/modify takes `local` or `remote`. A
+missing object is never choosable: it is reported as corruption.
+
 **Criss-cross history is a hard error.** If `git merge-base --all` returns more than one
 commit, sync stops and reports it rather than inventing a recursive merge.
 

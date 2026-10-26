@@ -26,17 +26,20 @@ that shape the code:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Final, Literal
 
 from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
     ContentDigestMismatch,
+    ContentParseError,
     GitError,
     PendingConflict,
     ProjectionError,
@@ -71,9 +74,28 @@ from syncintosh.core.ports import (
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
 from syncintosh.core.projection import project_text, restore_text
-from syncintosh.core.record_merge import RecordConflict, RecordMergeResult, merge_manifests
+from syncintosh.core.record_merge import (
+    PathCollision,
+    RecordConflict,
+    RecordMergeResult,
+    collision_key_of,
+    merge_manifests,
+    record_path_of,
+)
 from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
-from syncintosh.core.tree import KeyPath, path_label
+from syncintosh.core.resolution import (
+    Choice,
+    CollisionChoice,
+    CollisionKey,
+    ConflictView,
+    Decide,
+    Picks,
+    RecordChoice,
+    Side,
+    digest_of,
+    fingerprint,
+)
+from syncintosh.core.tree import KeyPath, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
@@ -785,6 +807,315 @@ def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
     return f"{reason}: {', '.join(named)}"
 
 
+# --------------------------------------------------------------------------- resolve
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """How one cycle treats its conflicts. A plain `sync` carries none of this.
+
+    `resolving` marks a cycle that `resolve` runs: it may start from a pending state, and it clears
+    that state once a push lands. `decide` is asked, every time a pass finds conflicts, for the ones
+    the run has not answered yet. Its answer reruns the cycle with the picks so far; each pick applies
+    only to a conflict with the same fingerprint. A pass that finds nothing new to answer records the
+    conflicts as pending and stops (``docs/design/01-sync-model.md``, resolve). `rounds` bounds the
+    reruns; every rerun answers at least one conflict the run had not answered before.
+    """
+
+    picks: Picks = MappingProxyType({})
+    decide: Decide | None = None
+    resolving: bool = False
+    rounds: int = 0
+
+
+NO_RESOLUTION: Final = Resolution()
+MAX_RESOLVE_ROUNDS: Final = 64
+
+
+@dataclass(frozen=True)
+class _Found:
+    """A conflict a pass found. `views` is empty when it cannot be chosen, such as a missing object."""
+
+    record: PendingConflictRecord
+    views: tuple[ConflictView, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """A content conflict settled to `data`, or left in conflict with its `detail` and `views`."""
+
+    # The merged plaintext: kept out of `repr` so a traceback or a debug log never prints it.
+    data: bytes | None = field(repr=False)
+    detail: str = ""
+    views: tuple[ConflictView, ...] = ()
+
+
+def _readable(data: bytes) -> str:
+    text = _decode(data)
+    return "(binary)" if text is None else text
+
+
+def _subtree(tree: Tree, path: KeyPath) -> dict[KeyPath, Node]:
+    """Everything a side holds at `path` or beneath it, keyed relative to `path`.
+
+    A side may hold a whole object at a key where the other holds a scalar; the object is its value,
+    so it is read and digested as a whole, not as the leaf at `path` alone.
+    """
+    return {key[len(path) :]: node for key, node in tree.entries.items() if key[: len(path)] == path}
+
+
+def _subtree_text(subtree: dict[KeyPath, Node]) -> str:
+    """A subtree as a person reads it: its JSON value, or a marker when the side has nothing there."""
+    if not subtree:
+        return "(absent)"
+    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _subtree_digest(subtree: dict[KeyPath, Node]) -> str:
+    return digest_of(tuple(sorted(subtree.items(), key=lambda item: item[0])))
+
+
+def _whole_fingerprint(file_id: str, base: bytes, local: bytes, remote: bytes) -> str:
+    return fingerprint(file_id, None, _sha256(base), _sha256(local), _sha256(remote))
+
+
+def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: bytes) -> ConflictView:
+    """The whole file as one choice. Its three digests identify it; its text and diff are shown."""
+    local_text = _readable(local)
+    remote_text = _readable(remote)
+    diff = "".join(
+        difflib.unified_diff(
+            local_text.splitlines(keepends=True), remote_text.splitlines(keepends=True), "local", "remote"
+        )
+    )
+    return ConflictView(
+        kind="file",
+        file_id=file_id,
+        path=path,
+        key_path=None,
+        fingerprint=_whole_fingerprint(file_id, base, local, remote),
+        base_text=_readable(base),
+        local_text=local_text,
+        remote_text=remote_text,
+        diff=diff,
+    )
+
+
+def _parsed(adapter: ContentAdapter, base: bytes, local: bytes, remote: bytes) -> tuple[Tree, Tree, Tree] | None:
+    """The three sides as trees, or `None` when one of them does not decode or parse."""
+    base_text, local_text, remote_text = _decode(base), _decode(local), _decode(remote)
+    if base_text is None or local_text is None or remote_text is None:
+        return None
+    try:
+        return adapter.parse(base_text), adapter.parse(local_text), adapter.parse(remote_text)
+    except ContentParseError:
+        return None
+
+
+def _key_view(
+    file_id: str, path: str, key_path: KeyPath, base_tree: Tree, local_tree: Tree, remote_tree: Tree
+) -> ConflictView:
+    """One key path as a choice. The digests of its three leaves identify it."""
+    base_part = _subtree(base_tree, key_path)
+    local_part = _subtree(local_tree, key_path)
+    remote_part = _subtree(remote_tree, key_path)
+    return ConflictView(
+        kind="key",
+        file_id=file_id,
+        path=path,
+        key_path=key_path,
+        fingerprint=fingerprint(
+            file_id,
+            key_path,
+            _subtree_digest(base_part),
+            _subtree_digest(local_part),
+            _subtree_digest(remote_part),
+        ),
+        base_text=_subtree_text(base_part),
+        local_text=_subtree_text(local_part),
+        remote_text=_subtree_text(remote_part),
+    )
+
+
+def _content_views(
+    file_id: str,
+    path: str,
+    base: bytes,
+    local: bytes,
+    remote: bytes,
+    adapter: ContentAdapter | None,
+    key_paths: tuple[KeyPath, ...],
+) -> tuple[ConflictView, ...]:
+    """The choices for one content conflict: one per conflicted key, or the whole file."""
+    trees = _parsed(adapter, base, local, remote) if adapter is not None and key_paths else None
+    if trees is None:
+        return (_whole_view(file_id, path, base, local, remote),)
+    base_tree, local_tree, remote_tree = trees
+    return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
+
+
+def _side_pick(pick: Choice | None) -> Side | None:
+    """The side a pick names for a whole file or a key, or `None` for a pick that names no side."""
+    match pick:
+        case "local" | "remote":
+            return pick
+        case _:
+            return None
+
+
+def _checked(
+    presets: _Presets, data: bytes, path: str, file_id: str, base: bytes, local: bytes, remote: bytes
+) -> _Settled:
+    """A merged result passes its syntax check whoever decided it; a failure is a conflict again."""
+    if _syntax_ok(presets, data, path):
+        return _Settled(data=data)
+    whole = _whole_view(file_id, path, base, local, remote)
+    return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
+
+
+def _settle_content(
+    *,
+    presets: _Presets,
+    driver: MergeDriver,
+    file_id: str,
+    path: str,
+    fmt: FileFormat,
+    base: bytes,
+    local: bytes,
+    remote: bytes,
+    picks: Picks,
+    reason: str,
+) -> _Settled:
+    """Merge one content conflict, applying each pick whose fingerprint this conflict still has.
+
+    A whole-file pick settles the file outright; otherwise each key pick settles its key, and what
+    the merge still cannot settle is reported with the choices it needs. Every settled result,
+    however it was settled, goes through the syntax check.
+    """
+    adapter = presets.adapter_for(fmt)
+    side = _side_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
+    if side is not None:
+        merged = merge_content(base, local, remote, driver, adapter, choice=side)
+        return _checked(presets, merged.data, path, file_id, base, local, remote)
+    first = merge_content(base, local, remote, driver, adapter)
+    if not first.conflicted:
+        return _checked(presets, first.data, path, file_id, base, local, remote)
+    key_choices: dict[KeyPath, Side] = {}
+    for view in _content_views(file_id, path, base, local, remote, adapter, first.conflict_paths):
+        key_side = _side_pick(picks.get(view.fingerprint))
+        if view.key_path is not None and key_side is not None:
+            key_choices[view.key_path] = key_side
+    merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
+    if not merged.conflicted:
+        return _checked(presets, merged.data, path, file_id, base, local, remote)
+    views = _content_views(file_id, path, base, local, remote, adapter, merged.conflict_paths)
+    return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
+
+
+def _record_fingerprint(conflict: RecordConflict) -> str:
+    return fingerprint(
+        conflict.file_id, None, digest_of(conflict.base), digest_of(conflict.local), digest_of(conflict.remote)
+    )
+
+
+def _collision_id(collision: PathCollision) -> str:
+    return f"collision:{collision.scope}:{collision.machine}:{collision_key(collision.path)}"
+
+
+def _collision_fingerprint(collision: PathCollision, local: Manifest, remote: Manifest) -> str:
+    """A collision's identity is its folded path; its digests are the claims each side makes on it."""
+    local_claims = tuple(local.records.get(file_id) for file_id in collision.file_ids)
+    remote_claims = tuple(remote.records.get(file_id) for file_id in collision.file_ids)
+    return fingerprint(
+        _collision_id(collision), None, digest_of(None), digest_of(local_claims), digest_of(remote_claims)
+    )
+
+
+def _record_text(record: ManifestRecord | None) -> str:
+    """A record's metadata as a person reads it. Its content digest is summarised, not printed."""
+    if record is None:
+        return "(absent)"
+    machine = "-" if record.machine is None else record.machine
+    return f"path={record.path} scope={record.scope} machine={machine} format={record.format} preset={record.preset}"
+
+
+def _content_summary(conflict: RecordConflict) -> str:
+    """Which side changed the content, so a choice of metadata can say what it keeps."""
+    base, local, remote = conflict.base, conflict.local, conflict.remote
+    if base is None or local is None or remote is None:
+        return "content: the records differ between the sides"
+    changed = [name for name, record in (("local", local), ("remote", remote)) if record.sha256 != base.sha256]
+    if not changed:
+        return "content: unchanged on both sides"
+    if len(changed) == 2:
+        return "content: changed on both sides, merged by content"
+    return f"content: changed on {changed[0]} only; it is kept whichever side's metadata is picked"
+
+
+def _record_views(result: RecordMergeResult, local: Manifest, remote: Manifest) -> tuple[ConflictView, ...]:
+    """The record and collision conflicts of a merge, as choices a person can make on them."""
+    views = [
+        ConflictView(
+            kind=conflict.kind,
+            file_id=conflict.file_id,
+            path=record_path_of(conflict),
+            key_path=None,
+            fingerprint=_record_fingerprint(conflict),
+            local_present=conflict.local is not None,
+            remote_present=conflict.remote is not None,
+            base_text=_record_text(conflict.base),
+            local_text=_record_text(conflict.local),
+            remote_text=_record_text(conflict.remote),
+            diff=_content_summary(conflict),
+        )
+        for conflict in result.conflicts
+    ]
+    views.extend(
+        ConflictView(
+            kind="collision",
+            file_id=_collision_id(collision),
+            path=collision.path,
+            key_path=None,
+            fingerprint=_collision_fingerprint(collision, local, remote),
+        )
+        for collision in result.collisions
+    )
+    return tuple(views)
+
+
+def _as_record_choice(pick: Choice) -> RecordChoice:
+    match pick:
+        case "local" | "remote" | "drop" | "keep" | "delete":
+            return pick
+        case _:
+            raise ValueError(f"{pick!r} is not a record choice")
+
+
+def _as_collision_choice(pick: Choice) -> CollisionChoice:
+    match pick:
+        case "local" | "remote" | "drop":
+            return pick
+        case _:
+            raise ValueError(f"{pick!r} is not a collision choice")
+
+
+def _record_choices(
+    first: RecordMergeResult, local: Manifest, remote: Manifest, picks: Picks
+) -> tuple[dict[str, RecordChoice], dict[CollisionKey, CollisionChoice]]:
+    """The picks that land on this merge's record and collision conflicts, keyed for `merge_manifests`."""
+    records: dict[str, RecordChoice] = {}
+    for conflict in first.conflicts:
+        pick = picks.get(_record_fingerprint(conflict))
+        if pick is not None:
+            records[conflict.file_id] = _as_record_choice(pick)
+    collisions: dict[CollisionKey, CollisionChoice] = {}
+    for collision in first.collisions:
+        pick = picks.get(_collision_fingerprint(collision, local, remote))
+        if pick is not None:
+            collisions[collision_key_of(collision)] = _as_collision_choice(pick)
+    return records, collisions
+
+
 def _merge_stale(
     *,
     config: SyncConfig,
@@ -794,7 +1125,8 @@ def _merge_stale(
     presets: _Presets,
     head_commit: str | None,
     collected: _Collect,
-) -> tuple[PendingConflictRecord, ...]:
+    resolution: Resolution,
+) -> tuple[_Found, ...]:
     """Content-merge every local change whose ledger baseline is older than HEAD.
 
     The three inputs are the ones the diverged merge uses, with the base taken from the ledger
@@ -802,50 +1134,36 @@ def _merge_stale(
     the live file, and HEAD's object. Pushing the live bytes instead would drop HEAD's change
     with no conflict (``docs/design/01-sync-model.md``).
     """
-    conflicts: list[PendingConflictRecord] = []
+    found: list[_Found] = []
     for change in collected.stale:
         file_id = change.record.file_id
         base = _verified_object(transport, cipher, change.entry.commit, file_id, change.entry.sha256)
         head_bytes = _verified_object(transport, cipher, head_commit, file_id, change.record.sha256)
         if base is None or head_bytes is None:
-            conflicts.append(
-                PendingConflictRecord(file_id, change.record.path, "the baseline or HEAD object is missing")
+            found.append(
+                _Found(PendingConflictRecord(file_id, change.record.path, "the baseline or HEAD object is missing"))
             )
             continue
-        merged = merge_content(base, change.live, head_bytes, driver, presets.adapter_for(change.record.format))
-        if not merged.conflicted and not _syntax_ok(presets, merged.data, change.record.path):
-            # A structural merge can produce text that is valid for its format but not for its
-            # language. Publishing it would break the user's shell, so it is a conflict.
-            conflicts.append(
-                PendingConflictRecord(
-                    file_id,
-                    change.record.path,
-                    "the merged result would not pass its syntax check",
-                    base,
-                    change.live,
-                    head_bytes,
-                )
-            )
-            continue
-        if merged.conflicted:
-            conflicts.append(
-                PendingConflictRecord(
-                    file_id,
-                    change.record.path,
-                    _content_detail(
-                        merged.conflict_paths,
-                        "the same region changed here and in the repo since the last apply",
-                    ),
-                    base,
-                    change.live,
-                    head_bytes,
-                )
-            )
+        settled = _settle_content(
+            presets=presets,
+            driver=driver,
+            file_id=file_id,
+            path=change.record.path,
+            fmt=change.record.format,
+            base=base,
+            local=change.live,
+            remote=head_bytes,
+            picks=resolution.picks,
+            reason="the same region changed here and in the repo since the last apply",
+        )
+        if settled.data is None:
+            record = PendingConflictRecord(file_id, change.record.path, settled.detail, base, change.live, head_bytes)
+            found.append(_Found(record, settled.views))
             continue
         projected = _project_merged(
             presets,
             config,
-            merged.data,
+            settled.data,
             scope=change.record.scope,
             machine=change.record.machine,
             path=change.record.path,
@@ -854,7 +1172,7 @@ def _merge_stale(
         collected.records[file_id] = _replace_sha(change.record, _sha256(projected))
         collected.contents[file_id] = projected
         collected.collected.append(change.record.path)
-    return tuple(conflicts)
+    return tuple(found)
 
 
 # --------------------------------------------------------------------------- publish
@@ -869,11 +1187,12 @@ def _merge_base(transport: GitTransport, local: str, remote: str) -> str | None:
 
 @dataclass(frozen=True)
 class _Merged:
-    """The outcome of merging a diverged local and remote: a commit, or conflicts."""
+    """The outcome of merging a diverged local and remote: a commit, or conflicts with their views."""
 
     commit: str | None
     conflicts: tuple[PendingConflictRecord, ...]
     base_commit: str | None = None
+    views: tuple[ConflictView, ...] = ()
 
 
 def _merge_diverged(
@@ -889,6 +1208,7 @@ def _merge_diverged(
     local: str,
     remote: str,
     local_manifest: Manifest,
+    resolution: Resolution,
 ) -> _Merged:
     """Steps 8–12 for a diverged pair: decrypt, merge, gate, and build the two-parent commit."""
     base_commit = _merge_base(transport, local, remote)
@@ -896,8 +1216,19 @@ def _merge_diverged(
     remote_manifest = _read_manifest(transport, cipher, remote)
     if remote_manifest is None:
         raise GitError("the remote branch has no manifest; refusing to merge")
-    result = merge_manifests(base_manifest, local_manifest, remote_manifest)
-    conflicts = _record_conflicts(result)
+    first = merge_manifests(base_manifest, local_manifest, remote_manifest)
+    result = first
+    if resolution.picks:
+        record_choices, collision_choices = _record_choices(first, local_manifest, remote_manifest, resolution.picks)
+        result = merge_manifests(
+            base_manifest,
+            local_manifest,
+            remote_manifest,
+            choices=record_choices,
+            collision_choices=collision_choices,
+        )
+    conflicts = list(_record_conflicts(result))
+    views = list(_record_views(result, local_manifest, remote_manifest))
 
     contents: dict[str, bytes] = {}
     records = dict(result.merged)
@@ -910,42 +1241,33 @@ def _merge_diverged(
             # corrupt repo — not `base = ∅`, which would merge as if the file were new.
             raise ContentDigestMismatch(task.file_id, task.base_sha256, "the base object is missing")
         if local_bytes is None or remote_bytes is None:
-            conflicts = (*conflicts, PendingConflictRecord(task.file_id, task.path, "a side's object is missing"))
+            conflicts.append(PendingConflictRecord(task.file_id, task.path, "a side's object is missing"))
             continue
-        merged = merge_content(base_bytes or b"", local_bytes, remote_bytes, driver, presets.adapter_for(task.format))
-        if not merged.conflicted and not _syntax_ok(presets, merged.data, task.path):
-            conflicts = (
-                *conflicts,
-                PendingConflictRecord(
-                    task.file_id,
-                    task.path,
-                    "the merged result would not pass its syntax check",
-                    base_bytes,
-                    local_bytes,
-                    remote_bytes,
-                ),
+        settled = _settle_content(
+            presets=presets,
+            driver=driver,
+            file_id=task.file_id,
+            path=task.path,
+            fmt=task.format,
+            base=base_bytes,
+            local=local_bytes,
+            remote=remote_bytes,
+            picks=resolution.picks,
+            reason="the same region changed on both sides",
+        )
+        if settled.data is None:
+            conflicts.append(
+                PendingConflictRecord(task.file_id, task.path, settled.detail, base_bytes, local_bytes, remote_bytes)
             )
-            continue
-        if merged.conflicted:
-            conflicts = (
-                *conflicts,
-                PendingConflictRecord(
-                    task.file_id,
-                    task.path,
-                    _content_detail(merged.conflict_paths, "the same region changed on both sides"),
-                    base_bytes,
-                    local_bytes,
-                    remote_bytes,
-                ),
-            )
+            views.extend(settled.views)
             continue
         projected = _project_merged(
-            presets, config, merged.data, scope=task.scope, machine=task.machine, path=task.path, fmt=task.format
+            presets, config, settled.data, scope=task.scope, machine=task.machine, path=task.path, fmt=task.format
         )
         records[task.file_id] = task.complete(_sha256(projected))
         contents[task.file_id] = projected
     if conflicts:
-        return _Merged(commit=None, conflicts=conflicts, base_commit=base_commit)
+        return _Merged(commit=None, conflicts=tuple(conflicts), base_commit=base_commit, views=tuple(views))
 
     # Seal the merged result under the newer of the two sides' generations, never the older:
     # a rotation must not be undone by a content merge. A pairwise generation divergence is
@@ -1010,6 +1332,7 @@ class _Publish:
     conflicts: tuple[PendingConflictRecord, ...] = ()
     base_commit: str | None = None
     remote_commit: str | None = None
+    views: tuple[ConflictView, ...] = ()
     # Set when the remote had rotated ahead of our collect commit: the branch was moved to the
     # remote tip and the caller must re-collect on the new generation
     # (``docs/design/05-key-generations.md``).
@@ -1031,6 +1354,7 @@ def _publish(
     branch: str,
     local_commit: str | None,
     local_manifest: Manifest,
+    resolution: Resolution,
 ) -> _Publish:
     """Steps 6–13: fetch, classify, merge, push, retry."""
     for _ in range(MAX_PUSH_ATTEMPTS):
@@ -1090,9 +1414,15 @@ def _publish(
             local=local,
             remote=remote_commit,
             local_manifest=local_manifest,
+            resolution=resolution,
         )
         if merged.commit is None:
-            return _Publish(conflicts=merged.conflicts, base_commit=merged.base_commit, remote_commit=remote_commit)
+            return _Publish(
+                conflicts=merged.conflicts,
+                views=merged.views,
+                base_commit=merged.base_commit,
+                remote_commit=remote_commit,
+            )
         outcome = transport.push(config.remote, branch, merged.commit)
         if outcome == "ok":
             return _Publish(published=merged.commit, base_commit=merged.base_commit, remote_commit=remote_commit)
@@ -1450,12 +1780,21 @@ def sync(
     validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
     apps: AppDetector = NO_APP_INFO,
     adopt: AdoptChoice | None = None,
+    resolving: bool = False,
+    decide: Decide | None = None,
 ) -> SyncReport:
-    """Run one sync cycle. A conflict returns a report; a hard failure raises."""
+    """Run one sync cycle. A conflict returns a report; a hard failure raises.
+
+    `resolving` runs the cycle that `resolve` settles a pending state with; `decide` answers the
+    conflicts that cycle finds (see `Resolution`). A plain sync passes neither.
+    """
     presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
     lock.acquire()
     try:
-        if pending_store.is_pending():
+        if resolving:
+            if pending_store.load() is None:
+                raise PendingConflict("there is no pending conflict to resolve")
+        elif pending_store.is_pending():
             raise PendingConflict(
                 "a previous sync stopped with unresolved conflicts; resolve them before syncing again"
             )
@@ -1479,9 +1818,34 @@ def sync(
             home=home,
             branch=branch,
             adopt=adopt,
+            resolution=Resolution(decide=decide, resolving=resolving),
         )
     finally:
         lock.release()
+
+
+def _answer(views: tuple[ConflictView, ...], resolution: Resolution) -> Picks | None:
+    """The picks the next pass should use, after asking for decisions on the conflicts this pass found.
+
+    `None` when there is no one to ask, or when the answer adds nothing the run has not already
+    decided: then the conflicts cannot move, and the run stops with them pending.
+    """
+    if resolution.decide is None or not views or resolution.rounds >= MAX_RESOLVE_ROUNDS:
+        return None
+    fresh = resolution.decide(views, resolution.picks)
+    if not fresh or not any(key not in resolution.picks for key in fresh):
+        return None
+    return MappingProxyType({**resolution.picks, **fresh})
+
+
+def _next(resolution: Resolution, picks: Picks) -> Resolution:
+    """The resolution for the rerun that follows an answer: the same run, with its picks and one round more."""
+    return Resolution(
+        picks=picks,
+        decide=resolution.decide,
+        resolving=resolution.resolving,
+        rounds=resolution.rounds + 1,
+    )
 
 
 def _cycle(
@@ -1505,8 +1869,34 @@ def _cycle(
     home: str,
     branch: str,
     adopt: AdoptChoice | None,
+    resolution: Resolution,
     _restarted: bool = False,
 ) -> SyncReport:
+    def again(next_resolution: Resolution, restarted: bool) -> SyncReport:
+        return _cycle(
+            transport=transport,
+            files=files,
+            cipher=cipher,
+            scanner=scanner,
+            store=store,
+            codec=codec,
+            wrapper=wrapper,
+            driver=driver,
+            presets=presets,
+            live=live,
+            ledger_store=ledger_store,
+            pending_store=pending_store,
+            deny=deny,
+            apps=apps,
+            source=source,
+            config=config,
+            home=home,
+            branch=branch,
+            adopt=adopt,
+            resolution=next_resolution,
+            _restarted=restarted,
+        )
+
     ledger = dict(ledger_store.load())
     head_commit = transport.head()
     if head_commit is not None:
@@ -1536,7 +1926,7 @@ def _cycle(
             unprojectable=tuple(collected.unprojectable),
         )
     if collected.stale:
-        stale_conflicts = _merge_stale(
+        found = _merge_stale(
             config=config,
             transport=transport,
             cipher=cipher,
@@ -1544,8 +1934,14 @@ def _cycle(
             presets=presets,
             head_commit=head_commit,
             collected=collected,
+            resolution=resolution,
         )
-        if stale_conflicts:
+        if found:
+            views = tuple(view for item in found for view in item.views)
+            answer = _answer(views, resolution)
+            if answer is not None:
+                return again(_next(resolution, answer), _restarted)
+            stale_conflicts = tuple(item.record for item in found)
             pending_store.record(
                 PendingState.create(
                     local_commit=head_commit or "",
@@ -1596,6 +1992,7 @@ def _cycle(
         branch=branch,
         local_commit=local_commit,
         local_manifest=new_manifest,
+        resolution=resolution,
     )
     if outcome.restart:
         # `_publish` adopted a remote that had rotated ahead of our collect commit; re-collect on
@@ -1603,29 +2000,11 @@ def _cycle(
         # so a second request means the remote rotated again mid-cycle.
         if _restarted:
             raise GitError("the remote rotated again while this machine adopted it; re-run `syncintosh sync`")
-        return _cycle(
-            transport=transport,
-            files=files,
-            cipher=cipher,
-            scanner=scanner,
-            store=store,
-            codec=codec,
-            wrapper=wrapper,
-            driver=driver,
-            presets=presets,
-            live=live,
-            ledger_store=ledger_store,
-            pending_store=pending_store,
-            deny=deny,
-            apps=apps,
-            source=source,
-            config=config,
-            home=home,
-            branch=branch,
-            adopt=adopt,
-            _restarted=True,
-        )
+        return again(resolution, True)
     if outcome.conflicts:
+        answer = _answer(outcome.views, resolution)
+        if answer is not None:
+            return again(_next(resolution, answer), _restarted)
         pending_store.record(
             PendingState.create(
                 local_commit=local_commit or "",
@@ -1642,6 +2021,9 @@ def _cycle(
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
         )
+    if resolution.resolving:
+        # The push landed, so the conflicts this run settled are no longer pending.
+        pending_store.clear()
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
@@ -1690,4 +2072,14 @@ def _cycle(
     )
 
 
-__all__ = ["MAX_PUSH_ATTEMPTS", "NO_APP_INFO", "NO_CATALOG", "NO_VALIDATORS", "Deferral", "SyncReport", "sync"]
+__all__ = [
+    "MAX_PUSH_ATTEMPTS",
+    "NO_APP_INFO",
+    "NO_CATALOG",
+    "NO_RESOLUTION",
+    "NO_VALIDATORS",
+    "Deferral",
+    "Resolution",
+    "SyncReport",
+    "sync",
+]
