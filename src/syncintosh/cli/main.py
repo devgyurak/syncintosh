@@ -584,6 +584,9 @@ def resolve(
     approve = None if yes else _confirm_resolution
     try:
         config = load_config(machine.config_file)
+        if llm and yes and config.llm.auto_apply:
+            # --yes skips the approval screen, the only place an auto-applied proposal is seen.
+            raise typer.BadParameter("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
         ports = _sync_ports(config, machine)
         if take is not None:
             choose = take_chooser(take)

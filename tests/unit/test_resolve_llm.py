@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import types
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -459,3 +461,27 @@ def test_resolve_llm_refuses_a_shell_preset_in_auto_apply_at_resolve_time() -> N
     # when & then
     with pytest.raises(typer.BadParameter, match="always asked"):
         _assisted_choice(config, None, {"catalog": Builtin.default(), "adapters": {}, "validators": {}})
+
+
+def test_resolve_llm_with_yes_and_auto_apply_is_refused_before_anything_is_published(monkeypatch) -> None:
+    # given — a configuration that would auto-apply a proposal, and --yes, which hides the screen that shows it
+    from syncintosh.core.config import LlmConfig, SyncConfig
+    from syncintosh.system import config as config_module
+    from syncintosh.system import paths as paths_module
+
+    config = SyncConfig.create(
+        remote="r",
+        machine_id="m",
+        items=(),
+        llm=LlmConfig.create(base_url="https://api.example.com/v1", model="m", auto_apply=("vscode",)),
+    )
+    monkeypatch.setattr(config_module, "load_config", lambda path=None: config)
+    machine = types.SimpleNamespace(config_file=None, home=None)
+    monkeypatch.setattr(paths_module.MachinePaths, "default", classmethod(lambda cls: machine))
+
+    # when
+    result = CliRunner().invoke(app, ["resolve", "--llm", "--yes"])
+
+    # then
+    assert result.exit_code == 2
+    assert "unseen" in result.output
