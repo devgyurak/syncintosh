@@ -298,7 +298,10 @@ def download_trust(url: str, *, shipped: ShippedPresets) -> DownloadTrust:
 
 # ASCII only: a non-ASCII host (a full-width dot or slash) makes `urlsplit` raise on the netloc, and
 # a proposal from a model must never be able to crash the resolve that reads it.
-_URL: Final = re.compile(r"https?://[^\s\"'<>()\[\]{}\x00-\x1f\x7f-\U0010ffff]+")
+# Case-insensitive on the scheme only: with IGNORECASE on the whole pattern, the negated range below
+# would also exclude `i`, `l` and `s` through their Unicode case variants, and cut a URL short.
+_URL: Final = re.compile(r"(?i:https?)://[^\s\"'<>()\[\]{}\x00-\x1f\x7f-\U0010ffff]+")
+_UNICODE_ESCAPE: Final = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
 @dataclass(frozen=True)
@@ -320,11 +323,21 @@ def proposed_urls(proposal: str, *, base: str, local: str, remote: str) -> tuple
     """The URLs in `proposal` that appear in none of the three sides, each as an untrusted URL.
 
     A URL the sides already held is not new, so it is not flagged here. Every URL this returns
-    is new, and every one is untrusted, whatever it matches.
+    is new, and every one is untrusted, whatever it matches. A URL is found in the text as written
+    and in its JSON-unescaped forms, so `https:\\/\\/` and `\\u0068ttps://` are seen too.
     """
-    known = {_clean(url) for side in (base, local, remote) for url in _URL.findall(side)}
-    found = dict.fromkeys(url for url in (_clean(raw) for raw in _URL.findall(proposal)) if url not in known)
+    known = {url for side in (base, local, remote) for url in _urls_in(side)}
+    found = dict.fromkeys(url for url in _urls_in(proposal) if url not in known)
     return tuple(ProposedUrl(url=url, domain=_host(url)) for url in found)
+
+
+def _urls_in(text: str) -> set[str]:
+    """Every URL in any of the text's forms: as written, with `\\/` unescaped, and with `\\uXXXX` decoded."""
+    unslashed = text.replace("\\/", "/")
+    decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
+    unslashed_decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
+    forms = (text, unslashed, decoded, unslashed_decoded)
+    return {_clean(url) for form in forms for url in _URL.findall(form)}
 
 
 def _clean(raw: str) -> str:
