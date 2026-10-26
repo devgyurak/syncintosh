@@ -61,6 +61,7 @@ _HOST_TOKEN: Final = re.compile(HOST_TOKEN_PATTERN)
 _URL_HOST: Final = re.compile(URL_HOST_PATTERN)
 
 _NAME_CHAR: Final = re.compile(r"[A-Za-z0-9_.-]")
+_TAIL: Final = re.compile(r"u[0-9a-fA-F]{4}")
 _UNICODE_ESCAPE: Final = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 # An all-numeric name as inet_aton reads one dotted part: `0x` hex, a leading `0` octal, or decimal.
@@ -240,11 +241,19 @@ def host_tokens(text: str) -> frozenset[str]:
 
 
 def _unescaped_forms(text: str) -> tuple[str, ...]:
-    """The text as written, with `\\/` undone, with `\\uXXXX` decoded, and with both."""
-    unslashed = text.replace("\\/", "/")
-    decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
-    both = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
-    return tuple(dict.fromkeys((text, unslashed, decoded, both)))
+    """The text as written, with escapes undone in each way a proposal can write them.
+
+    A slash may be `\\/`, a code point `\\uXXXX`, and a backslash itself `\\\\`, which is what a JSON value holds
+    for a single `\\`. A URL parser reads that backslash as a slash, so the doubled form is one too.
+    """
+    single = text.replace(chr(92) * 2, chr(92))
+    forms: list[str] = []
+    for base in (text, single):
+        unslashed = base.replace(chr(92) + "/", "/")
+        decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), base)
+        both = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
+        forms.extend((base, unslashed, decoded, both))
+    return tuple(dict.fromkeys(forms))
 
 
 def new_host_tokens(proposal: str, *sides: str) -> tuple[str, ...]:
@@ -275,11 +284,13 @@ def _is_path_segment(text: str, start: int) -> bool:
 
 
 def _is_escape_residue(text: str, start: int) -> bool:
-    """True when the name follows a backslash, so it is the tail of a `\\uXXXX` escape (`u002fevil.example`).
+    """True when the name is the tail of a `\\uXXXX` escape: `u002fevil.example` after one backslash.
 
-    The escape-decoded form already holds the real host, so the residue is not counted.
+    Only that shape is a residue. A backslash before a host (`http:\\evil.example`) is how a proposal writes a
+    URL that a parser reads as a slash, so the host is counted. The escape-decoded form holds the real host.
     """
-    return start >= 1 and text[start - 1] == "\\"
+    tail = text[start : start + 5]
+    return start >= 1 and text[start - 1] == "\\" and _TAIL.fullmatch(tail) is not None
 
 
 def _is_setting_key(text: str, end: int) -> bool:

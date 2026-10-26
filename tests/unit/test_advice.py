@@ -322,3 +322,21 @@ def test_a_quoted_host_followed_by_a_port_is_a_new_host() -> None:
 
     # then
     assert found == ("evil.example",)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"p": "http:' + chr(92) * 2 + 'evil.example:8080"}',
+        '{"p": "http:' + chr(92) * 4 + 'evil.example:8080"}',
+        "http:" + chr(92) + "evil.example:8080",
+    ],
+    ids=["json-double-backslash", "json-quadruple-backslash", "single-backslash"],
+)
+def test_a_host_after_a_backslash_is_a_new_host(text: str) -> None:
+    # given — a URL parser reads a backslash as a slash, so a host after one is a host (VS Code's parser does)
+    # when
+    found = new_host_tokens(text, "")
+
+    # then
+    assert found == ("evil.example",)
