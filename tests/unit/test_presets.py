@@ -512,3 +512,29 @@ def test_a_proposal_with_non_ascii_url_characters_is_read_without_error() -> Non
     # then — the ASCII part is found and nothing raises
     assert [item.url for item in found] == ["https://evil.example"]
     assert all(item.trusted is False for item in found)
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        "open HTTPS://evil.example/x",
+        r'{"a": "https:\/\/evil.example\/x"}',
+        r'{"a": "https://evil.example/x"}',
+    ],
+    ids=["upper-scheme", "json-escaped-slash", "json-unicode-escape"],
+)
+def test_a_url_written_in_any_escaped_form_is_still_found(proposal: str) -> None:
+    # when
+    found = proposed_urls(proposal, base="", local="", remote="")
+
+    # then — the domain the person sees is the real one, and the URL is untrusted
+    assert [item.domain for item in found] == ["evil.example"]
+    assert all(item.trusted is False for item in found)
+
+
+def test_a_url_in_a_side_is_not_new_even_when_the_proposal_escapes_it() -> None:
+    # when
+    found = proposed_urls(r'{"a": "https:\/\/example.test\/app"}', base="", local="https://example.test/app", remote="")
+
+    # then
+    assert found == ()
