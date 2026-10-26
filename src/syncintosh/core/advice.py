@@ -217,8 +217,16 @@ def numeric_host(name: str) -> ipaddress.IPv4Address | None:
 
 
 def host_tokens(text: str) -> frozenset[str]:
-    """Every host the text names, lowercased: a dotted name, a dotted address, or a URL or `user@` host."""
-    found = {match.group().lower() for match in _HOST_TOKEN.finditer(text)}
+    """Every host the text names, lowercased: a dotted name, a dotted address, or a URL or `user@` host.
+
+    A dotted name that is a path segment (`y.git` after a `/`) or a settings key (`"editor.fontSize":`) is
+    not a destination, so it is not counted. The masker does not use this filter: it hides such names too.
+    """
+    found = {
+        match.group().lower()
+        for match in _HOST_TOKEN.finditer(text)
+        if not _is_path_segment(text, match.start()) and not _is_setting_key(text, match.end())
+    }
     found |= {match.group().lower() for match in _URL_HOST.finditer(text)}
     return frozenset(found)
 
@@ -239,6 +247,19 @@ def _numeric_value(part: str) -> int:
     if len(part) > 1 and part.startswith("0"):
         return int(part, 8)
     return int(part)
+
+
+def _is_path_segment(text: str, start: int) -> bool:
+    """True when the name starts right after a single `/`, as a path component does (not after `//`)."""
+    return start > 0 and text[start - 1] == "/" and text[max(0, start - 2) : start] != "//"
+
+
+def _is_setting_key(text: str, end: int) -> bool:
+    """True when the name is followed by its closing quote and a colon, as a JSON key is."""
+    return _KEY_END.match(text, end) is not None
+
+
+_KEY_END: Final = re.compile(r"[\"']\s*:")
 
 
 def _invisible(char: str) -> bool:
