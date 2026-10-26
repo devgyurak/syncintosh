@@ -7,7 +7,9 @@ Cheap scrypt parameters are passed explicitly; the production default is never r
 
 from __future__ import annotations
 
+import json
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,19 +29,22 @@ from syncintosh.core.errors import (
     PendingConflict,
     PruneRefused,
     SecretScanError,
+    SyntaxInvalid,
     UnknownKeyGeneration,
 )
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest
 from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
-from syncintosh.core.ports import LiveFiles, PushOutcome
-from syncintosh.core.presets import EMPTY_CATALOG
+from syncintosh.core.paths import collision_key
+from syncintosh.core.ports import LiveFiles, PresetCatalog, PushOutcome, SyntaxValidator
+from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
 from syncintosh.core.resolution import Decide
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
+from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import DiffReport, diff_repo
 from syncintosh.services.keys import (
     export_ring,
@@ -203,6 +208,8 @@ def _run(
     adapters: dict | None = None,
     resolving: bool = False,
     decide: Decide | None = None,
+    catalog: PresetCatalog | None = None,
+    validators: Mapping[ValidatorName, SyntaxValidator] | None = None,
 ) -> SyncReport:
     active = transport or GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
@@ -228,6 +235,8 @@ def _run(
         adopt=adopt,
         resolving=resolving,
         decide=decide,
+        catalog=EMPTY_CATALOG if catalog is None else catalog,
+        validators={} if validators is None else validators,
     )
 
 
@@ -1663,11 +1672,15 @@ def test_local_and_remote_paths_settle_each_file_to_its_own_side(tmp_path, memor
     _write_file(b, PROFILE, b"alpha\nFROM B\n")
     _run(b)
 
-    # when & then — naming only one of the two conflicts leaves the other without a choice: nothing moves
+    # when & then — naming only one of the two conflicts leaves the other without a choice: nothing moves,
+    # not the live files, not the pending state, and not the remote branch
+    remote_before = _git(b.remote, "rev-parse", BRANCH)
     with pytest.raises(ConflictsNotCovered):
         _run(b, resolving=True, decide=decision(scoped_chooser((ZSH,), (), home=str(b.home))))
     assert DirectoryPendingStore(b.pending).is_pending() is True
     assert _read_live(b) == b"one\nFROM B\nthree\n"
+    assert (b.home / PROFILE).read_bytes() == b"alpha\nFROM B\n"
+    assert _git(b.remote, "rev-parse", BRANCH) == remote_before
 
     # when — each file is named for the side it should take
     report = _run(
@@ -1683,3 +1696,72 @@ def test_local_and_remote_paths_settle_each_file_to_its_own_side(tmp_path, memor
     assert _run(a).has_conflicts is False
     assert _read_live(a) == b"one\nFROM B\nthree\n"
     assert (a.home / PROFILE).read_bytes() == b"alpha\nFROM A\n"
+
+
+# --------------------------------------------------------------------------- syntax fallback
+
+BASE_JSON = '{\n  "a": "0",\n  "b": "0"\n}\n'
+VALIDATED_POLICY = PresetFile.create(path=JSONC, format="jsonc", validator="json")
+
+
+class _CrossKeyValidator:
+    """Refuses the one document a key-level pick can build from two valid sides: a = "R" with b = "B".
+
+    Neither side holds that pair, so each side passes and only a merged result can fail.
+    """
+
+    def check(self, text: str, *, subject: str) -> None:
+        document = json.loads(text)
+        if document.get("a") == "R" and document.get("b") == "B":
+            raise SyntaxInvalid(f"{subject}: a and b name a combination no side holds")
+
+
+class _ValidatedCatalog:
+    """The built-in catalog plus one JSON file whose syntax policy the test controls."""
+
+    def __init__(self, policy: PresetFile) -> None:
+        self._policy = policy
+        self._base = BuiltinCatalog.default()
+
+    def _owns(self, path: str) -> bool:
+        return collision_key(path) == collision_key(self._policy.path)
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        return self._policy if self._owns(path) else self._base.policy_for(path)
+
+    def knows(self, preset: str, path: str) -> bool:
+        return True if self._owns(path) else self._base.knows(preset, path)
+
+    def get(self, name: str):
+        return self._base.get(name)
+
+    def preset_for(self, path: str):
+        return self._base.preset_for(path)
+
+
+def test_a_key_pick_that_fails_the_syntax_check_is_settled_at_file_level(tmp_path, memory_key_store) -> None:
+    # given — A sets a to "R"; B sets a to "L" and b to "B". Each side is valid; a key-level pick of "R"
+    # for a builds {a: "R", b: "B"}, which the validator refuses.
+    catalog = _ValidatedCatalog(VALIDATED_POLICY)
+    validators: dict[ValidatorName, SyntaxValidator] = {"json": _CrossKeyValidator()}
+    a, b, _ = _pair(tmp_path, memory_key_store, BASE_JSON.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text('{"a": "R", "b": "0"}\n', encoding="utf-8")
+    _run(a, catalog=catalog, validators=validators)
+    (b.home / JSONC).write_text('{"a": "L", "b": "B"}\n', encoding="utf-8")
+    _run(b, catalog=catalog, validators=validators)
+    asked: list[list[str]] = []
+    choose_key_then_file = decision(lambda view: "remote" if view.kind == "key" else "local")
+
+    def counting(views, answered):
+        asked.append(sorted(view.kind for view in views if view.fingerprint not in answered))
+        return choose_key_then_file(views, answered)
+
+    # when
+    report = _run(b, catalog=catalog, validators=validators, resolving=True, decide=counting)
+
+    # then — the key pick is refused by the check, the file is offered next, and its local side publishes
+    assert asked == [["key"], ["file"]]
+    assert report.has_conflicts is False
+    assert json.loads((b.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
+    _run(a, catalog=catalog, validators=validators)
+    assert json.loads((a.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
