@@ -33,7 +33,9 @@ dependencies = [
     "watchdog>=4.0.0",
     "merge3>=0.0.8",
     # OpenAI-compatible client. Point base_url at a home-server model to keep data local.
-    "openai>=1.30.0",
+    # Pinned to the major whose HTTP client is httpx2, so the no-redirect client below is the only path.
+    "openai>=3.0,<4",
+    "httpx2>=2.12,<3",
 ]
 
 [project.optional-dependencies]

@@ -213,15 +213,17 @@ class Backup:
     that commit: an `--adopt remote` overwrite, or a file an earlier cycle published but never applied,
     can replace bytes that only an older commit (the ledger's) holds. That gap is tracked separately.
     `commit` is `None` only when nothing has been committed yet; `_apply` then refuses to overwrite
-    a file that exists.
+    a file that exists. `records` is the restore point's manifest records, when there is a commit: an
+    apply that a model proposed checks each overwritten file against them (`_in_restore_point`).
     """
 
     commit: str | None
+    records: Mapping[str, ManifestRecord] | None = field(default=None, repr=False)
 
     @classmethod
-    def create(cls, commit: str | None) -> Backup:
+    def create(cls, commit: str | None, records: Mapping[str, ManifestRecord] | None = None) -> Backup:
         """Name the restore point. Called only once the cycle has its collect commit, or its HEAD."""
-        return cls(commit=commit)
+        return cls(commit=commit, records=records)
 
 
 @dataclass(frozen=True)
@@ -470,6 +472,7 @@ _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 _NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
+_NOT_IN_RESTORE_POINT = "a model proposed this change, and the file's current content is not in the restore point"
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -1563,6 +1566,7 @@ def _apply(
     home: str,
     adopt: AdoptChoice | None,
     backup: Backup,
+    guard_overwrites: bool = False,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
@@ -1688,6 +1692,15 @@ def _apply(
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
+        # A proposal settled this run, so an overwrite must replace only what the restore point holds.
+        if (
+            guard_overwrites
+            and live_bytes is not None
+            and live_bytes != data
+            and not _in_restore_point(backup, file_id, live_view)
+        ):
+            refused.append(Refusal(record.path, _NOT_IN_RESTORE_POINT))
+            continue
         live.write(live_path, data)
         applied.append(record.path)
     return _Applied(
@@ -1700,6 +1713,18 @@ def _apply(
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
     )
+
+
+def _in_restore_point(backup: Backup, file_id: str, live_view: bytes | None) -> bool:
+    """True when the restore point holds this file's current projected content, byte for byte.
+
+    The digest is of the projection, the form a record holds. A file that cannot be projected cannot be
+    shown to be in the restore point, so it is not.
+    """
+    if backup.records is None or live_view is None:
+        return False
+    record = backup.records.get(file_id)
+    return record is not None and _sha256(live_view) == record.sha256
 
 
 def _decision(
@@ -2072,6 +2097,8 @@ def _cycle(
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
+    restore_manifest = _read_manifest(transport, cipher, local_commit) if local_commit else None
+    backup_records = None if restore_manifest is None else restore_manifest.records
     # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge.
     applied = _apply(
         transport=transport,
@@ -2088,7 +2115,8 @@ def _cycle(
         config=config,
         home=home,
         adopt=adopt,
-        backup=Backup.create(local_commit),
+        backup=Backup.create(local_commit, records=backup_records),
+        guard_overwrites=any(isinstance(pick, Proposal) for pick in resolution.picks.values()),
     )
     ledger_store.save(
         _settle_ledger(

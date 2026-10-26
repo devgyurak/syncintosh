@@ -30,8 +30,9 @@ opt-in (`resolve --llm`, see [06-llm-assist](docs/design/06-llm-assist.md)).
   masked, to the endpoint named in `config.json` under `llm` (`base_url`, `model`), after you confirm
   it when it is not on your network. Nothing is applied without your acceptance, except a preset you
   list in `llm.auto_apply` when the suggestion adds no new URL. The daemon never calls a model. The
-  API key comes from `SYNCINTOSH_LLM_API_KEY` or the keyring, never the config. The restore point is
-  not yet a full guarantee for an `--adopt remote` overwrite; see the design note.
+  API key comes from `SYNCINTOSH_LLM_API_KEY` or the keyring, never the config. A run that a model's
+  proposal settled refuses any overwrite whose current content is not in the restore point. A plain
+  sync's `--adopt remote` overwrite is not yet guarded; see the design note.
 - **A tracked file that is a symlink is reported, not synced.** If `~/.zshrc` is a link into a
   dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or

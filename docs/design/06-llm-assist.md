@@ -119,10 +119,11 @@ worked from, the collect commit if the cycle wrote one, or the HEAD it kept othe
 takes that restore point as a required keyword, so no write can be requested without naming it.
 The report and the CLI show it.
 
-**The restore point is not yet a guarantee that every overwritten byte is recoverable.** An
-`--adopt remote` overwrite, or a file an earlier cycle published but never applied, can replace
-bytes that only an older commit holds. Closing that needs a per-file restore point or a stored
-pre-image. It is open and tracked as a known limit below.
+**A run that a model's proposal settled is guarded.** Every file that run would overwrite must have
+its current content in the restore point: the projected bytes must match the record the restore point
+holds for that file (`_in_restore_point`). A file that does not match, or cannot be projected, is
+refused and left as it is. So for a model's change, the overwritten bytes are always recoverable from
+the restore point. A run without a proposal is not guarded by this rule (see *Known limits*).
 
 ## The endpoint
 
@@ -153,9 +154,11 @@ unknown key is refused, so a typo cannot silently disable a guard.
 
 ## Known limits
 
-- **Restore point is not a full guarantee** (see *Backup*). Open.
-- **Values outside the masking rules are sent.** See *What leaves the machine*. Open as a design
-  decision: masking every value would leave the model nothing to merge.
+- **Overwrites outside a proposal run are not guarded.** An `--adopt remote` overwrite, and a file an
+  earlier cycle published but never applied, can replace bytes that only an older commit holds. A
+  plain sync does not check this. It is a separate issue, not part of the model feature.
+- **Values outside the masking rules are sent.** See *What leaves the machine*. Accepted: masking every
+  value would leave the model nothing to merge. This includes a nested key that is not on the list.
 - **`auto_apply` is also consent to a change of executable paths.** A VS Code setting such as
   `git.path` or a terminal profile can name a program to run, and that is a change with no host in it,
   so no new-endpoint check catches it. Listing a preset in `llm.auto_apply` therefore means the model
@@ -173,10 +176,8 @@ unknown key is refused, so a typo cannot silently disable a guard.
 - **The `openai` error stays chained.** Our own error text is fixed, so it does not repeat the
   library's message; the library's exception is kept as the cause, and its message may echo part of
   the request if the library puts it there. The library is not under this project's control.
-- **The openai 1.x branch is not in CI.** The lock file pins openai 3.x, so CI exercises only the
-  httpx2 client. The 1.x path (httpx) was run by hand against a loopback server: a normal reply, a
-  refused redirect, and an empty answer. Pinning openai to 3.x in `pyproject.toml` would remove the
-  branch; it is waiting for a decision.
+- **The openai version is pinned to 3.x** (`openai>=3,<4`) with `httpx2` declared directly, so the
+  no-redirect client is the only path. Moving to openai 1 or 2 would need the httpx client again.
 - **XML validation is not available.** Only the JSON and zsh checks exist, so an XML suggestion has
   no syntax check beyond the merge's own render round-trip. XML waits for the XML adapter.
 
