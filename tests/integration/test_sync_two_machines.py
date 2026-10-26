@@ -2000,3 +2000,27 @@ def test_a_run_that_applies_a_proposal_refuses_a_file_whose_content_is_not_in_th
     refused = [refusal for refusal in report.refused if refusal.path == ZSH]
     assert len(refused) == 1
     assert "restore point" in refused[0].reason
+
+
+def test_a_file_refused_by_a_proposal_run_is_applied_by_the_next_plain_sync(tmp_path, memory_key_store) -> None:
+    # given — the same refusal as above: ZSH was pending-apply and the proposal run left its live file alone
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    _run(b)
+    refused = _run(
+        b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
+    )
+    assert [refusal.path for refusal in refused.refused] == [ZSH]
+
+    # when — a plain sync has no proposal, so the guard does not apply and the stale record is written
+    report = _run(b)
+
+    # then — the file is not stuck: the next plain sync applies the published content. Whether that overwrite
+    # keeps a restore point is the open gap tracked in the design note, and is not decided here.
+    assert ZSH in report.applied
+    assert _read_live(b) == b"ONE\ntwo\nthree\n"
