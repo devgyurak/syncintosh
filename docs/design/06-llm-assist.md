@@ -35,7 +35,9 @@ file (empty for a whole file), and the base, local and remote values. Before the
   private and CGNAT IPs) and by the domains the config lists in `llm.internal_domains`.
 
 **This is not "every value".** A value under a key name outside that list, in a format the patterns
-do not recognise, is sent as it is. The model needs the values to merge them: a conflict with every
+do not recognise, is sent as it is. A value nested under a credential-looking object is covered only
+when its own key is on the list: `{"auth": {"user": "u", "pass": "x"}}` hides `pass`, but a nested key
+such as `"secret_phrase"` is sent. The model needs the values to merge them: a conflict with every
 value masked gives it nothing to choose between. The trade-off is deliberate, and it is why the
 approval screen shows what will be published, in full. Narrowing it further is a decision for the
 person who owns the settings, not a default.
@@ -154,6 +156,14 @@ unknown key is refused, so a typo cannot silently disable a guard.
 - **Restore point is not a full guarantee** (see *Backup*). Open.
 - **Values outside the masking rules are sent.** See *What leaves the machine*. Open as a design
   decision: masking every value would leave the model nothing to merge.
+- **`auto_apply` is also consent to a change of executable paths.** A VS Code setting such as
+  `git.path` or a terminal profile can name a program to run, and that is a change with no host in it,
+  so no new-endpoint check catches it. Listing a preset in `llm.auto_apply` therefore means the model
+  may change those paths without a question. List only presets whose files you are content to have
+  the model change.
+- **A shell preset is recognised by its validator name** (`zsh`), not by a property of the preset. A
+  future shell preset with no validator would not be refused under `auto_apply`. Marking shell presets
+  by a catalog attribute is the durable fix; it is not done yet.
 - **A dropped value is asked for, not applied silently.** A proposal may leave a token out, so it may
   drop a value the local side had. Such a proposal is always shown, even under `auto_apply`, and the
   approval screen shows the proposed text and the diff against the local side.
