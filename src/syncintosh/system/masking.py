@@ -40,7 +40,7 @@ _URL_HOST: Final = re.compile(URL_HOST_PATTERN.encode("ascii"))
 # a value under another key name is still sent, and the design note says so.
 _KEYED_VALUE: Final = re.compile(
     rb"(?i:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key"
-    rb"|auth|authorization|bearer|cookie|session)[\"']?\s*[:=]\s*"
+    rb"|auth|authorization|bearer|cookie|session|pass)[\"']?\s*[:=]\s*"
     rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n\"',;}\]]+)"
 )
 

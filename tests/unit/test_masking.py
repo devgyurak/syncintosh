@@ -237,3 +237,11 @@ def test_a_numeric_public_host_is_not_masked_as_internal(url: str) -> None:
 
     # then
     assert masked.text == url
+
+
+def test_a_password_inside_a_nested_object_is_masked() -> None:
+    # when — the nested `pass` key is a credential too
+    (masked,) = _masker().mask('{"auth": {"user": "u", "pass": "hunter2"}}')
+
+    # then
+    assert "hunter2" not in masked.text
