@@ -59,8 +59,19 @@ def fingerprint(file_id: str, key_path: KeyPath | None, base: str, local: str, r
     return hashlib.sha256(material).hexdigest()
 
 
+# A value that someone other than the operator suggests for a content conflict: the whole file, or one
+# key's value in the record's own format. The merge parses it and the syntax check validates it, and a
+# proposal that fails either one stays a conflict. It holds the user's plaintext, so `repr` never shows it.
+@dataclass(frozen=True)
+class Proposal:
+    text: str = field(repr=False)
+
+
+# A decision named by a fixed word: the chooser offers these, and only a proposal carries a value.
+NamedChoice = Side | RecordChoice | CollisionChoice
+
 # Any decision an operator (or a proposer) can make on one conflict.
-Choice = Side | RecordChoice | CollisionChoice
+Choice = NamedChoice | Proposal
 
 # Decisions keyed by the conflict's fingerprint. A decision applies only to a conflict whose
 # fingerprint it was made against.

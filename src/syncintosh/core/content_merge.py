@@ -26,7 +26,7 @@ from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import ContentMerge
 from syncintosh.core.ports import ContentAdapter, MergeDriver
-from syncintosh.core.resolution import Side
+from syncintosh.core.resolution import Proposal, Side
 from syncintosh.core.tree import KeyPath, Tree
 
 
@@ -45,8 +45,8 @@ def merge_content(
     driver: MergeDriver,
     adapter: ContentAdapter | None = None,
     *,
-    choice: Side | None = None,
-    key_choices: Mapping[KeyPath, Side] | None = None,
+    choice: Side | Proposal | None = None,
+    key_choices: Mapping[KeyPath, Side | Proposal] | None = None,
 ) -> ContentMerge:
     """Three-way merge one record's plaintext bytes.
 
@@ -55,9 +55,10 @@ def merge_content(
     undecodable, unparseable, or non-round-tripping both-sides change is a conflict with the
     local side as the unresolved candidate.
 
-    ``choice`` settles a both-sides change to one side's whole file and skips the merge. ``key_choices``
-    settles individual key paths of a structural merge; it has no effect without an adapter, which
-    is the only path that has keys.
+    ``choice`` settles a both-sides change to one side's whole file, or to a proposed file, and skips
+    the merge. ``key_choices`` settles individual key paths of a structural merge, to a side or to a
+    proposed value; it has no effect without an adapter, which is the only path that has keys. A
+    proposal must parse in the record's format, or it does not settle anything and the conflict stays.
     """
     if local == remote:
         return ContentMerge(data=local, conflicted=False)
@@ -65,6 +66,8 @@ def merge_content(
         return ContentMerge(data=remote, conflicted=False)
     if remote == base:
         return ContentMerge(data=local, conflicted=False)
+    if isinstance(choice, Proposal):
+        return _proposed_file(choice, adapter, local)
     if choice is not None:
         return ContentMerge(data=remote if choice == "remote" else local, conflicted=False)
     decoded = _decode_all(base, local, remote)
@@ -78,6 +81,25 @@ def merge_content(
         return ContentMerge(data=merged_text.encode("utf-8"), conflicted=False)
     result = driver.merge(base_text, local_text, remote_text)
     return ContentMerge(data=result.text.encode("utf-8"), conflicted=result.conflicted)
+
+
+def _proposed_file(proposal: Proposal, adapter: ContentAdapter | None, local: bytes) -> ContentMerge:
+    """A proposed whole file, or a conflict when it cannot be encoded or does not parse in this format."""
+    try:
+        data = proposal.text.encode("utf-8")
+    except UnicodeEncodeError:
+        return ContentMerge(data=local, conflicted=True)
+    if adapter is not None and _parsed_or_none(adapter, proposal.text) is None:
+        return ContentMerge(data=local, conflicted=True)
+    return ContentMerge(data=data, conflicted=False)
+
+
+def _parsed_or_none(adapter: ContentAdapter, text: str) -> Tree | None:
+    """A text as the adapter's tree, or `None` when the adapter does not accept it."""
+    try:
+        return adapter.parse(text)
+    except ContentParseError:
+        return None
 
 
 def render_merged(adapter: ContentAdapter, merged: Tree, template: str) -> str | None:
@@ -96,12 +118,31 @@ def render_merged(adapter: ContentAdapter, merged: Tree, template: str) -> str |
     return rendered
 
 
+def _settled_keys(
+    adapter: ContentAdapter, key_choices: Mapping[KeyPath, Side | Proposal]
+) -> dict[KeyPath, Side | Tree]:
+    """Each key pick as a value the merge can take.
+
+    A proposal that does not parse is left out, so its key stays a conflict rather than taking a value
+    the format never accepted.
+    """
+    settled: dict[KeyPath, Side | Tree] = {}
+    for path, pick in key_choices.items():
+        if not isinstance(pick, Proposal):
+            settled[path] = pick
+            continue
+        proposed = _parsed_or_none(adapter, pick.text)
+        if proposed is not None:
+            settled[path] = proposed
+    return settled
+
+
 def _merge_via_adapter(
     adapter: ContentAdapter,
     base_text: str,
     local_text: str,
     remote_text: str,
-    key_choices: Mapping[KeyPath, Side],
+    key_choices: Mapping[KeyPath, Side | Proposal],
 ) -> tuple[str | None, tuple[KeyPath, ...]]:
     """The adapter merge as ``(text, ())``, or ``(None, conflict paths)`` when it cannot be trusted.
 
@@ -116,7 +157,7 @@ def _merge_via_adapter(
         remote_tree = adapter.parse(remote_text)
     except ContentParseError:
         return None, ()
-    result = merge_tree(base_tree, local_tree, remote_tree, choices=key_choices)
+    result = merge_tree(base_tree, local_tree, remote_tree, choices=_settled_keys(adapter, key_choices))
     if result.has_conflicts:
         return None, tuple(conflict.path for conflict in result.conflicts)
     rendered = render_merged(adapter, result.merged, local_text)

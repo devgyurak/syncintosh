@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from syncintosh.core.errors import ConflictsNotCovered
 from syncintosh.core.paths import collision_key
-from syncintosh.core.resolution import Choice, ConflictView, Decide, Picks, Side
+from syncintosh.core.resolution import Choice, ConflictView, Decide, NamedChoice, Picks, Side
 
 # Asked once the decisions are made, before anything is published: the conflicts and every pick the
 # run would publish. Returning `False` stops the run with nothing published.
@@ -95,7 +95,7 @@ def normalize_path(raw: str, home: str) -> str:
     return expanded[len(prefix) :] if expanded.startswith(prefix) else expanded
 
 
-def options_for(view: ConflictView) -> tuple[Choice, ...]:
+def options_for(view: ConflictView) -> tuple[NamedChoice, ...]:
     """The choices a conflict offers, in the order a chooser lists them.
 
     An add/add and a path collision can also drop both claimants; a delete/modify keeps the
@@ -110,7 +110,7 @@ def options_for(view: ConflictView) -> tuple[Choice, ...]:
             return ("local", "remote")
 
 
-def _take(view: ConflictView, side: Side) -> Choice:
+def _take(view: ConflictView, side: Side) -> NamedChoice:
     if view.kind == "delete/modify":
         present = view.local_present if side == "local" else view.remote_present
         return "keep" if present else "delete"

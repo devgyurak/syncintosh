@@ -34,7 +34,7 @@ from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 if TYPE_CHECKING:  # these names appear only in annotations
     from syncintosh.core.ports import SyntaxValidator
     from syncintosh.core.presets import ValidatorName
-    from syncintosh.core.resolution import Choice, ConflictView, Picks
+    from syncintosh.core.resolution import Choice, ConflictView, NamedChoice, Picks
     from syncintosh.services.keys import RotationMode
 
 app = typer.Typer(
@@ -604,7 +604,7 @@ def _ask_choice(view: ConflictView) -> Choice:
 
     _show_conflict(Console(), view)
     options = options_for(view)
-    by_name: dict[str, Choice] = {option: option for option in options}
+    by_name: dict[str, NamedChoice] = {option: option for option in options}
     answer = typer.prompt(f"  choose {' / '.join(options)}")
     while answer not in by_name:
         answer = typer.prompt(f"  not one of {' / '.join(options)}; choose again")
