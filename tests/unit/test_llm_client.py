@@ -8,8 +8,10 @@ import types
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from syncintosh.core.advice import Advice
-from syncintosh.llm.client import OpenAIAdvisor, OpenAIChatTransport
+from syncintosh.llm.client import ChatTransport, ChatUnavailableError, OpenAIAdvisor, OpenAIChatTransport
 from syncintosh.llm.keys import llm_api_key
 from syncintosh.system.masking import TextMasker
 
@@ -33,10 +35,10 @@ class FakeTransport:
         return self.reply
 
 
-def _advise(transport: FakeTransport) -> Advice | None:
+def _advise(transport: ChatTransport) -> Advice | None:
     masker = TextMasker(home=HOME, username=USER, internal_domains=())
-    path, base, local, remote = masker.mask(".config", "{}", LOCAL, REMOTE)
-    return OpenAIAdvisor(transport).advise(0, path=path, base=base, local=local, remote=remote)
+    path, key, base, local, remote = masker.mask(".config", "key.a", "{}", LOCAL, REMOTE)
+    return OpenAIAdvisor(transport).advise(0, path=path, key=key, base=base, local=local, remote=remote)
 
 
 def test_no_raw_secret_host_home_or_username_reaches_the_transport() -> None:
@@ -68,6 +70,32 @@ def test_an_answer_outside_the_strict_shape_is_none() -> None:
 
     # when & then
     assert _advise(transport) is None
+
+
+def test_an_unreachable_endpoint_is_no_answer_not_an_error() -> None:
+    # given
+    class Down:
+        def complete(self, system: str, user: str) -> str:
+            raise ChatUnavailableError("gone")
+
+    # when & then — the port promises None, and the person is asked as before
+    assert _advise(Down()) is None
+
+
+def test_an_empty_reply_is_no_answer() -> None:
+    # when & then
+    assert _advise(FakeTransport(reply="")) is None
+
+
+def test_the_request_names_the_key_path() -> None:
+    # given
+    transport = FakeTransport(reply='{"choice": "local", "value": null, "rationale": "keep"}')
+
+    # when
+    _advise(transport)
+
+    # then — the model must know which setting it is choosing for
+    assert '"key": "key.a"' in transport.requests[0]
 
 
 def test_the_request_carries_an_index_and_no_fingerprint() -> None:
@@ -106,7 +134,10 @@ def test_the_chat_transport_calls_the_openai_client_with_the_given_endpoint(monk
             calls["http_client"] = kwargs["http_client"]
             self.chat = types.SimpleNamespace(completions=FakeCompletions())
 
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    class FakeOpenAIError(Exception):
+        pass
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI, OpenAIError=FakeOpenAIError))
     transport = OpenAIChatTransport(base_url="http://127.0.0.1:8000/v1", model="m", api_key=None, timeout=5.0)
 
     # when
@@ -144,3 +175,46 @@ def test_a_keyring_failure_means_no_key(monkeypatch) -> None:
 
     # when & then — a home-server model needs no key, so this is not an error
     assert llm_api_key() is None
+
+
+def test_the_http_client_is_the_class_the_installed_openai_expects(monkeypatch) -> None:
+    # given — openai 1 and 2 take an httpx client; openai 3 takes an httpx2 one. Neither may follow redirects.
+    import httpx
+    import httpx2
+
+    from syncintosh.llm.client import _http_client
+
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "1.99.0")
+    old = _http_client(5.0)
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "3.31.0")
+    new = _http_client(5.0)
+
+    # when & then
+    assert isinstance(old, httpx.Client) and old.follow_redirects is False
+    assert isinstance(new, httpx2.Client) and new.follow_redirects is False
+    old.close()
+    new.close()
+
+
+def test_an_openai_error_is_no_answer_and_its_text_is_not_copied(monkeypatch) -> None:
+    # given — the library's message can echo the request, so it must not reach our error
+    class FakeOpenAIError(Exception):
+        pass
+
+    class Failing:
+        def create(self, **kwargs: object) -> object:
+            raise FakeOpenAIError("echoes the key: sk-secret")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.chat = types.SimpleNamespace(completions=Failing())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI, OpenAIError=FakeOpenAIError))
+    transport = OpenAIChatTransport(base_url="http://127.0.0.1:8000/v1", model="m", api_key="sk-secret", timeout=5.0)
+
+    # when
+    with pytest.raises(ChatUnavailableError) as raised:
+        transport.complete("system", "user")
+
+    # then
+    assert "sk-secret" not in str(raised.value)

@@ -17,6 +17,7 @@ from syncintosh.core.advice import (
     rationale_for_display,
     restore,
     sanitize_rationale,
+    visible,
 )
 
 TOKEN = placeholder("abcdef12", 0)
@@ -82,17 +83,32 @@ def test_a_proposal_naming_each_token_once_is_restored() -> None:
     assert restored == "keep s3cret here"
 
 
+def test_a_proposal_may_leave_a_token_out() -> None:
+    # given — the table holds more tokens than a merge needs: the base's token is gone after a merge
+
+    # when & then
+    assert restore("no token at all", TABLE) == "no token at all"
+
+
+def test_a_local_copy_restores_even_when_the_table_holds_other_sides_tokens() -> None:
+    # given — a token only in the base, and a local text that carries its own token
+    other = placeholder("abcdef12", 1)
+    table = ((TOKEN, "s3cret"), (other, "other-secret"))
+
+    # when & then
+    assert restore(f"keep {TOKEN}", table) == "keep s3cret"
+
+
 @pytest.mark.parametrize(
     "proposed",
     [
-        "no token at all",
         f"{TOKEN} {TOKEN}",
         f"{TOKEN} {placeholder('abcdef12', 9)}",
         f"{placeholder('ffffffff', 0)}",
     ],
-    ids=["missing", "duplicated", "invented", "wrong-nonce"],
+    ids=["duplicated", "invented", "wrong-nonce"],
 )
-def test_a_proposal_that_does_not_name_the_tokens_exactly_is_refused(proposed: str) -> None:
+def test_a_proposal_that_repeats_or_invents_a_token_is_refused(proposed: str) -> None:
     # when & then
     assert restore(proposed, TABLE) is None
 
@@ -133,6 +149,9 @@ def test_a_rationale_for_display_restores_known_tokens_and_keeps_unknown_ones() 
     [
         ("", (), False),
         ("localhost", (), True),
+        ("mac-mini", (), True),
+        ("100.100.1.2", (), True),
+        ("100.128.0.1", (), False),
         ("127.0.0.1", (), True),
         ("10.1.2.3", (), True),
         ("192.168.0.9", (), True),
@@ -168,6 +187,24 @@ def test_internal_hosts_are_recognised(host: str, configured: tuple[str, ...], i
 def test_an_endpoint_is_public_unless_it_is_loopback_or_private(base_url: str, public: bool) -> None:
     # when & then
     assert is_public_endpoint(base_url) is public
+
+
+@pytest.mark.parametrize(
+    ("base_url", "configured", "public"),
+    [
+        ("https://ai.corp.example/v1", ("corp.example",), False),
+        ("https://ai.corp.example/v1", (), True),
+        ("http://mac-mini:11434", (), False),
+    ],
+)
+def test_the_endpoint_predicate_honours_configured_internal_domains(base_url: str, configured, public: bool) -> None:
+    # when & then
+    assert is_public_endpoint(base_url, configured) is public
+
+
+def test_visible_escapes_what_a_reader_could_hide_or_reorder() -> None:
+    # when & then
+    assert visible("a\x1b[31mb\u202ec\r") == "a\\u001b[31mb\\u202ec\\u000d"
 
 
 def test_the_placeholder_format_is_fixed() -> None:

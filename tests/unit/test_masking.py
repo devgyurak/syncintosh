@@ -63,10 +63,11 @@ def test_a_non_ascii_username_is_masked() -> None:
     masker = TextMasker(home="", username="José", internal_domains=())
 
     # when
-    (masked,) = masker.mask("hi José, José2")
+    (masked,) = masker.mask("hi José, not José2")
 
-    # then
-    assert "José" not in masked.text
+    # then — the standalone name is masked; the longer word is a different word and is left alone
+    assert "hi José," not in masked.text
+    assert "José2" in masked.text
 
 
 def test_overlapping_matches_are_masked_as_one_value() -> None:
@@ -118,11 +119,10 @@ def test_each_masked_text_is_a_masked_text() -> None:
 @pytest.mark.parametrize(
     "tamper",
     [
-        lambda masked: masked.text.replace(masked.values[0][0], "value-was-here"),
         lambda masked: masked.text + " " + masked.values[0][0],
         lambda masked: masked.text.replace("<<snt:", "<<snt:0000000", 1),
     ],
-    ids=["dropped-token", "duplicated-token", "altered-token"],
+    ids=["duplicated-token", "altered-token"],
 )
 def test_a_tampered_proposal_is_refused(tamper) -> None:
     # given
@@ -135,12 +135,59 @@ def test_a_tampered_proposal_is_refused(tamper) -> None:
     assert restored is None
 
 
-def test_a_masker_with_no_home_or_username_masks_only_secrets_and_hosts() -> None:
+def test_a_proposal_that_drops_a_token_restores_without_that_value() -> None:
     # given
-    masker = TextMasker(home="", username="", internal_domains=())
+    (masked,) = _masker().mask(TEXT)
+    first_token = masked.values[0][0]
 
     # when
-    (masked,) = masker.mask(f"owner {USER} at {HOME}")
+    restored = _masker().unmask(masked.text.replace(first_token, ""), masked)
 
-    # then — nothing empty is treated as a literal to mask
-    assert masked.text == f"owner {USER} at {HOME}"
+    # then — the dropped value is gone from the result, and the person sees that in the approval screen
+    assert restored is not None
+    assert SECRET not in restored
+
+
+def test_a_whole_word_username_is_masked_but_not_a_substring_of_another_word() -> None:
+    # given
+    masker = TextMasker(home="", username="al", internal_domains=())
+
+    # when
+    (masked,) = masker.mask("owner al, not false")
+
+    # then
+    assert "false" in masked.text
+    assert "owner al" not in masked.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['"password": "hunter2"', "GITHUB_TOKEN=hunter2", "api_key: hunter2"],
+    ids=["json", "shell", "yaml"],
+)
+def test_a_value_under_a_credential_key_is_masked(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert "hunter2" not in masked.text
+
+
+def test_a_single_label_host_in_a_url_is_masked() -> None:
+    # when
+    (masked,) = _masker().mask("http://mac-mini:11434/v1")
+
+    # then
+    assert "mac-mini" not in masked.text
+
+
+def test_a_local_copy_with_a_base_token_round_trips_through_one_table() -> None:
+    # given — the base carries the username, so the shared table holds a token the local text lacks
+    base, local, remote = _masker().mask(f"owner {USER}", f"x = {SECRET}", "y = 1")
+
+    # when
+    restored = _masker().unmask(local.text, local)
+
+    # then
+    assert restored == f"x = {SECRET}"
+    assert base.values == local.values == remote.values

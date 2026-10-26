@@ -590,11 +590,20 @@ class ConflictAdvisor(Protocol):
 
     `index` is a per-request position, never a fingerprint or a digest of a value: a fingerprint
     is unsalted, so one sent to a model would let the model test a guessed value (``core/resolution.py``).
-    `None` means no usable answer; the caller then asks the person as before.
+    `key` names the key path inside the file (empty for a whole file), so the model knows which setting
+    it is choosing for. `None` means no usable answer, including an endpoint that failed; the caller then
+    asks the person as before.
     """
 
     def advise(
-        self, index: int, *, path: MaskedText, base: MaskedText, local: MaskedText, remote: MaskedText
+        self,
+        index: int,
+        *,
+        path: MaskedText,
+        key: MaskedText,
+        base: MaskedText,
+        local: MaskedText,
+        remote: MaskedText,
     ) -> Advice | None:
-        """One conflict's answer, or `None` when the model gave none usable."""
+        """One conflict's answer, or `None` when the model gave none usable or could not be reached."""
         ...
