@@ -1954,3 +1954,20 @@ def test_a_suggestion_that_breaks_the_syntax_is_never_applied(tmp_path, memory_k
     assert _run(a).has_conflicts is False
     assert _read_jsonc(a) == JSONC_BASE.replace("13", "14")
     assert '"unclosed' not in _read_jsonc(a)
+
+
+def test_a_text_proposal_cannot_settle_a_conflict_whose_bytes_do_not_decode(tmp_path, memory_key_store) -> None:
+    # given — both sides hold bytes that are not UTF-8, so the content cannot be text
+    a, b, _ = _pair(tmp_path, memory_key_store, b"\xff\xfe one\n")
+    _write_live(a, b"\xff\xfe FROM A\n")
+    _run(a)
+    _write_live(b, b"\xff\xfe FROM B\n")
+    _run(b)
+
+    # when — a proposal that would replace the bytes with a string
+    report = _run(b, resolving=True, decide=decision(lambda view: Proposal("text\n")))
+
+    # then — refused: the conflict stays pending and the live file is untouched
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"\xff\xfe FROM B\n"

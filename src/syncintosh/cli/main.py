@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -615,15 +616,19 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     from syncintosh.core.advice import is_public_endpoint
     from syncintosh.llm.client import OpenAIAdvisor, OpenAIChatTransport
     from syncintosh.llm.keys import llm_api_key
-    from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem
+    from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
     from syncintosh.system.masking import TextMasker
 
     llm = config.llm
     if llm.base_url is None or llm.model is None:
         raise typer.BadParameter("set llm.base_url and llm.model in config.json before using --llm")
-    if llm.base_url.startswith("http://") and is_public_endpoint(llm.base_url, llm.internal_domains):
+    if urlsplit(llm.base_url).scheme == "http" and is_public_endpoint(llm.base_url, llm.internal_domains):
         # The key and the conflicting values would travel in clear to a host off the network.
         raise typer.BadParameter("llm.base_url over plain http may not name a public host; use https")
+    shell = shell_presets(ports["catalog"], llm.auto_apply)
+    if shell:
+        # A shell file is code the next shell runs. A model's change to it is always shown, never applied unasked.
+        raise typer.BadParameter(f"llm.auto_apply names shell presets, which are always asked: {', '.join(shell)}")
     if is_public_endpoint(llm.base_url, llm.internal_domains) and not typer.confirm(
         f"{llm.base_url} is not a loopback or private-network address: the conflicting values would leave "
         "this network. Continue?",

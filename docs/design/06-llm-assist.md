@@ -75,24 +75,40 @@ offered; it is not the gate.
 
 - **Record-level conflicts are always the person's.** An add/add, a delete/modify, a path collision,
   and a modify/modify of a record are never sent to the model.
-- **A content conflict is applied without asking only when all three hold:** its preset is listed
-  in `llm.auto_apply` (for example `["vscode"]`); the answer is a usable choice that passes the
-  check; and it introduces **no new URL**.
+- **A content conflict is applied without asking only when all four hold:** its preset is listed
+  in `llm.auto_apply` (for example `["vscode"]`); the preset is not a shell preset; the answer is a
+  usable choice that passes the check; and the proposal introduces **no new endpoint** (no new URL,
+  and no host the three sides did not name) and **leaves out no token** of the masked conflict.
+  A shell preset is refused in `llm.auto_apply` at `resolve --llm`: a shell file is code the next
+  shell runs, so a change to it is always asked.
 - **Every other suggestion is shown,** and the person accepts or declines it. A declined or refused
   suggestion falls back to the person's own choice for that conflict.
 - **The final approval always runs,** unless `--yes` is given. It shows every pick the run would
   publish, including the ones the model proposed.
 
-## URLs
+## URLs and hosts
 
-A proposal can introduce a link. A URL is *new* when none of the base, local or remote values
-already held it. Every new URL is:
+A proposal can introduce an endpoint in any spelling: a URL with a scheme, in any letter case or
+JSON escape; a `git@host:` remote; a `HTTP_PROXY=host:port`; a `//host` form; a `curl ftp://host`
+pipe. A URL is *new* when none of the base, local or remote values already held it, and a host is
+*new* when none of them named it. Every new endpoint is:
 
 - shown with its domain, and labelled `UNTRUSTED <domain>`;
 - **never trusted**, even when its text matches a URL a preset ships. Trust comes only from a
   shipped preset's exact download URL (`download_trust`, `ShippedPresets`), and a proposal is not a
   shipped preset.
 - a reason the proposal is always asked, even for an auto-applied preset.
+
+A host written as an all-numeric name is read as the address the resolver reads it:
+`134744072` and `0x08080808` are 8.8.8.8, which is public, and `127.1` is loopback. The endpoint
+check and the plain-http refusal use that reading, so a public address cannot pass as local by its
+spelling.
+
+## Binary files
+
+A binary record is never settled by a text proposal, and never sent to the model. The record's
+format decides first; a text record whose bytes do not decode as UTF-8 is treated the same way. The
+check is in the sync service, so it holds for every resolve path, not only the model's.
 
 ## Backup
 
@@ -138,15 +154,19 @@ unknown key is refused, so a typo cannot silently disable a guard.
 - **Restore point is not a full guarantee** (see *Backup*). Open.
 - **Values outside the masking rules are sent.** See *What leaves the machine*. Open as a design
   decision: masking every value would leave the model nothing to merge.
-- **A dropped value is applied only if the person accepts it.** A proposal may leave a token out,
-  so it may drop a value the local side had. The approval screen shows the proposed text and the
-  diff against the local side, and nothing is published without that acceptance.
+- **A dropped value is asked for, not applied silently.** A proposal may leave a token out, so it may
+  drop a value the local side had. Such a proposal is always shown, even under `auto_apply`, and the
+  approval screen shows the proposed text and the diff against the local side.
 - **The confirmation is the only gate on the endpoint.** The predicate counts a host outside the
   built-in rule as public, so a private host the config does not name is confirmed once, which is
   the safe direction.
 - **The `openai` error stays chained.** Our own error text is fixed, so it does not repeat the
   library's message; the library's exception is kept as the cause, and its message may echo part of
   the request if the library puts it there. The library is not under this project's control.
+- **The openai 1.x branch is not in CI.** The lock file pins openai 3.x, so CI exercises only the
+  httpx2 client. The 1.x path (httpx) was run by hand against a loopback server: a normal reply, a
+  refused redirect, and an empty answer. Pinning openai to 3.x in `pyproject.toml` would remove the
+  branch; it is waiting for a decision.
 - **XML validation is not available.** Only the JSON and zsh checks exist, so an XML suggestion has
   no syntax check beyond the merge's own render round-trip. XML waits for the XML adapter.
 

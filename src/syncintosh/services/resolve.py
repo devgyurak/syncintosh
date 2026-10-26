@@ -12,11 +12,11 @@ only says what one conflict's choice is, or that it has none.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from syncintosh.core.advice import Advice, MaskedText, rationale_for_display
+from syncintosh.core.advice import Advice, MaskedText, new_host_tokens, rationale_for_display
 from syncintosh.core.errors import ConflictsNotCovered, ContentParseError, SyntaxInvalid
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
@@ -140,6 +140,7 @@ __all__ = [
     "options_for",
     "proposal_problem",
     "scoped_chooser",
+    "shell_presets",
     "take_chooser",
 ]
 
@@ -166,6 +167,8 @@ class Suggestion:
     rationale: str = field(repr=False)
     urls: tuple[ProposedUrl, ...] = ()
     refused: str | None = None
+    # True when the proposal leaves out a token of the masked conflict. The person sees it even under auto-apply.
+    dropped: bool = False
 
 
 # Shows one suggestion and returns whether the person accepts it. A refused suggestion is shown and
@@ -205,7 +208,7 @@ def advised_chooser(
             return fallback(view)
         suggestion = _suggest(view, advice, base, masker, check)
         usable = suggestion.refused is None and suggestion.choice is not None
-        if usable and not suggestion.urls and auto_apply(view):
+        if usable and not suggestion.urls and not suggestion.dropped and auto_apply(view):
             return suggestion.choice
         accepted = present(suggestion)
         if accepted and usable:
@@ -237,8 +240,16 @@ def _suggest(
     problem = check(view, text)
     if problem is not None:
         return Suggestion(view=view, choice=None, rationale=rationale, refused=problem)
-    urls = proposed_urls(text, base=view.base_text, local=view.local_text, remote=view.remote_text)
-    return Suggestion(view=view, choice=Proposal(text), rationale=rationale, urls=urls)
+    sides = (view.base_text, view.local_text, view.remote_text)
+    urls = proposed_urls(text, base=sides[0], local=sides[1], remote=sides[2])
+    # A host the proposal names that no side did is a new endpoint, whatever its spelling: a remote, a
+    # proxy, or a pipe to `sh`. It is shown and asked for, as a new URL is.
+    known_domains = {item.domain for item in urls}
+    hosts = tuple(
+        ProposedUrl(url=host, domain=host) for host in new_host_tokens(text, *sides) if host not in known_domains
+    )
+    dropped = any(token not in advice.value for token, _ in masked.values if advice.value is not None)
+    return Suggestion(view=view, choice=Proposal(text), rationale=rationale, urls=(*urls, *hosts), dropped=dropped)
 
 
 def proposal_problem(
@@ -273,13 +284,24 @@ def proposal_problem(
     return None
 
 
+def shell_presets(catalog: PresetCatalog, names: Iterable[str]) -> tuple[str, ...]:
+    """The named presets whose files a shell reads. A proposal to change shell code is never applied unasked."""
+    shell: list[str] = []
+    for name in names:
+        preset = catalog.get(name)
+        if preset is not None and any(file.validator == "zsh" for file in preset.files):
+            shell.append(name)
+    return tuple(shell)
+
+
 def auto_apply_for(catalog: PresetCatalog, names: frozenset[str]) -> Callable[[ConflictView], bool]:
-    """Allow automatic application for a content conflict whose path belongs to one of `names`' presets."""
+    """Allow automatic application for a content conflict of one of `names`' presets, except a shell preset."""
+    allowed_names = names - set(shell_presets(catalog, names))
 
     def allowed(view: ConflictView) -> bool:
         if view.kind not in _CONTENT_KINDS:
             return False
         preset = catalog.preset_for(view.path)
-        return preset is not None and preset.name in names
+        return preset is not None and preset.name in allowed_names
 
     return allowed

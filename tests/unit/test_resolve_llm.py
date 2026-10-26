@@ -13,7 +13,7 @@ from syncintosh.core.advice import Advice
 from syncintosh.core.errors import SyntaxInvalid
 from syncintosh.core.resolution import ConflictKind, ConflictView, Proposal
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem
+from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
 from syncintosh.system.masking import TextMasker
 
 VSCODE = "Library/Application Support/Code/User/settings.json"
@@ -299,9 +299,9 @@ def test_a_public_endpoint_is_confirmed_before_any_conflict_is_sent(monkeypatch)
         remote="r", machine_id="m", items=(), llm=LlmConfig.create(base_url="https://api.example.com/v1", model="m")
     )
 
-    # when & then — exits before the ports or the model are touched
+    # when & then — exits before the model is touched
     with pytest.raises(typer.Exit):
-        _assisted_choice(config, None, {})
+        _assisted_choice(config, None, {"catalog": BuiltinCatalog.default(), "adapters": {}, "validators": {}})
 
 
 def test_resolve_llm_needs_a_configured_endpoint() -> None:
@@ -401,3 +401,61 @@ def test_a_plain_http_endpoint_to_a_public_host_is_refused_at_resolve_time() -> 
     # when & then — refused before any call, and named as the reason
     with pytest.raises(typer.BadParameter, match="plain http"):
         _assisted_choice(config, None, {})
+
+
+def test_a_new_host_in_a_proposal_is_asked_even_when_auto_apply_allows_it() -> None:
+    # given — a `git@host:` remote is a host no side named: a change of where the data goes
+    advisor = ReplyAdvisor(Advice(choice="proposal", value='{"a": "git@evil.example:x/y.git"}', rationale="remote"))
+    presented = Recorder(accept=True)
+
+    # when
+    _chooser(advisor, presented, auto=True)(_view())
+
+    # then
+    assert presented.shown[0].urls[0].domain == "evil.example"
+
+
+def test_a_proposal_that_drops_a_token_is_asked_even_when_auto_apply_allows_it() -> None:
+    # given — the local side carries a secret token; the proposal leaves it out
+    advisor = ReplyAdvisor(Advice(choice="proposal", value='{"a": 3}', rationale="merge"))
+    presented = Recorder(accept=True)
+    secret_view = _view(local='{"a": 1, "key": "AKIAABCDEFGHIJKLMNOP"}\n')
+
+    # when
+    _chooser(advisor, presented, auto=True)(secret_view)
+
+    # then — the person sees the proposal that dropped the secret before it is applied
+    assert presented.shown != []
+    assert presented.shown[0].dropped is True
+
+
+@pytest.mark.parametrize(
+    ("names", "shell"),
+    [(("zsh",), ("zsh",)), (("vscode", "zsh"), ("zsh",)), (("vscode",), ())],
+)
+def test_a_shell_preset_is_never_auto_applied(names, shell) -> None:
+    # when & then
+    assert shell_presets(BuiltinCatalog.default(), names) == shell
+
+
+def test_auto_apply_refuses_a_shell_preset_even_when_it_is_listed() -> None:
+    # when & then — a shell file's change is always asked
+    assert auto_apply_for(BuiltinCatalog.default(), frozenset({"zsh"}))(_view(path=".zshrc")) is False
+
+
+def test_resolve_llm_refuses_a_shell_preset_in_auto_apply_at_resolve_time() -> None:
+    # given
+    from syncintosh.cli.main import _assisted_choice
+    from syncintosh.core.config import LlmConfig, SyncConfig
+    from syncintosh.presets import BuiltinCatalog as Builtin
+
+    config = SyncConfig.create(
+        remote="r",
+        machine_id="m",
+        items=(),
+        llm=LlmConfig.create(base_url="https://api.example.com/v1", model="m", auto_apply=("zsh",)),
+    )
+
+    # when & then
+    with pytest.raises(typer.BadParameter, match="always asked"):
+        _assisted_choice(config, None, {"catalog": Builtin.default(), "adapters": {}, "validators": {}})

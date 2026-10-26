@@ -903,7 +903,16 @@ def _whole_fingerprint(file_id: str, base: bytes, local: bytes, remote: bytes) -
     return fingerprint(file_id, None, _sha256(base), _sha256(local), _sha256(remote))
 
 
-def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: bytes) -> ConflictView:
+def _is_text(fmt: FileFormat, *sides: bytes) -> bool:
+    """True when the record is text and every side decodes as UTF-8.
+
+    The record's format decides first: a `binary` record is never text, however its bytes happen to
+    decode. A text record with a side that does not decode is not text either.
+    """
+    return fmt != "binary" and all(_decode(side) is not None for side in sides)
+
+
+def _whole_view(file_id: str, path: str, fmt: FileFormat, base: bytes, local: bytes, remote: bytes) -> ConflictView:
     """The whole file as one choice. Its three digests identify it; its text and diff are shown."""
     local_text = _readable(local)
     remote_text = _readable(remote)
@@ -917,7 +926,7 @@ def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: byte
         file_id=file_id,
         path=path,
         key_path=None,
-        readable=_decode(base) is not None and _decode(local) is not None and _decode(remote) is not None,
+        readable=_is_text(fmt, base, local, remote),
         fingerprint=_whole_fingerprint(file_id, base, local, remote),
         base_text=_readable(base),
         local_text=local_text,
@@ -965,6 +974,7 @@ def _key_view(
 def _content_views(
     file_id: str,
     path: str,
+    fmt: FileFormat,
     base: bytes,
     local: bytes,
     remote: bytes,
@@ -974,7 +984,7 @@ def _content_views(
     """The choices for one content conflict: one per conflicted key, or the whole file."""
     trees = _parsed(adapter, base, local, remote) if adapter is not None and key_paths else None
     if trees is None:
-        return (_whole_view(file_id, path, base, local, remote),)
+        return (_whole_view(file_id, path, fmt, base, local, remote),)
     base_tree, local_tree, remote_tree = trees
     return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
 
@@ -989,12 +999,12 @@ def _content_pick(pick: Choice | None) -> Side | Proposal | None:
 
 
 def _checked(
-    presets: _Presets, data: bytes, path: str, file_id: str, base: bytes, local: bytes, remote: bytes
+    presets: _Presets, data: bytes, path: str, file_id: str, fmt: FileFormat, base: bytes, local: bytes, remote: bytes
 ) -> _Settled:
     """A merged result passes its syntax check whoever decided it; a failure is a conflict again."""
     if _syntax_ok(presets, data, path):
         return _Settled(data=data)
-    whole = _whole_view(file_id, path, base, local, remote)
+    whole = _whole_view(file_id, path, fmt, base, local, remote)
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
@@ -1019,22 +1029,25 @@ def _settle_content(
     """
     adapter = presets.adapter_for(fmt)
     whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
+    if isinstance(whole, Proposal) and not _is_text(fmt, base, local, remote):
+        # A text proposal cannot settle a binary file: it would replace the bytes with a string.
+        whole = None
     if whole is not None:
         settled = merge_content(base, local, remote, driver, adapter, choice=whole)
         if not settled.conflicted:
-            return _checked(presets, settled.data, path, file_id, base, local, remote)
+            return _checked(presets, settled.data, path, file_id, fmt, base, local, remote)
     first = merge_content(base, local, remote, driver, adapter)
     if not first.conflicted:
-        return _checked(presets, first.data, path, file_id, base, local, remote)
+        return _checked(presets, first.data, path, file_id, fmt, base, local, remote)
     key_choices: dict[KeyPath, Side | Proposal] = {}
-    for view in _content_views(file_id, path, base, local, remote, adapter, first.conflict_paths):
+    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, first.conflict_paths):
         key_pick = _content_pick(picks.get(view.fingerprint))
         if view.key_path is not None and key_pick is not None:
             key_choices[view.key_path] = key_pick
     merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
     if not merged.conflicted:
-        return _checked(presets, merged.data, path, file_id, base, local, remote)
-    views = _content_views(file_id, path, base, local, remote, adapter, merged.conflict_paths)
+        return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
+    views = _content_views(file_id, path, fmt, base, local, remote, adapter, merged.conflict_paths)
     return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
 
 
