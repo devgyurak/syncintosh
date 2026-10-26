@@ -1971,3 +1971,32 @@ def test_a_text_proposal_cannot_settle_a_conflict_whose_bytes_do_not_decode(tmp_
     assert report.has_conflicts is True
     assert DirectoryPendingStore(b.pending).is_pending() is True
     assert _read_live(b) == b"\xff\xfe FROM B\n"
+
+
+def test_a_run_that_applies_a_proposal_refuses_a_file_whose_content_is_not_in_the_restore_point(
+    tmp_path, memory_key_store
+) -> None:
+    # given — ZSH is pending-apply on B: A changed it, but B's apply was aborted, so B's live file still holds the
+    # old bytes, which no commit's record matches. PROFILE then diverges, and a model's proposal settles it.
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    stopped = _run(b)
+    assert stopped.has_conflicts is True
+
+    # when — the proposal is applied in this run, so every overwrite must keep its current content in the restore point
+    report = _run(
+        b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
+    )
+
+    # then — PROFILE is published with the proposal; ZSH is refused and its live bytes are left as they were
+    assert report.has_conflicts is False
+    assert (b.home / PROFILE).read_bytes() == b"alpha\nMERGED\n"
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+    refused = [refusal for refusal in report.refused if refusal.path == ZSH]
+    assert len(refused) == 1
+    assert "restore point" in refused[0].reason

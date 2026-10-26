@@ -472,7 +472,9 @@ _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 _NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
-_NOT_IN_RESTORE_POINT = "a model proposed this change, and the file's current content is not in the restore point"
+_NOT_IN_RESTORE_POINT = (
+    "this run applies a model's proposal, and the file's current content is not in the restore point"
+)
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -2097,9 +2099,11 @@ def _cycle(
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
-    restore_manifest = _read_manifest(transport, cipher, local_commit) if local_commit else None
-    backup_records = None if restore_manifest is None else restore_manifest.records
     # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge.
+    # Only a run that applies a proposal checks overwrites against its records, so only that run reads them.
+    guard_overwrites = any(isinstance(pick, Proposal) for pick in resolution.picks.values())
+    restore_manifest = _read_manifest(transport, cipher, local_commit) if guard_overwrites and local_commit else None
+    backup_records = None if restore_manifest is None else restore_manifest.records
     applied = _apply(
         transport=transport,
         cipher=cipher,
@@ -2116,7 +2120,7 @@ def _cycle(
         home=home,
         adopt=adopt,
         backup=Backup.create(local_commit, records=backup_records),
-        guard_overwrites=any(isinstance(pick, Proposal) for pick in resolution.picks.values()),
+        guard_overwrites=guard_overwrites,
     )
     ledger_store.save(
         _settle_ledger(
