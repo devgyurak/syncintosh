@@ -31,9 +31,10 @@ from syncintosh.services import rotate_repo as rotate_repo_service
 from syncintosh.services import sync as sync_service
 from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 
-if TYPE_CHECKING:  # both names appear only in a return annotation
+if TYPE_CHECKING:  # these names appear only in annotations
     from syncintosh.core.ports import SyntaxValidator
     from syncintosh.core.presets import ValidatorName
+    from syncintosh.core.resolution import Choice, ConflictView, Picks
     from syncintosh.services.keys import RotationMode
 
 app = typer.Typer(
@@ -559,8 +560,8 @@ def resolve(
 ) -> None:
     """Settle the conflicts a stopped sync left pending, then sync. Exits 1 when conflicts remain.
 
-    Name a side for every pending conflict: `--take local|remote`, or a `--local`/`--remote` path for
-    each one. A partial choice publishes nothing.
+    With no side named, each conflict is shown with its values and you choose for it. A run that
+    leaves any conflict without a choice publishes nothing.
     """
     from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
     from syncintosh.system.config import load_config
@@ -569,16 +570,18 @@ def resolve(
     scoped = bool(local or remote)
     if take is not None and take not in ("local", "remote"):
         raise typer.BadParameter("--take must be `local` or `remote`")
-    if (take is None) == (not scoped):
-        raise typer.BadParameter("name a side: `--take local|remote`, or `--local PATH` / `--remote PATH`")
+    if take is not None and scoped:
+        raise typer.BadParameter("--take settles every conflict; drop --local/--remote, or drop --take")
     machine = MachinePaths.default()
     approve = None if yes else _confirm_resolution
     try:
         config = load_config(machine.config_file)
         if take is not None:
             choose = take_chooser(take)
-        else:
+        elif scoped:
             choose = scoped_chooser(tuple(local or ()), tuple(remote or ()), home=str(machine.home))
+        else:
+            choose = _ask_choice
         report = sync_service(**_sync_ports(config, machine), resolving=True, decide=decision(choose, approve=approve))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -591,10 +594,51 @@ def resolve(
         raise typer.Exit(code=1)
 
 
-def _confirm_resolution(views, picks) -> bool:
+def _ask_choice(view: ConflictView) -> Choice:
+    """Show one conflict with its values and read the operator's choice for it.
+
+    Values are shown by default: resolving a conflict means comparing the two sides, and the values
+    are what the person compares. Nothing shown here is logged or written to disk.
+    """
+    from syncintosh.services.resolve import options_for
+
+    _show_conflict(Console(), view)
+    options = options_for(view)
+    by_name: dict[str, Choice] = {option: option for option in options}
+    answer = typer.prompt(f"  choose {' / '.join(options)}")
+    while answer not in by_name:
+        answer = typer.prompt(f"  not one of {' / '.join(options)}; choose again")
+    return by_name[answer]
+
+
+def _show_conflict(console: Console, view: ConflictView) -> None:
+    """Print one conflict's place and its values. Every value is escaped, so file text is never markup."""
+    from rich.markup import escape
+
+    heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
+    if view.key_path is not None:
+        heading += f"  key {escape(path_label(view.key_path))}"
+    console.print(heading)
+    if view.kind == "key":
+        console.print(f"  base    {escape(view.base_text)}")
+        console.print(f"  local   {escape(view.local_text)}")
+        console.print(f"  remote  {escape(view.remote_text)}")
+    elif view.kind == "file":
+        console.print(escape(view.diff) or "  (no textual difference)")
+    else:
+        if view.base_text:
+            console.print(f"  base    {escape(view.base_text)}")
+        console.print(f"  local   {escape(view.local_text) or 'no record'}")
+        console.print(f"  remote  {escape(view.remote_text) or 'no record'}")
+        if view.diff:
+            console.print(f"  {escape(view.diff)}")
+
+
+def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks) -> bool:
     """Show what will be published and ask before anything is written to the remote."""
     for view in views:
-        typer.echo(f"  {view.path}  {view.kind}  ->  {picks[view.fingerprint]}")
+        if view.fingerprint in picks:
+            typer.echo(f"  {view.path}  {view.kind}  ->  {picks[view.fingerprint]}")
     return typer.confirm("Publish these choices?", default=False)
 
 
