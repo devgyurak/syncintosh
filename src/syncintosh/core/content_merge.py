@@ -20,10 +20,13 @@ is testable with no adapter and no filesystem (``AGENTS.md`` §2.1, §2.9).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import ContentMerge
 from syncintosh.core.ports import ContentAdapter, MergeDriver
+from syncintosh.core.resolution import Side
 from syncintosh.core.tree import KeyPath, Tree
 
 
@@ -41,6 +44,9 @@ def merge_content(
     remote: bytes,
     driver: MergeDriver,
     adapter: ContentAdapter | None = None,
+    *,
+    choice: Side | None = None,
+    key_choices: Mapping[KeyPath, Side] | None = None,
 ) -> ContentMerge:
     """Three-way merge one record's plaintext bytes.
 
@@ -48,6 +54,10 @@ def merge_content(
     is merged, through the adapter when one is given and otherwise through the driver. An
     undecodable, unparseable, or non-round-tripping both-sides change is a conflict with the
     local side as the unresolved candidate.
+
+    ``choice`` settles a both-sides change to one side's whole file and skips the merge. ``key_choices``
+    settles individual key paths of a structural merge; it has no effect without an adapter, which
+    is the only path that has keys.
     """
     if local == remote:
         return ContentMerge(data=local, conflicted=False)
@@ -55,12 +65,14 @@ def merge_content(
         return ContentMerge(data=remote, conflicted=False)
     if remote == base:
         return ContentMerge(data=local, conflicted=False)
+    if choice is not None:
+        return ContentMerge(data=remote if choice == "remote" else local, conflicted=False)
     decoded = _decode_all(base, local, remote)
     if decoded is None:
         return ContentMerge(data=local, conflicted=True)
     base_text, local_text, remote_text = decoded
     if adapter is not None:
-        merged_text, conflict_paths = _merge_via_adapter(adapter, base_text, local_text, remote_text)
+        merged_text, conflict_paths = _merge_via_adapter(adapter, base_text, local_text, remote_text, key_choices or {})
         if merged_text is None:
             return ContentMerge(data=local, conflicted=True, conflict_paths=conflict_paths)
         return ContentMerge(data=merged_text.encode("utf-8"), conflicted=False)
@@ -89,6 +101,7 @@ def _merge_via_adapter(
     base_text: str,
     local_text: str,
     remote_text: str,
+    key_choices: Mapping[KeyPath, Side],
 ) -> tuple[str | None, tuple[KeyPath, ...]]:
     """The adapter merge as ``(text, ())``, or ``(None, conflict paths)`` when it cannot be trusted.
 
@@ -103,7 +116,7 @@ def _merge_via_adapter(
         remote_tree = adapter.parse(remote_text)
     except ContentParseError:
         return None, ()
-    result = merge_tree(base_tree, local_tree, remote_tree)
+    result = merge_tree(base_tree, local_tree, remote_tree, choices=key_choices)
     if result.has_conflicts:
         return None, tuple(conflict.path for conflict in result.conflicts)
     rendered = render_merged(adapter, result.merged, local_text)
