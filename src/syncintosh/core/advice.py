@@ -60,6 +60,9 @@ URL_HOST_PATTERN: Final = r"(?:(?<=://)|(?<=@))[A-Za-z0-9.-]+"
 _HOST_TOKEN: Final = re.compile(HOST_TOKEN_PATTERN)
 _URL_HOST: Final = re.compile(URL_HOST_PATTERN)
 
+_NAME_CHAR: Final = re.compile(r"[A-Za-z0-9_.-]")
+_UNICODE_ESCAPE: Final = re.compile(r"\\u([0-9a-fA-F]{4})")
+
 # An all-numeric name as inet_aton reads one dotted part: `0x` hex, a leading `0` octal, or decimal.
 _NUMERIC_PART: Final = re.compile(r"0[xX][0-9a-fA-F]*|0[0-7]*|[1-9][0-9]*")
 
@@ -219,16 +222,27 @@ def numeric_host(name: str) -> ipaddress.IPv4Address | None:
 def host_tokens(text: str) -> frozenset[str]:
     """Every host the text names, lowercased: a dotted name, a dotted address, or a URL or `user@` host.
 
-    A dotted name that is a path segment (`y.git` after a `/`) or a settings key (`"editor.fontSize":`) is
+    The text is read as written and with its JSON escapes undone, since a proposal can escape its slashes.
+    A dotted name that is a path segment (`y.git` in `x/y.git`) or a settings key (`"editor.fontSize":`) is
     not a destination, so it is not counted. The masker does not use this filter: it hides such names too.
     """
-    found = {
-        match.group().lower()
-        for match in _HOST_TOKEN.finditer(text)
-        if not _is_path_segment(text, match.start()) and not _is_setting_key(text, match.end())
-    }
-    found |= {match.group().lower() for match in _URL_HOST.finditer(text)}
+    found: set[str] = set()
+    for form in _unescaped_forms(text):
+        found |= {
+            match.group().lower()
+            for match in _HOST_TOKEN.finditer(form)
+            if not _is_path_segment(form, match.start()) and not _is_setting_key(form, match.end())
+        }
+        found |= {match.group().lower() for match in _URL_HOST.finditer(form)}
     return frozenset(found)
+
+
+def _unescaped_forms(text: str) -> tuple[str, ...]:
+    """The text as written, with `\\/` undone, with `\\uXXXX` decoded, and with both."""
+    unslashed = text.replace("\\/", "/")
+    decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
+    both = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
+    return tuple(dict.fromkeys((text, unslashed, decoded, both)))
 
 
 def new_host_tokens(proposal: str, *sides: str) -> tuple[str, ...]:
@@ -250,8 +264,12 @@ def _numeric_value(part: str) -> int:
 
 
 def _is_path_segment(text: str, start: int) -> bool:
-    """True when the name starts right after a single `/`, as a path component does (not after `//`)."""
-    return start > 0 and text[start - 1] == "/" and text[max(0, start - 2) : start] != "//"
+    """True when the name follows a `/` that a path component uses, so `x/y.git` but not `http:/host` or `\\/host`.
+
+    The character before the slash must be a name character. After `:`, `\\`, or another `/` the slash
+    is a scheme or an escape, and the name after it is a host.
+    """
+    return start >= 2 and text[start - 1] == "/" and _NAME_CHAR.match(text[start - 2]) is not None
 
 
 def _is_setting_key(text: str, end: int) -> bool:
