@@ -33,7 +33,14 @@ _CHOICES: Final[frozenset[str]] = frozenset({"local", "remote", "proposal"})
 _KEYS: Final[frozenset[str]] = frozenset({"choice", "value", "rationale"})
 
 # Every placeholder token starts with this prefix, so a token the model made up is easy to spot.
+_PREFIX: Final = "<<snt:"
 _TOKEN: Final = re.compile(r"<<snt:[0-9a-f]{8}:[0-9]+>>")
+
+# A single character that a terminal or a reader could hide or reorder (see `visible`).
+_INVISIBLE: Final = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+# The Tailscale and carrier-grade NAT range: private to the operator, not public, and not `is_private`.
+_CGNAT: Final = ipaddress.ip_network("100.64.0.0/10")
 
 # Terminal escape sequences, C0 and C1 control characters, and bidirectional overrides: each one a
 # model could use to hide text, repaint the screen, or reorder what the person reads. Tab and newline
@@ -74,14 +81,18 @@ def placeholder(nonce: str, index: int) -> str:
 
 
 def restore(proposed: str, values: Iterable[tuple[str, str]]) -> str | None:
-    """The proposed value with every token put back, or `None` when the tokens do not match exactly.
+    """The proposed value with every token put back, or `None` when a token is invented or repeated.
 
-    A proposal settles only when it names each token of the masked conflict exactly once and no
-    other token, so a missing, duplicated, or invented token refuses the whole proposal.
+    The four texts of one conflict share one token table, and a correct merge uses only some of those
+    tokens: the base's tokens are gone once the merge takes the remote's line. So a token the table
+    does not hold, or one that appears twice, refuses the proposal. A token the proposal leaves out is
+    allowed, and the person sees the result in the approval screen before anything is published.
     """
     table = dict(values)
     found = _TOKEN.findall(proposed)
-    if sorted(found) != sorted(table):
+    # A marker that starts like a token but is not one (a changed index or nonce) is refused too.
+    stray = proposed.count(_PREFIX) != len(found)
+    if stray or any(token not in table for token in found) or len(found) != len(set(found)):
         return None
     return _substitute(proposed, table)
 
@@ -136,20 +147,33 @@ def is_internal_host(host: str, configured: Iterable[str] = ()) -> bool:
     except ValueError:
         address = None
     if address is not None:
-        return address.is_loopback or address.is_link_local or address.is_private
+        return address.is_loopback or address.is_link_local or address.is_private or address in _CGNAT
     if name == "localhost" or name == "home.arpa" or name.endswith(_INTERNAL_SUFFIXES):
+        return True
+    if "." not in name:
+        # A single-label name only resolves on the local network (a Bonjour or DHCP name like `mac-mini`).
         return True
     return any(name == domain or name.endswith(f".{domain}") for domain in _normalized(configured))
 
 
-def is_public_endpoint(base_url: str) -> bool:
+def is_public_endpoint(base_url: str, configured: Iterable[str] = ()) -> bool:
     """True when `base_url` does not point at a loopback or private-network host.
 
     A public endpoint sends the conflict off the network, so the person confirms it before the
-    first call. A URL with no host is treated as public: an unclear endpoint needs confirming.
+    first call. `configured` are the config's `internal_domains`. A URL with no host is public: an
+    unclear endpoint needs confirming.
     """
     host = urlsplit(base_url).hostname or ""
-    return not is_internal_host(host)
+    return not is_internal_host(host, configured)
+
+
+def visible(text: str) -> str:
+    """The text with every control, format, and bidirectional character written as an escape.
+
+    What a person approves must be what they read. A raw carriage return, escape sequence, or bidi
+    override in a proposal would show one thing and apply another, so each is shown as `\\uXXXX`.
+    """
+    return "".join(f"\\u{ord(char):04x}" if _INVISIBLE.match(char) else char for char in text)
 
 
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -179,4 +203,5 @@ __all__ = [
     "rationale_for_display",
     "restore",
     "sanitize_rationale",
+    "visible",
 ]

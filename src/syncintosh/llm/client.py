@@ -12,6 +12,7 @@ injects a `ChatTransport` and never reaches the network.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from typing import Final, Protocol
 
@@ -29,11 +30,19 @@ SYSTEM_PROMPT: Final = (
 )
 
 
+class ChatUnavailableError(Exception):
+    """The endpoint gave no answer: unreachable, refused, redirected, or an error status.
+
+    The message is fixed text. The library's own message can echo part of a request, so it is never
+    copied into this one.
+    """
+
+
 class ChatTransport(Protocol):
     """One chat completion: a system prompt and a user message in, the model's text out."""
 
     def complete(self, system: str, user: str) -> str:
-        """The model's reply text. Raises when the endpoint cannot be reached."""
+        """The model's reply text. Raises `ChatUnavailableError` when the endpoint gives no answer."""
         ...
 
 
@@ -53,23 +62,28 @@ class OpenAIChatTransport:
 
     def complete(self, system: str, user: str) -> str:
         # Imported here: the package is heavy and only a `resolve --llm` run needs it.
-        import httpx2
-        from openai import OpenAI
+        from openai import OpenAI, OpenAIError
 
         # Redirects are not followed: a redirect from the endpoint the person confirmed could send the
-        # request body to a host they never confirmed.
-        with httpx2.Client(timeout=self._timeout, follow_redirects=False) as http_client:
+        # request body to a host they never confirmed. The client class follows the installed openai:
+        # openai 3 takes an httpx2 client, openai 1 and 2 take an httpx one.
+        with _http_client(self._timeout) as http_client:
             client = OpenAI(
                 base_url=self._base_url,
                 api_key=self._api_key or "not-needed",
                 timeout=self._timeout,
                 http_client=http_client,
             )
-            response = client.chat.completions.create(
-                model=self._model,
-                temperature=0,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=self._model,
+                    temperature=0,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                )
+            except OpenAIError as exc:
+                raise ChatUnavailableError("the endpoint did not return an answer") from exc
+        if not response.choices:
+            return ""
         return response.choices[0].message.content or ""
 
 
@@ -80,14 +94,44 @@ class OpenAIAdvisor:
         self._transport = transport
 
     def advise(
-        self, index: int, *, path: MaskedText, base: MaskedText, local: MaskedText, remote: MaskedText
+        self,
+        index: int,
+        *,
+        path: MaskedText,
+        key: MaskedText,
+        base: MaskedText,
+        local: MaskedText,
+        remote: MaskedText,
     ) -> Advice | None:
         # The index is a position in this request, not a fingerprint or a digest of any value.
         request = json.dumps(
-            {"index": index, "path": path.text, "base": base.text, "local": local.text, "remote": remote.text},
+            {
+                "index": index,
+                "path": path.text,
+                "key": key.text,
+                "base": base.text,
+                "local": local.text,
+                "remote": remote.text,
+            },
             ensure_ascii=False,
         )
-        return parse_advice(self._transport.complete(SYSTEM_PROMPT, request))
+        try:
+            reply = self._transport.complete(SYSTEM_PROMPT, request)
+        except ChatUnavailableError:
+            return None
+        return parse_advice(reply)
+
+
+def _http_client(timeout: float):
+    """An HTTP client that does not follow redirects, of the class the installed openai expects."""
+    major = int(importlib.metadata.version("openai").split(".")[0])
+    if major >= 3:
+        import httpx2
+
+        return httpx2.Client(timeout=timeout, follow_redirects=False)
+    import httpx
+
+    return httpx.Client(timeout=timeout, follow_redirects=False)
 
 
 __all__ = ["SYSTEM_PROMPT", "ChatTransport", "OpenAIAdvisor", "OpenAIChatTransport"]

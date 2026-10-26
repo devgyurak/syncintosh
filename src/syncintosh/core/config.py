@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
 
-from syncintosh.core.advice import is_public_endpoint
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import (
     FileFormat,
@@ -96,9 +95,6 @@ class LlmConfig:
             parts = urlsplit(base_url)
             if parts.scheme not in ("http", "https") or not parts.hostname:
                 raise ConfigError(f"llm base_url must be an http(s) URL with a host, got {base_url!r}")
-            if parts.scheme == "http" and is_public_endpoint(base_url):
-                # The key and the conflict would travel in clear to a host off the network.
-                raise ConfigError(f"llm base_url over plain http may not name a public host: {base_url!r}")
         return cls(base_url=base_url, model=model, internal_domains=internal_domains, auto_apply=auto_apply)
 
 

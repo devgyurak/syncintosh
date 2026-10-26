@@ -50,14 +50,9 @@ def test_a_base_url_that_is_not_an_http_url_with_a_host_is_refused(llm: dict[str
         LlmConfig.create(base_url=llm["base_url"])
 
 
-@pytest.mark.parametrize(
-    "base_url",
-    ["http://api.example.com/v1", "http://8.8.8.8:8000/v1"],
-)
-def test_plain_http_to_a_public_host_is_refused(base_url: str) -> None:
-    # when & then — the key and the conflict would travel in clear
-    with pytest.raises(ConfigError, match="plain http"):
-        LlmConfig.create(base_url=base_url)
+def test_plain_http_to_a_public_host_loads_so_only_resolve_llm_refuses_it() -> None:
+    # when & then — refusing at load would stop sync, watch and daemon too; `resolve --llm` checks it instead
+    assert LlmConfig.create(base_url="http://api.example.com/v1").base_url == "http://api.example.com/v1"
 
 
 @pytest.mark.parametrize(

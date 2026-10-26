@@ -27,6 +27,14 @@ _SECRET_PATTERNS: Final = (*STRUCTURED_PATTERNS, *SHELL_PATTERNS)
 # keep it from starting or ending inside a longer word or path segment.
 _HOSTNAME: Final = re.compile(rb"(?<![\w.-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![\w.-])")
 _IPV4: Final = re.compile(rb"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
+# The host of a URL, of any label count: `http://mac-mini:11434` names a machine on the network.
+_URL_HOST: Final = re.compile(rb"(?<=://)[A-Za-z0-9.-]+")
+# A value written under a credential-like key: `"password": "x"`, `GITHUB_TOKEN=x`, `api_key: x`. The
+# value group is what gets masked. Not exhaustive: a value under another key name is still sent.
+_KEYED_VALUE: Final = re.compile(
+    rb"""(?i:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key)"""
+    rb"""["']?[ \t]*[:=][ \t]*["']?([^\s"',;}\]]+)"""
+)
 
 
 class TextMasker:
@@ -75,9 +83,12 @@ class TextMasker:
         if self._home != "":
             spans.extend(match.span() for match in re.finditer(re.escape(self._home.encode("utf-8")), data))
         if self._username != "":
-            # Every occurrence, with no word boundary: `\b` is ASCII-only in a bytes pattern, so a
-            # non-ASCII username would never match it. Over-masking a short name is the safe side.
-            spans.extend(match.span() for match in re.finditer(re.escape(self._username.encode("utf-8")), data))
+            # Whole words only, so `al` does not hide the `al` inside `false`. The boundary is an ASCII
+            # class, because `\b` is ASCII-only in a bytes pattern and a non-ASCII name would never match.
+            name = re.escape(self._username.encode("utf-8"))
+            spans.extend(
+                match.span() for match in re.finditer(rb"(?<![A-Za-z0-9_])" + name + rb"(?![A-Za-z0-9_])", data)
+            )
         return spans
 
     def _host_spans(self, data: bytes) -> list[tuple[int, int]]:
@@ -86,6 +97,11 @@ class TextMasker:
             for match in pattern.finditer(data):
                 if is_internal_host(match.group().decode("ascii"), self._internal_domains):
                     spans.append(match.span())
+        for match in _URL_HOST.finditer(data):
+            if is_internal_host(match.group().decode("ascii"), self._internal_domains):
+                spans.append(match.span())
+        for match in _KEYED_VALUE.finditer(data):
+            spans.append(match.span(1))
         return spans
 
 
