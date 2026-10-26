@@ -12,7 +12,6 @@ injects a `ChatTransport` and never reaches the network.
 
 from __future__ import annotations
 
-import importlib.metadata
 import json
 from typing import Final, Protocol
 
@@ -65,8 +64,7 @@ class OpenAIChatTransport:
         from openai import OpenAI, OpenAIError
 
         # Redirects are not followed: a redirect from the endpoint the person confirmed could send the
-        # request body to a host they never confirmed. The client class follows the installed openai:
-        # openai 3 takes an httpx2 client, openai 1 and 2 take an httpx one.
+        # request body to a host they never confirmed.
         with _http_client(self._timeout) as http_client:
             client = OpenAI(
                 base_url=self._base_url,
@@ -123,15 +121,10 @@ class OpenAIAdvisor:
 
 
 def _http_client(timeout: float):
-    """An HTTP client that does not follow redirects, of the class the installed openai expects."""
-    major = int(importlib.metadata.version("openai").split(".")[0])
-    if major >= 3:
-        import httpx2
+    """An HTTP client that does not follow redirects. openai 3 takes an httpx2 client."""
+    import httpx2
 
-        return httpx2.Client(timeout=timeout, follow_redirects=False)
-    import httpx
-
-    return httpx.Client(timeout=timeout, follow_redirects=False)
+    return httpx2.Client(timeout=timeout, follow_redirects=False)
 
 
 __all__ = ["SYSTEM_PROMPT", "ChatTransport", "OpenAIAdvisor", "OpenAIChatTransport"]

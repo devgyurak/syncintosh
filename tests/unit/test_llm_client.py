@@ -177,23 +177,19 @@ def test_a_keyring_failure_means_no_key(monkeypatch) -> None:
     assert llm_api_key() is None
 
 
-def test_the_http_client_is_the_class_the_installed_openai_expects(monkeypatch) -> None:
-    # given — openai 1 and 2 take an httpx client; openai 3 takes an httpx2 one. Neither may follow redirects.
-    import httpx
+def test_the_http_client_is_httpx2_and_does_not_follow_redirects() -> None:
+    # given — openai 3 takes an httpx2 client, the only one this package builds
     import httpx2
 
     from syncintosh.llm.client import _http_client
 
-    monkeypatch.setattr("importlib.metadata.version", lambda name: "1.99.0")
-    old = _http_client(5.0)
-    monkeypatch.setattr("importlib.metadata.version", lambda name: "3.31.0")
-    new = _http_client(5.0)
+    # when
+    client = _http_client(5.0)
 
-    # when & then
-    assert isinstance(old, httpx.Client) and old.follow_redirects is False
-    assert isinstance(new, httpx2.Client) and new.follow_redirects is False
-    old.close()
-    new.close()
+    # then
+    assert isinstance(client, httpx2.Client)
+    assert client.follow_redirects is False
+    client.close()
 
 
 def test_an_openai_error_is_no_answer_and_its_text_is_not_copied(monkeypatch) -> None:
