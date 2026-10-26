@@ -331,13 +331,14 @@ def proposed_urls(proposal: str, *, base: str, local: str, remote: str) -> tuple
     return tuple(ProposedUrl(url=url, domain=_host(url)) for url in found)
 
 
-def _urls_in(text: str) -> set[str]:
+def _urls_in(text: str) -> tuple[str, ...]:
     """Every URL in any of the text's forms: as written, with `\\/` unescaped, and with `\\uXXXX` decoded."""
     unslashed = text.replace("\\/", "/")
     decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
     unslashed_decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
     forms = (text, unslashed, decoded, unslashed_decoded)
-    return {_clean(url) for form in forms for url in _URL.findall(form)}
+    # Ordered by first appearance, so the same proposal always reports its URLs in the same order.
+    return tuple(dict.fromkeys(_clean(url) for form in forms for url in _URL.findall(form)))
 
 
 def _clean(raw: str) -> str:
