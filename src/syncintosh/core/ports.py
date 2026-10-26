@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from syncintosh.core.advice import Advice, MaskedText
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.tree import Tree
 
@@ -562,4 +563,38 @@ class RingCodec(Protocol):
 
     def commitment(self, key: bytes) -> str:
         """Return the lowercase-hex commitment for a generation key."""
+        ...
+
+
+@runtime_checkable
+class Masker(Protocol):
+    """Replaces the values a model must not see with placeholder tokens, and puts them back.
+
+    Every text in one call shares one nonce and one value table, and each occurrence of a value gets
+    its own token. `unmask` returns `None` unless the proposal names each token of the table exactly
+    once (``AGENTS.md`` §3.5).
+    """
+
+    def mask(self, *texts: str) -> tuple[MaskedText, ...]:
+        """Mask each text. The returned values are the originals; they never leave this process."""
+        ...
+
+    def unmask(self, proposed: str, masked: MaskedText) -> str | None:
+        """The proposal with its tokens restored, or `None` when the tokens do not match exactly."""
+        ...
+
+
+@runtime_checkable
+class ConflictAdvisor(Protocol):
+    """Asks a model for one conflict's answer. Only masked text is ever passed in.
+
+    `index` is a per-request position, never a fingerprint or a digest of a value: a fingerprint
+    is unsalted, so one sent to a model would let the model test a guessed value (``core/resolution.py``).
+    `None` means no usable answer; the caller then asks the person as before.
+    """
+
+    def advise(
+        self, index: int, *, path: MaskedText, base: MaskedText, local: MaskedText, remote: MaskedText
+    ) -> Advice | None:
+        """One conflict's answer, or `None` when the model gave none usable."""
         ...

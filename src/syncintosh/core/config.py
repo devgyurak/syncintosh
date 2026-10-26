@@ -14,7 +14,10 @@ a configuration cannot describe an item the manifest would reject. Standard libr
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
+from urllib.parse import urlsplit
 
+from syncintosh.core.advice import is_public_endpoint
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import (
     FileFormat,
@@ -65,6 +68,44 @@ class LocalItem:
 
 
 @dataclass(frozen=True)
+class LlmConfig:
+    """The assisted-resolve settings. Nothing here is a secret: the API key comes from the environment or the keyring.
+
+    `base_url` has no default, so an assisted resolve runs only against an endpoint the person named.
+    `internal_domains` adds to the built-in internal suffixes (``core/advice.py``). `auto_apply` lists
+    preset names whose content conflicts may be applied without asking; record-level conflicts and
+    proposals that add a URL are always asked (``docs/design/06-llm-assist.md``).
+    """
+
+    base_url: str | None = None
+    model: str | None = None
+    internal_domains: tuple[str, ...] = ()
+    auto_apply: tuple[str, ...] = ()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        internal_domains: tuple[str, ...] = (),
+        auto_apply: tuple[str, ...] = (),
+    ) -> LlmConfig:
+        """Validate the endpoint is an http(s) URL with a host, then freeze."""
+        if base_url is not None:
+            parts = urlsplit(base_url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                raise ConfigError(f"llm base_url must be an http(s) URL with a host, got {base_url!r}")
+            if parts.scheme == "http" and is_public_endpoint(base_url):
+                # The key and the conflict would travel in clear to a host off the network.
+                raise ConfigError(f"llm base_url over plain http may not name a public host: {base_url!r}")
+        return cls(base_url=base_url, model=model, internal_domains=internal_domains, auto_apply=auto_apply)
+
+
+NO_LLM: Final = LlmConfig()
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     """This machine's sync configuration."""
 
@@ -72,6 +113,7 @@ class SyncConfig:
     machine_id: str
     items: tuple[LocalItem, ...]
     globs: tuple[LocalGlob, ...] = ()
+    llm: LlmConfig = NO_LLM
 
     @classmethod
     def create(
@@ -81,6 +123,7 @@ class SyncConfig:
         machine_id: str,
         items: tuple[LocalItem, ...],
         globs: tuple[LocalGlob, ...] = (),
+        llm: LlmConfig = NO_LLM,
     ) -> SyncConfig:
         """Validate the machine-wide fields and that every machine-scope entry names this machine."""
         if not isinstance(remote, str) or remote == "":
@@ -95,7 +138,7 @@ class SyncConfig:
         )
         if foreign:
             raise ConfigError(f"machine-scope entries must name this machine ({machine_id}): {foreign}")
-        return cls(remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs))
+        return cls(remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs), llm=llm)
 
 
 @dataclass(frozen=True)
@@ -173,4 +216,4 @@ def allows(config: SyncConfig, record: ManifestRecord) -> bool:
     return allows_path(config, scope=record.scope, machine=record.machine, path=record.path)
 
 
-__all__ = ["LocalGlob", "LocalItem", "SyncConfig", "allows", "allows_path"]
+__all__ = ["NO_LLM", "LlmConfig", "LocalGlob", "LocalItem", "SyncConfig", "allows", "allows_path"]
