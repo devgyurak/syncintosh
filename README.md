@@ -16,7 +16,8 @@ structure** are all encrypted, and the repository can live on any git remote you
 Early skeleton. The current slice is **end-to-end sync for the built-in `zsh`, `vscode`, and
 `docker` presets**: collect → strip the preset's non-synced keys → encrypt → commit → fetch →
 plaintext 3-way merge → apply, across two Macs through an encrypted git repository. The
-other format adapters, LLM assistance, and conflict resolution are still to come.
+other format adapters are still to come. Conflict resolution is in place, and LLM assistance is
+opt-in (`resolve --llm`, see [06-llm-assist](docs/design/06-llm-assist.md)).
 
 ## Limitations
 
@@ -25,6 +26,12 @@ other format adapters, LLM assistance, and conflict resolution are still to come
   settles them: `--take local|remote` settles every conflict to one side, or `--local PATH` and
   `--remote PATH` settle each named conflict. A run that leaves any conflict without a choice
   publishes nothing.
+- **LLM assistance is opt-in and never automatic.** `resolve --llm` sends each content conflict,
+  masked, to the endpoint named in `config.json` under `llm` (`base_url`, `model`), after you confirm
+  it when it is not on your network. Nothing is applied without your acceptance, except a preset you
+  list in `llm.auto_apply` when the suggestion adds no new URL. The daemon never calls a model. The
+  API key comes from `SYNCINTOSH_LLM_API_KEY` or the keyring, never the config. The restore point is
+  not yet a full guarantee for an `--adopt remote` overwrite; see the design note.
 - **A tracked file that is a symlink is reported, not synced.** If `~/.zshrc` is a link into a
   dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or

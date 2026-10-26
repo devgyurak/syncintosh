@@ -11,12 +11,18 @@ only says what one conflict's choice is, or that it has none.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import itertools
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from syncintosh.core.errors import ConflictsNotCovered
+from syncintosh.core.advice import Advice, MaskedText, rationale_for_display
+from syncintosh.core.errors import ConflictsNotCovered, ContentParseError, SyntaxInvalid
+from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
-from syncintosh.core.resolution import Choice, ConflictView, Decide, NamedChoice, Picks, Side
+from syncintosh.core.ports import ConflictAdvisor, ContentAdapter, Masker, PresetCatalog, SyntaxValidator
+from syncintosh.core.presets import ProposedUrl, ValidatorName, proposed_urls
+from syncintosh.core.resolution import Choice, ConflictView, Decide, NamedChoice, Picks, Proposal, Side
 
 # Asked once the decisions are made, before anything is published: the conflicts and every pick the
 # run would publish. Returning `False` stops the run with nothing published.
@@ -121,4 +127,153 @@ def _describe(views: list[ConflictView]) -> str:
     return ", ".join(f"{view.path} ({view.kind})" for view in views)
 
 
-__all__ = ["Approve", "Chooser", "decision", "normalize_path", "options_for", "scoped_chooser", "take_chooser"]
+__all__ = [
+    "Approve",
+    "Chooser",
+    "Presenter",
+    "Suggestion",
+    "advised_chooser",
+    "auto_apply_for",
+    "decision",
+    "normalize_path",
+    "options_for",
+    "proposal_problem",
+    "scoped_chooser",
+    "take_chooser",
+]
+
+
+# --------------------------------------------------------------------------- assisted choice
+
+# Only a content conflict can be proposed for. A record-level one (add/add, delete/modify, collision)
+# is always the person's choice, whatever a model says (``docs/design/06-llm-assist.md``).
+_CONTENT_KINDS: frozenset[str] = frozenset({"key", "file"})
+
+
+@dataclass(frozen=True)
+class Suggestion:
+    """One model answer for one conflict, restored and pre-checked, for the person to accept or decline.
+
+    `choice` is the decision accepting it would make: a side, or a `Proposal` holding the restored
+    text. `refused` says why the answer cannot be accepted; a refused suggestion is still shown, so
+    the person sees why it was not offered. `urls` are the URLs a proposal introduces, and each is
+    untrusted. `rationale` is plaintext (its tokens restored), so `repr` never shows it.
+    """
+
+    view: ConflictView
+    choice: Choice | None
+    rationale: str = field(repr=False)
+    urls: tuple[ProposedUrl, ...] = ()
+    refused: str | None = None
+
+
+# Shows one suggestion and returns whether the person accepts it. A refused suggestion is shown and
+# declined without asking.
+Presenter = Callable[[Suggestion], bool]
+
+
+def advised_chooser(
+    *,
+    advisor: ConflictAdvisor,
+    masker: Masker,
+    fallback: Chooser,
+    present: Presenter,
+    auto_apply: Callable[[ConflictView], bool],
+    check: Callable[[ConflictView, str], str | None],
+) -> Chooser:
+    """A chooser that asks the model first, and falls back to `fallback` whenever it has no usable answer.
+
+    Each content conflict is masked, sent, and read back. An answer is restored and pre-checked before
+    the person sees it, so a bad proposal never reaches the merge. A conflict is applied without asking
+    only when `auto_apply` allows it, the answer is a usable choice, and it adds no URL; every other
+    answer is shown to the person, who accepts it or falls through to `fallback`.
+    """
+    numbers = itertools.count()
+
+    def choose(view: ConflictView) -> Choice | None:
+        if view.kind not in _CONTENT_KINDS:
+            return fallback(view)
+        path, base, local, remote = masker.mask(view.path, view.base_text, view.local_text, view.remote_text)
+        advice = advisor.advise(next(numbers), path=path, base=base, local=local, remote=remote)
+        if advice is None:
+            return fallback(view)
+        suggestion = _suggest(view, advice, base, masker, check)
+        usable = suggestion.refused is None and suggestion.choice is not None
+        if usable and not suggestion.urls and auto_apply(view):
+            return suggestion.choice
+        accepted = present(suggestion)
+        if accepted and usable:
+            return suggestion.choice
+        return fallback(view)
+
+    return choose
+
+
+def _suggest(
+    view: ConflictView,
+    advice: Advice,
+    masked: MaskedText,
+    masker: Masker,
+    check: Callable[[ConflictView, str], str | None],
+) -> Suggestion:
+    """The answer as a suggestion: its tokens restored, and a proposal checked before it is offered."""
+    rationale = rationale_for_display(advice.rationale, masked.values)
+    if advice.choice != "proposal":
+        return Suggestion(view=view, choice=advice.choice, rationale=rationale)
+    text = masker.unmask(advice.value or "", masked)
+    if text is None:
+        return Suggestion(
+            view=view,
+            choice=None,
+            rationale=rationale,
+            refused="the proposed value does not name each placeholder exactly once",
+        )
+    problem = check(view, text)
+    if problem is not None:
+        return Suggestion(view=view, choice=None, rationale=rationale, refused=problem)
+    urls = proposed_urls(text, base=view.base_text, local=view.local_text, remote=view.remote_text)
+    return Suggestion(view=view, choice=Proposal(text), rationale=rationale, urls=urls)
+
+
+def proposal_problem(
+    view: ConflictView,
+    text: str,
+    *,
+    catalog: PresetCatalog,
+    adapters: Mapping[FileFormat, ContentAdapter],
+    validators: Mapping[ValidatorName, SyntaxValidator],
+) -> str | None:
+    """Why a proposed text cannot be a result for this conflict, or `None` when it may be offered.
+
+    A key value is parsed as a fragment of its format. A whole file is parsed and then given the
+    preset's syntax check. The merge and the publish check the same things again, so this only keeps
+    a bad proposal from being offered; it is not the gate.
+    """
+    policy = catalog.policy_for(view.path)
+    if policy is None:
+        return None
+    adapter = adapters.get(policy.format)
+    if adapter is not None:
+        try:
+            adapter.parse(text)
+        except ContentParseError:
+            return f"the proposed value does not parse as {policy.format}"
+    validator = validators.get(policy.validator) if policy.validator is not None else None
+    if view.kind == "file" and validator is not None:
+        try:
+            validator.check(text, subject=view.path)
+        except SyntaxInvalid:
+            return "the proposed file fails its syntax check"
+    return None
+
+
+def auto_apply_for(catalog: PresetCatalog, names: frozenset[str]) -> Callable[[ConflictView], bool]:
+    """Allow automatic application for a content conflict whose path belongs to one of `names`' presets."""
+
+    def allowed(view: ConflictView) -> bool:
+        if view.kind not in _CONTENT_KINDS:
+            return False
+        preset = catalog.preset_for(view.path)
+        return preset is not None and preset.name in names
+
+    return allowed
