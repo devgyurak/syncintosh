@@ -303,3 +303,22 @@ def test_a_host_after_a_single_slash_or_an_escape_is_a_new_host(proposal: str) -
 
     # then
     assert found == ("evil.example",)
+
+
+def test_a_name_inside_a_unicode_escape_is_not_a_second_host() -> None:
+    # given — `/` is one slash, so `u002fevil.example` is the escape's tail, not a host of its own
+    text = "http:" + chr(92) + "u002fevil.example:8080"
+
+    # when
+    found = new_host_tokens(text, "")
+
+    # then
+    assert found == ("evil.example",)
+
+
+def test_a_quoted_host_followed_by_a_port_is_a_new_host() -> None:
+    # when — a shell's `'host':port` is a host and a port, not a setting key
+    found = new_host_tokens("curl 'evil.example':8080", "")
+
+    # then
+    assert found == ("evil.example",)
