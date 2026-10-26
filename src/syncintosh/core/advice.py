@@ -231,7 +231,9 @@ def host_tokens(text: str) -> frozenset[str]:
         found |= {
             match.group().lower()
             for match in _HOST_TOKEN.finditer(form)
-            if not _is_path_segment(form, match.start()) and not _is_setting_key(form, match.end())
+            if not _is_escape_residue(form, match.start())
+            and not _is_path_segment(form, match.start())
+            and not _is_setting_key(form, match.end())
         }
         found |= {match.group().lower() for match in _URL_HOST.finditer(form)}
     return frozenset(found)
@@ -272,12 +274,25 @@ def _is_path_segment(text: str, start: int) -> bool:
     return start >= 2 and text[start - 1] == "/" and _NAME_CHAR.match(text[start - 2]) is not None
 
 
+def _is_escape_residue(text: str, start: int) -> bool:
+    """True when the name follows a backslash, so it is the tail of a `\\uXXXX` escape (`u002fevil.example`).
+
+    The escape-decoded form already holds the real host, so the residue is not counted.
+    """
+    return start >= 1 and text[start - 1] == "\\"
+
+
 def _is_setting_key(text: str, end: int) -> bool:
-    """True when the name is followed by its closing quote and a colon, as a JSON key is."""
+    """True when the name is followed by its closing quote and a colon, as a JSON key is.
+
+    A colon directly followed by a digit (`'evil.example':8080`) is a port, not a key. A key with a space and
+    a value (`"editor.fontSize": 13`) is still excluded. The compact `"key":13` form is counted as a host,
+    which is the safe side.
+    """
     return _KEY_END.match(text, end) is not None
 
 
-_KEY_END: Final = re.compile(r"[\"']\s*:")
+_KEY_END: Final = re.compile(r"[\"']\s*:(?!\d)")
 
 
 def _invisible(char: str) -> bool:
