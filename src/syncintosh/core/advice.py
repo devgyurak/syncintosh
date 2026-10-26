@@ -21,6 +21,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal
@@ -37,17 +38,30 @@ _PREFIX: Final = "<<snt:"
 _TOKEN: Final = re.compile(r"<<snt:[0-9a-f]{8}:[0-9]+>>")
 
 # A single character that a terminal or a reader could hide or reorder (see `visible`).
-_INVISIBLE: Final = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+# The Unicode categories a reader cannot see: controls, format characters (zero-width, bidi marks and
+# overrides), and the line and paragraph separators. A character in one of them can hide or reorder text.
+_INVISIBLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 # The Tailscale and carrier-grade NAT range: private to the operator, not public, and not `is_private`.
 _CGNAT: Final = ipaddress.ip_network("100.64.0.0/10")
 
-# Terminal escape sequences, C0 and C1 control characters, and bidirectional overrides: each one a
-# model could use to hide text, repaint the screen, or reorder what the person reads. Tab and newline
-# stay, because a rationale is allowed to span lines.
-_CONTROL: Final = re.compile(
-    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]"
+# A whole terminal escape sequence, removed before its introducer character would be. Removing the
+# characters alone would leave `[31m` behind as visible text.
+_ESCAPE_SEQUENCE: Final = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+# A host as settings text writes it: a dotted name with a letter top level, a dotted IPv4 address, or the
+# host of a URL or of a `user@host` form with any label count. The masker and the new-host check both read
+# these patterns, so the two cannot disagree about what a host is.
+HOST_TOKEN_PATTERN: Final = (
+    r"(?<![\w.-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![\w.-])"
+    r"|(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])"
 )
+URL_HOST_PATTERN: Final = r"(?:(?<=://)|(?<=@))[A-Za-z0-9.-]+"
+_HOST_TOKEN: Final = re.compile(HOST_TOKEN_PATTERN)
+_URL_HOST: Final = re.compile(URL_HOST_PATTERN)
+
+# An all-numeric name as inet_aton reads one dotted part: `0x` hex, a leading `0` octal, or decimal.
+_NUMERIC_PART: Final = re.compile(r"0[xX][0-9a-fA-F]*|0[0-7]*|[1-9][0-9]*")
 
 # Hostnames a person runs on their own network. A name under one of these is internal even when
 # the config does not list it.
@@ -98,8 +112,13 @@ def restore(proposed: str, values: Iterable[tuple[str, str]]) -> str | None:
 
 
 def sanitize_rationale(text: str) -> str:
-    """The rationale with its terminal escapes and control characters removed."""
-    return _CONTROL.sub("", text)
+    """The rationale with its terminal escape sequences and invisible characters removed.
+
+    A tab and a newline stay: a rationale may span lines. Every other character in `_INVISIBLE_CATEGORIES`
+    goes, so a zero-width space or a bidi mark cannot hide text in what the person reads.
+    """
+    stripped = _ESCAPE_SEQUENCE.sub("", text)
+    return "".join(char for char in stripped if char in "\t\n" or not _invisible(char))
 
 
 def rationale_for_display(text: str, values: Iterable[tuple[str, str]]) -> str:
@@ -145,7 +164,9 @@ def is_internal_host(host: str, configured: Iterable[str] = ()) -> bool:
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
-        address = None
+        # Not a dotted or colon-separated literal: an all-numeric name still denotes an address, as the
+        # resolver reads it (`134744072` is 8.8.8.8).
+        address = numeric_host(name)
     if address is not None:
         return address.is_loopback or address.is_link_local or address.is_private or address in _CGNAT
     if name == "localhost" or name == "home.arpa" or name.endswith(_INTERNAL_SUFFIXES):
@@ -168,12 +189,60 @@ def is_public_endpoint(base_url: str, configured: Iterable[str] = ()) -> bool:
 
 
 def visible(text: str) -> str:
-    """The text with every control, format, and bidirectional character written as an escape.
+    """The text with every character of category Cc, Cf, Zl or Zp written as a `\\uXXXX` escape.
 
-    What a person approves must be what they read. A raw carriage return, escape sequence, or bidi
-    override in a proposal would show one thing and apply another, so each is shown as `\\uXXXX`.
+    What a person approves must be what they read. A raw carriage return, escape sequence, zero-width
+    space, bidi mark, or line separator in a proposal would show one thing and apply another.
     """
-    return "".join(f"\\u{ord(char):04x}" if _INVISIBLE.match(char) else char for char in text)
+    return "".join(f"\\u{ord(char):04x}" if _invisible(char) else char for char in text)
+
+
+def numeric_host(name: str) -> ipaddress.IPv4Address | None:
+    """The IPv4 address an all-numeric name denotes under `inet_aton`'s rules, or `None` for any other name.
+
+    The resolver reads `134744072` and `0x08080808` as 8.8.8.8, and `127.1` as 127.0.0.1. Judging the
+    spelling alone would call such a name a local name, and a public address would skip the plain-http
+    refusal and the confirmation.
+    """
+    parts = name.split(".")
+    if not 1 <= len(parts) <= 4 or not all(_NUMERIC_PART.fullmatch(part) for part in parts):
+        return None
+    *leading, last = [_numeric_value(part) for part in parts]
+    if any(value > 255 for value in leading) or last >= 256 ** (4 - len(leading)):
+        return None
+    address = last
+    for index, value in enumerate(leading):
+        address |= value << (8 * (3 - index))
+    return ipaddress.IPv4Address(address)
+
+
+def host_tokens(text: str) -> frozenset[str]:
+    """Every host the text names, lowercased: a dotted name, a dotted address, or a URL or `user@` host."""
+    found = {match.group().lower() for match in _HOST_TOKEN.finditer(text)}
+    found |= {match.group().lower() for match in _URL_HOST.finditer(text)}
+    return frozenset(found)
+
+
+def new_host_tokens(proposal: str, *sides: str) -> tuple[str, ...]:
+    """The hosts a proposal names that none of the sides named, sorted.
+
+    A host the proposal introduces can receive data the person did not agree to: a `git@host:` remote, a
+    proxy, a `curl ftp://host` pipe. So the check is on any host token, not only on a full URL.
+    """
+    known: frozenset[str] = frozenset().union(*(host_tokens(side) for side in sides))
+    return tuple(sorted(host_tokens(proposal) - known))
+
+
+def _numeric_value(part: str) -> int:
+    if part[:2] in ("0x", "0X"):
+        return int(part[2:] or "0", 16)
+    if len(part) > 1 and part.startswith("0"):
+        return int(part, 8)
+    return int(part)
+
+
+def _invisible(char: str) -> bool:
+    return unicodedata.category(char) in _INVISIBLE_CATEGORIES
 
 
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -193,11 +262,16 @@ def _substitute(text: str, table: Mapping[str, str]) -> str:
 
 
 __all__ = [
+    "HOST_TOKEN_PATTERN",
+    "URL_HOST_PATTERN",
     "Advice",
     "AdviceChoice",
     "MaskedText",
+    "host_tokens",
     "is_internal_host",
     "is_public_endpoint",
+    "new_host_tokens",
+    "numeric_host",
     "parse_advice",
     "placeholder",
     "rationale_for_display",

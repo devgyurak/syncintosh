@@ -191,3 +191,49 @@ def test_a_local_copy_with_a_base_token_round_trips_through_one_table() -> None:
     # then
     assert restored == f"x = {SECRET}"
     assert base.values == local.values == remote.values
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ('{"mysql.password": "correct horse battery"}', "correct horse battery"),
+        ('{"password": "a,b;c}d"}', "a,b;c}d"),
+        ('export API_KEY="abc def ghi"', "abc def ghi"),
+        ('{"github.token":\n  "ghx_abcdef"}', "ghx_abcdef"),
+        ('{"auth": "Basic dXNlcjpwYXNz"}', "dXNlcjpwYXNz"),
+        ("export TOKEN=abc def ghi", "abc def ghi"),
+        ("Cookie: session=abc123", "abc123"),
+    ],
+    ids=[
+        "dotted-key-spaces",
+        "quoted-delims",
+        "shell-quoted-spaces",
+        "newline",
+        "auth-basic",
+        "shell-unquoted",
+        "cookie",
+    ],
+)
+def test_a_value_under_a_credential_key_is_masked_whole(text: str, secret: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then — the whole value is hidden, not only its first word
+    assert secret not in masked.text
+
+
+def test_a_value_under_an_ordinary_key_is_left_alone() -> None:
+    # when
+    (masked,) = _masker().mask('{"author": "Jane"}')
+
+    # then
+    assert masked.text == '{"author": "Jane"}'
+
+
+@pytest.mark.parametrize("url", ["http://134744072/v1", "http://0x08080808/v1"], ids=["decimal", "hex"])
+def test_a_numeric_public_host_is_not_masked_as_internal(url: str) -> None:
+    # when — the resolver reads these as 8.8.8.8, a public address, so the host is not an internal name
+    (masked,) = _masker().mask(url)
+
+    # then
+    assert masked.text == url

@@ -17,23 +17,31 @@ import re
 import secrets
 from typing import Final
 
-from syncintosh.core.advice import MaskedText, is_internal_host, placeholder, restore
+from syncintosh.core.advice import (
+    HOST_TOKEN_PATTERN,
+    URL_HOST_PATTERN,
+    MaskedText,
+    is_internal_host,
+    placeholder,
+    restore,
+)
 from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS
 
 # Both tables, so masking is at least as broad as either scan. Duplicates only cost a second pass.
 _SECRET_PATTERNS: Final = (*STRUCTURED_PATTERNS, *SHELL_PATTERNS)
 
-# A dotted name with a letter-only top level, as a hostname in settings text looks. The lookarounds
-# keep it from starting or ending inside a longer word or path segment.
-_HOSTNAME: Final = re.compile(rb"(?<![\w.-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![\w.-])")
-_IPV4: Final = re.compile(rb"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
-# The host of a URL, of any label count: `http://mac-mini:11434` names a machine on the network.
-_URL_HOST: Final = re.compile(rb"(?<=://)[A-Za-z0-9.-]+")
-# A value written under a credential-like key: `"password": "x"`, `GITHUB_TOKEN=x`, `api_key: x`. The
-# value group is what gets masked. Not exhaustive: a value under another key name is still sent.
+# The host patterns are the advice module's, so masking and the new-host check read one definition.
+_HOST: Final = re.compile(HOST_TOKEN_PATTERN.encode("ascii"))
+_URL_HOST: Final = re.compile(URL_HOST_PATTERN.encode("ascii"))
+
+# A value written under a credential-like key, in JSON, YAML, or shell. The value is one quoted string,
+# with its escapes, or the unquoted run up to the end of the line or a delimiter. The separator may span a
+# line break, so `"github.token":` followed by the value on the next line is still one pair. Not exhaustive:
+# a value under another key name is still sent, and the design note says so.
 _KEYED_VALUE: Final = re.compile(
-    rb"""(?i:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key)"""
-    rb"""["']?[ \t]*[:=][ \t]*["']?([^\s"',;}\]]+)"""
+    rb"(?i:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key"
+    rb"|auth|authorization|bearer|cookie|session)[\"']?\s*[:=]\s*"
+    rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n\"',;}\]]+)"
 )
 
 
@@ -93,10 +101,9 @@ class TextMasker:
 
     def _host_spans(self, data: bytes) -> list[tuple[int, int]]:
         spans: list[tuple[int, int]] = []
-        for pattern in (_HOSTNAME, _IPV4):
-            for match in pattern.finditer(data):
-                if is_internal_host(match.group().decode("ascii"), self._internal_domains):
-                    spans.append(match.span())
+        for match in _HOST.finditer(data):
+            if is_internal_host(match.group().decode("ascii"), self._internal_domains):
+                spans.append(match.span())
         for match in _URL_HOST.finditer(data):
             if is_internal_host(match.group().decode("ascii"), self._internal_domains):
                 spans.append(match.span())
