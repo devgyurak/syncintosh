@@ -25,9 +25,11 @@ class ReplyAdvisor:
     def __init__(self, advice: Advice | None) -> None:
         self.advice = advice
         self.asked: list[str] = []
+        self.keys: list[str] = []
 
-    def advise(self, index, *, path, base, local, remote):
+    def advise(self, index, *, path, key, base, local, remote):
         self.asked.append(local.text)
+        self.keys.append(key.text)
         return self.advice
 
 
@@ -326,3 +328,76 @@ def test_a_proposal_for_an_untracked_path_has_no_pre_check() -> None:
         )
         is None
     )
+
+
+def test_a_binary_conflict_is_never_sent_and_never_proposed_for() -> None:
+    # given — a side that is not text: its "(binary)" marker is not something a model should settle
+    advisor = ReplyAdvisor(Advice(choice="proposal", value="text", rationale="x"))
+    binary = ConflictView(
+        kind="file",
+        file_id="f" * 32,
+        path="Library/Fonts/x.ttf",
+        key_path=None,
+        fingerprint="x" * 64,
+        readable=False,
+        local_text="(binary)",
+        remote_text="(binary)",
+    )
+
+    # when
+    choice = _chooser(advisor, Recorder(accept=True))(binary)
+
+    # then
+    assert advisor.asked == []
+    assert choice == "remote"
+
+
+def test_the_key_path_is_sent_with_the_texts() -> None:
+    # given — the view is a key conflict at key path ("a",)
+    advisor = ReplyAdvisor(Advice(choice="local"))
+
+    # when
+    _chooser(advisor, Recorder(accept=True))(_view())
+
+    # then
+    assert advisor.keys == ["a"]
+
+
+def test_the_approval_screen_shows_a_proposed_value_in_full() -> None:
+    # given — a proposal with a carriage return and a bidi override that must not hide anything
+    from syncintosh.cli.main import _pick_lines
+
+    # when
+    lines = _pick_lines(_view(), Proposal('{"a": "x\u202ey"}'))
+
+    # then — shown as its text, marked as the model's, with the override escaped
+    assert "proposed by the model" in lines[0]
+    assert "\\u202e" in lines[1]
+    assert "Proposal" not in "".join(lines)
+
+
+def test_a_file_proposal_is_shown_as_a_diff_on_the_approval_screen() -> None:
+    # given
+    from syncintosh.cli.main import _pick_lines
+
+    view = _view(kind="file")
+
+    # when
+    lines = _pick_lines(view, Proposal('{"a": 3}\n'))
+
+    # then
+    assert any(line.strip().startswith("-") or line.strip().startswith("+") for line in lines[1:])
+
+
+def test_a_plain_http_endpoint_to_a_public_host_is_refused_at_resolve_time() -> None:
+    # given
+    from syncintosh.cli.main import _assisted_choice
+    from syncintosh.core.config import LlmConfig, SyncConfig
+
+    config = SyncConfig.create(
+        remote="r", machine_id="m", items=(), llm=LlmConfig.create(base_url="http://api.example.com/v1", model="m")
+    )
+
+    # when & then — refused before any call, and named as the reason
+    with pytest.raises(typer.BadParameter, match="plain http"):
+        _assisted_choice(config, None, {})

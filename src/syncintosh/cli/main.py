@@ -621,7 +621,10 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     llm = config.llm
     if llm.base_url is None or llm.model is None:
         raise typer.BadParameter("set llm.base_url and llm.model in config.json before using --llm")
-    if is_public_endpoint(llm.base_url) and not typer.confirm(
+    if llm.base_url.startswith("http://") and is_public_endpoint(llm.base_url, llm.internal_domains):
+        # The key and the conflicting values would travel in clear to a host off the network.
+        raise typer.BadParameter("llm.base_url over plain http may not name a public host; use https")
+    if is_public_endpoint(llm.base_url, llm.internal_domains) and not typer.confirm(
         f"{llm.base_url} is not a loopback or private-network address: the conflicting values would leave "
         "this network. Continue?",
         default=False,
@@ -670,8 +673,10 @@ def _present_suggestion(suggestion: Suggestion) -> bool:
     proposed = (
         choice.text if isinstance(choice, Proposal) else (view.remote_text if choice == "remote" else view.local_text)
     )
+    from syncintosh.core.advice import visible
+
     for line in unified_diff(view.local_text.splitlines(), proposed.splitlines(), "local", "suggested", lineterm=""):
-        console.print(escape(line))
+        console.print(escape(visible(line)))
     return typer.confirm("  accept this suggestion?", default=False)
 
 
@@ -716,11 +721,34 @@ def _show_conflict(console: Console, view: ConflictView) -> None:
 
 
 def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks) -> bool:
-    """Show what will be published and ask before anything is written to the remote."""
+    """Show what will be published, in full, and ask before anything is written to the remote.
+
+    A value a model proposed is shown as its text, never as the repr of its carrier, and every control
+    character is escaped, so the person reads what will be applied, including an auto-applied proposal.
+    """
     for view in views:
         if view.fingerprint in picks:
-            typer.echo(f"  {view.path}  {view.kind}  ->  {picks[view.fingerprint]}")
+            for line in _pick_lines(view, picks[view.fingerprint]):
+                typer.echo(line)
     return typer.confirm("Publish these choices?", default=False)
+
+
+def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
+    """One pick as the lines a person reads before publishing: its place, then the change it makes."""
+    from difflib import unified_diff
+
+    from syncintosh.core.advice import visible
+    from syncintosh.core.resolution import Proposal
+
+    place = f"  {view.path}  {view.kind}"
+    if view.key_path is not None:
+        place += f"  key {path_label(view.key_path)}"
+    if not isinstance(pick, Proposal):
+        return [f"{place}  ->  {pick}"]
+    if view.kind == "file":
+        change = unified_diff(view.local_text.splitlines(), pick.text.splitlines(), "local", "proposed", lineterm="")
+        return [f"{place}  ->  proposed by the model", *(f"    {visible(line)}" for line in change)]
+    return [f"{place}  ->  proposed by the model", f"    {visible(pick.text)}"]
 
 
 def _sync_ports(config, paths) -> dict:

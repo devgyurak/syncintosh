@@ -96,6 +96,9 @@ class ConflictView:
     fingerprint: str
     local_present: bool = True
     remote_present: bool = True
+    # False when a side is not text (a binary file). Such a conflict is never shown to a model, and no text
+    # proposal can settle it.
+    readable: bool = True
     base_text: str = field(default="", repr=False)
     local_text: str = field(default="", repr=False)
     remote_text: str = field(default="", repr=False)

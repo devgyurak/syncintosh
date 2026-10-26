@@ -23,6 +23,7 @@ from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import ConflictAdvisor, ContentAdapter, Masker, PresetCatalog, SyntaxValidator
 from syncintosh.core.presets import ProposedUrl, ValidatorName, proposed_urls
 from syncintosh.core.resolution import Choice, ConflictView, Decide, NamedChoice, Picks, Proposal, Side
+from syncintosh.core.tree import path_label
 
 # Asked once the decisions are made, before anything is published: the conflicts and every pick the
 # run would publish. Returning `False` stops the run with nothing published.
@@ -191,10 +192,15 @@ def advised_chooser(
     numbers = itertools.count()
 
     def choose(view: ConflictView) -> Choice | None:
-        if view.kind not in _CONTENT_KINDS:
+        if view.kind not in _CONTENT_KINDS or not view.readable:
             return fallback(view)
-        path, base, local, remote = masker.mask(view.path, view.base_text, view.local_text, view.remote_text)
-        advice = advisor.advise(next(numbers), path=path, base=base, local=local, remote=remote)
+        # The key path goes with the texts: a model choosing among `14`, `16` and `13` with no name for the
+        # setting would be guessing, and an auto-applied guess is the worst outcome.
+        key = "" if view.key_path is None else path_label(view.key_path)
+        path, key_text, base, local, remote = masker.mask(
+            view.path, key, view.base_text, view.local_text, view.remote_text
+        )
+        advice = advisor.advise(next(numbers), path=path, key=key_text, base=base, local=local, remote=remote)
         if advice is None:
             return fallback(view)
         suggestion = _suggest(view, advice, base, masker, check)

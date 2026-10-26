@@ -1887,8 +1887,8 @@ class _ReplyAdvisor:
         self.advice = advice
         self.sent: list[str] = []
 
-    def advise(self, index, *, path, base, local, remote):
-        self.sent.extend([path.text, base.text, local.text, remote.text])
+    def advise(self, index, *, path, key, base, local, remote):
+        self.sent.extend([path.text, key.text, base.text, local.text, remote.text])
         return self.advice
 
 

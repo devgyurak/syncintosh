@@ -15,21 +15,30 @@ accepts or declines it. The daemon never calls a model; it leaves conflicts pend
 - **The endpoint is untrusted until named.** There is no default. `llm.base_url` must be set, and
   an endpoint that is not loopback or a private network is confirmed before the first call, because
   the conflicting values then leave the machine.
-- **The conflict is the secret.** A conflict's sides carry settings text, which may hold tokens,
-  internal hostnames, paths that reveal the person, and their username. Those never reach the
-  model.
+- **The conflict carries secrets.** A conflict's sides may hold tokens, internal hostnames, paths
+  that reveal the person, and their username. The masker removes the ones it recognises before the
+  model sees them. It does not recognise everything (see *What leaves the machine*).
 
 ## What leaves the machine
 
-For one content conflict, the model receives four texts: the path, and the base, local and remote
-values of the conflicted key or whole file. Every value is masked first (`system/masking.py`):
+For one content conflict, the model receives five texts: the file path, the key path inside the
+file (empty for a whole file), and the base, local and remote values. Before they leave, the masker
+(`system/masking.py`) replaces the recognised values with tokens:
 
 - every secret pattern the scanner knows, both its structured and its shell table, so a credential
   the scanner would refuse is masked here too;
-- the home directory path and the username, in every occurrence;
-- internal hostnames and IP addresses, by the built-in rule (`.local`, `.internal`, `.lan`,
-  `.corp`, `home.arpa`, `localhost`, loopback, link-local and private IPs) and by the domains the
-  config lists in `llm.internal_domains`.
+- a value written under a credential-like key: `password`, `passwd`, `pwd`, `secret`, `token`,
+  `api_key`, `apikey`, `credential`, `private_key`, in JSON, shell, and YAML spellings;
+- the home directory path, and the username as a whole word;
+- internal hostnames and IP addresses, and the host of any URL, by the built-in rule (`.local`,
+  `.internal`, `.lan`, `.corp`, `home.arpa`, `localhost`, a single-label name, loopback, link-local,
+  private and CGNAT IPs) and by the domains the config lists in `llm.internal_domains`.
+
+**This is not "every value".** A value under a key name outside that list, in a format the patterns
+do not recognise, is sent as it is. The model needs the values to merge them: a conflict with every
+value masked gives it nothing to choose between. The trade-off is deliberate, and it is why the
+approval screen shows what will be published, in full. Narrowing it further is a decision for the
+person who owns the settings, not a default.
 
 Each masked value becomes a token, `<<snt:NONCE:N>>`. The nonce is drawn per request, so a token
 from one request is meaningless in another. The request carries a per-request index, never a
@@ -127,14 +136,17 @@ unknown key is refused, so a typo cannot silently disable a guard.
 ## Known limits
 
 - **Restore point is not a full guarantee** (see *Backup*). Open.
-- **A proposal must carry every token of the masked conflict.** The four texts of one conflict
-  share one token table, so a proposal that drops a token from any side is refused, even when the
-  drop was correct. The person chooses by hand in that case. This is deliberately strict.
+- **Values outside the masking rules are sent.** See *What leaves the machine*. Open as a design
+  decision: masking every value would leave the model nothing to merge.
+- **A dropped value is applied only if the person accepts it.** A proposal may leave a token out,
+  so it may drop a value the local side had. The approval screen shows the proposed text and the
+  diff against the local side, and nothing is published without that acceptance.
 - **The confirmation is the only gate on the endpoint.** The predicate counts a host outside the
   built-in rule as public, so a private host the config does not name is confirmed once, which is
   the safe direction.
-- **An `openai` error can echo part of the key** if the library puts the header in its message.
-  The library is not under this project's control.
+- **The `openai` error stays chained.** Our own error text is fixed, so it does not repeat the
+  library's message; the library's exception is kept as the cause, and its message may echo part of
+  the request if the library puts it there. The library is not under this project's control.
 - **XML validation is not available.** Only the JSON and zsh checks exist, so an XML suggestion has
   no syntax check beyond the merge's own render round-trip. XML waits for the XML adapter.
 

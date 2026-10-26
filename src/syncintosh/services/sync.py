@@ -917,6 +917,7 @@ def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: byte
         file_id=file_id,
         path=path,
         key_path=None,
+        readable=_decode(base) is not None and _decode(local) is not None and _decode(remote) is not None,
         fingerprint=_whole_fingerprint(file_id, base, local, remote),
         base_text=_readable(base),
         local_text=local_text,
