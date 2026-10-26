@@ -809,6 +809,8 @@ def _render(report: SyncReport, config) -> None:
         _say("nothing changed")
     elif report.published_commit:
         _say(f"published {report.published_commit[:12]}")
+    if report.applied and report.backup_commit:
+        _say(f"applied from {report.backup_commit[:12]}")
 
 
 def main() -> None:

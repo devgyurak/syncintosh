@@ -205,10 +205,32 @@ class _Presets:
 
 
 @dataclass(frozen=True)
+class Backup:
+    """The commit this sync's apply works from: the collect commit when the cycle wrote one, else HEAD.
+
+    `_apply` takes a `Backup` as a required keyword, so no write can be requested without naming
+    this commit. It does **not** guarantee that every overwritten file's previous bytes are in
+    that commit: an `--adopt remote` overwrite, or a file an earlier cycle published but never applied,
+    can replace bytes that only an older commit (the ledger's) holds. That gap is tracked separately.
+    `commit` is `None` only when nothing has been committed yet; `_apply` then refuses to overwrite
+    a file that exists.
+    """
+
+    commit: str | None
+
+    @classmethod
+    def create(cls, commit: str | None) -> Backup:
+        """Name the restore point. Called only once the cycle has its collect commit, or its HEAD."""
+        return cls(commit=commit)
+
+
+@dataclass(frozen=True)
 class SyncReport:
     """What one cycle did, for the CLI to render."""
 
     published_commit: str | None = None
+    # The restore point this sync's apply worked from: the commit its overwrites can be restored from.
+    backup_commit: str | None = None
     created: tuple[str, ...] = ()
     collected: tuple[str, ...] = ()
     applied: tuple[str, ...] = ()
@@ -447,6 +469,7 @@ _FILE_NOT_HERE = "the file is not on this machine yet"
 _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
+_NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -1461,6 +1484,7 @@ def _fast_forward(transport: GitTransport, branch: str, commit: str) -> None:
 class _Applied:
     """What step 14 did with each record, by outcome."""
 
+    backup: str | None = None
     applied: tuple[str, ...] = ()
     deferred: tuple[Deferral, ...] = ()
     symlinks: tuple[str, ...] = ()
@@ -1524,6 +1548,7 @@ def _apply(
     config: SyncConfig,
     home: str,
     adopt: AdoptChoice | None,
+    backup: Backup,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
@@ -1646,9 +1671,13 @@ def _apply(
         if not _syntax_ok(presets, data, record.path):
             invalid.append(Refusal(record.path, _SYNTAX_FAILED))
             continue
+        if live_bytes is not None and live_bytes != data and backup.commit is None:
+            refused.append(Refusal(record.path, _NO_RESTORE_POINT))
+            continue
         live.write(live_path, data)
         applied.append(record.path)
     return _Applied(
+        backup=backup.commit,
         applied=tuple(applied),
         deferred=tuple(deferred),
         symlinks=tuple(symlinks),
@@ -2029,6 +2058,7 @@ def _cycle(
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
+    # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge.
     applied = _apply(
         transport=transport,
         cipher=cipher,
@@ -2044,6 +2074,7 @@ def _cycle(
         config=config,
         home=home,
         adopt=adopt,
+        backup=Backup.create(local_commit),
     )
     ledger_store.save(
         _settle_ledger(
@@ -2059,6 +2090,7 @@ def _cycle(
     )
     return SyncReport(
         published_commit=outcome.published,
+        backup_commit=applied.backup,
         created=tuple(collected.created),
         collected=tuple(collected.collected),
         applied=applied.applied,
@@ -2080,6 +2112,7 @@ __all__ = [
     "NO_CATALOG",
     "NO_RESOLUTION",
     "NO_VALIDATORS",
+    "Backup",
     "Deferral",
     "Resolution",
     "SyncReport",
