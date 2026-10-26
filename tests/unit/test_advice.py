@@ -286,3 +286,20 @@ def test_invisible_characters_are_removed_from_the_rationale_but_tabs_and_newlin
 def test_a_settings_key_or_file_name_is_not_a_host(text: str) -> None:
     # when & then — a dotted setting name is not a destination, so it is not a new endpoint
     assert new_host_tokens(text, "") == ()
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        '"http.proxy": "http:/evil.example:8080"',
+        r'"http.proxy": "http:\/evil.example:8080"',
+        r'"http.proxy": "http:/evil.example:8080"',
+    ],
+    ids=["single-slash", "escaped-slash", "unicode-escape"],
+)
+def test_a_host_after_a_single_slash_or_an_escape_is_a_new_host(proposal: str) -> None:
+    # when — `http:/host` is read as a host by WHATWG URL parsers, which is what VS Code runs
+    found = new_host_tokens(proposal, "")
+
+    # then
+    assert found == ("evil.example",)
