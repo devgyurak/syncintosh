@@ -1765,3 +1765,32 @@ def test_a_key_pick_that_fails_the_syntax_check_is_settled_at_file_level(tmp_pat
     assert json.loads((b.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
     _run(a, catalog=catalog, validators=validators)
     assert json.loads((a.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
+
+
+# --------------------------------------------------------------------------- restore point
+
+
+def _object_at(machine: Machine, rev: str, file_id: str) -> bytes:
+    blob = GitCLITransport(machine.repo).read_blob(rev, object_path(file_id))
+    assert blob is not None
+    return EnvelopeCipher(machine.store).open(blob, domain="object", file_id=file_id)
+
+
+def test_an_apply_reports_the_restore_point_its_overwrites_come_from(tmp_path, memory_key_store) -> None:
+    # given — A edits line one and B edits line three of one file, so B's sync merges and overwrites its live file
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    before = _git(b.repo, "rev-parse", "HEAD").strip()
+    _write_live(a, b"ONE\ntwo\nthree\n")
+    _run(a)
+    _write_live(b, b"one\ntwo\nTHREE\n")
+
+    # when
+    report = _run(b)
+
+    # then — the restore point is the collect commit B made on the HEAD it started from, and it holds
+    # the bytes the apply replaced
+    assert report.applied == (ZSH,)
+    assert report.backup_commit is not None
+    assert _git(b.repo, "rev-parse", f"{report.backup_commit}^").strip() == before
+    assert _object_at(b, report.backup_commit, _only_file_id(b, report.backup_commit)) == b"one\ntwo\nTHREE\n"
+    assert _read_live(b) == b"ONE\ntwo\nTHREE\n"

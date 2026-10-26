@@ -6,7 +6,16 @@ from __future__ import annotations
 import pytest
 
 from syncintosh.core.errors import ConfigError
-from syncintosh.core.presets import EMPTY_CATALOG, Preset, PresetFile, PresetGlob, download_trust
+from syncintosh.core.presets import (
+    EMPTY_CATALOG,
+    Preset,
+    PresetFile,
+    PresetGlob,
+    ProposedUrl,
+    ShippedPresets,
+    download_trust,
+    proposed_urls,
+)
 from syncintosh.presets import BuiltinCatalog, docker, vscode, zsh
 
 
@@ -71,10 +80,12 @@ def test_download_trust_accepts_only_the_shipped_url_verbatim() -> None:
     # given
     preset = Preset.create(name="app", files=(_file(),), download_url="https://example.test/app")
 
+    shipped = ShippedPresets.create((preset,))
+
     # when
-    exact = download_trust("https://example.test/app", builtin=(preset,))
-    lookalike = download_trust("https://example.test/app?code.evil", builtin=(preset,))
-    forged_host = download_trust("https://example.test.evil.test/app", builtin=(preset,))
+    exact = download_trust("https://example.test/app", shipped=shipped)
+    lookalike = download_trust("https://example.test/app?code.evil", shipped=shipped)
+    forged_host = download_trust("https://example.test.evil.test/app", shipped=shipped)
 
     # then — the domain is always reported, so an untrusted URL can still be labelled
     assert exact.trusted is True
@@ -438,3 +449,66 @@ def test_a_glob_over_its_own_presets_exact_path_is_refused() -> None:
     # when & then — which policy applied would depend on declaration order, so it is refused
     with pytest.raises(ConfigError):
         BuiltinCatalog.create((ambiguous,))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test.evil.example/app",
+        "https://evil.example/?https://example.test/app",
+        "https://example.test@evil.example/app",
+        "https://example.test/app/",
+        "http://example.test/app",
+    ],
+)
+def test_a_lookalike_of_a_shipped_url_is_never_trusted(url: str) -> None:
+    # given
+    preset = Preset.create(name="app", files=(_file(),), download_url="https://example.test/app")
+    shipped = ShippedPresets.create((preset,))
+
+    # when
+    trust = download_trust(url, shipped=shipped)
+
+    # then
+    assert trust.trusted is False
+
+
+def test_a_proposed_url_is_untrusted_even_when_it_matches_a_shipped_one() -> None:
+    # given — the proposal's text is the only place the URL came from
+
+    # when
+    found = proposed_urls("open https://example.test/app", base="", local="", remote="")
+
+    # then — new to every side, so it is flagged, and it is never trusted
+    assert found == (ProposedUrl(url="https://example.test/app", domain="example.test"),)
+    assert found[0].trusted is False
+
+
+def test_a_url_a_side_already_held_is_not_flagged() -> None:
+    # when
+    found = proposed_urls("see https://example.test/app", base="", local="https://example.test/app", remote="")
+
+    # then
+    assert found == ()
+
+
+def test_proposed_urls_drop_trailing_punctuation_and_name_the_real_host() -> None:
+    # when
+    found = proposed_urls(
+        "get https://evil.example/x. or https://example.test@evil.example/y", base="", local="", remote=""
+    )
+
+    # then — the host is the one a browser would reach, not the userinfo that looks like a vendor
+    assert [(item.url, item.domain) for item in found] == [
+        ("https://evil.example/x", "evil.example"),
+        ("https://example.test@evil.example/y", "evil.example"),
+    ]
+
+
+def test_a_proposal_with_non_ascii_url_characters_is_read_without_error() -> None:
+    # when — a full-width slash and a full-width host would make `urlsplit` raise if the pattern admitted them
+    found = proposed_urls("see https://evil.example／x and https://ｅｖｉｌ.example/y", base="", local="", remote="")
+
+    # then — the ASCII part is found and nothing raises
+    assert [item.url for item in found] == ["https://evil.example"]
+    assert all(item.trusted is False for item in found)

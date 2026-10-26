@@ -9,6 +9,7 @@ that stops a glob from collecting an unbounded set.
 from __future__ import annotations
 
 import hashlib
+import inspect
 from pathlib import Path
 
 from syncintosh.core.config import LocalGlob, SyncConfig
@@ -18,7 +19,16 @@ from syncintosh.core.ports import PushOutcome
 from syncintosh.core.presets import MAX_GLOB_EXPANSION, Preset, PresetFile
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.services.sync import NO_APP_INFO, _apply, _Collect, _collect, _expand_globs, _Presets, _settle_ledger
+from syncintosh.services.sync import (
+    NO_APP_INFO,
+    Backup,
+    _apply,
+    _Collect,
+    _collect,
+    _expand_globs,
+    _Presets,
+    _settle_ledger,
+)
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
 
@@ -365,6 +375,7 @@ def test_a_record_is_not_written_through_a_symlinked_glob_directory(tmp_path) ->
         config=_config(),
         home=str(home),
         adopt=None,
+        backup=Backup.create("c" * 40),
     )
 
     # then — refused before anything is written, and the target the link points at is untouched
@@ -407,3 +418,12 @@ def test_settle_does_not_read_through_a_symlinked_glob_directory(tmp_path) -> No
     # then — nothing settled, and nothing was read through the link
     assert settled == {}
     assert live.reads == []
+
+
+def test_apply_takes_its_restore_point_as_a_required_keyword() -> None:
+    # when
+    parameter = inspect.signature(_apply).parameters["backup"]
+
+    # then — a caller that names no restore point cannot call apply at all
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
