@@ -155,8 +155,8 @@ class ContentParseError(DomainError):
 class RenderRefused(ContentParseError):
     """An adapter refused to render a merged value, for a reason it can name without echoing a value.
 
-    ``reason`` is a fixed text the adapter owns. The content merge shows it to the person in place of the generic
-    refusal, so it must never be built from a setting's key or value.
+    ``reason`` is a fixed text the adapter owns, never built from a setting's key or value, so a caller may show it
+    to a person. A caller that does not read the reason sees the same exception as any other render refusal.
     """
 
     def __init__(self, reason: str) -> None:
