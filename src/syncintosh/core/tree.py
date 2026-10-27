@@ -34,6 +34,11 @@ from typing import Final, Literal
 # whole. The empty tuple is the document root.
 KeyPath = tuple[str, ...]
 
+# An element of an array that is merged by its declared fields (`core/keyed_array.py`): the
+# (field, value) pairs of its identity, where an absent optional field is `None`. `None` and `""`
+# stay distinct, so a missing `when` and `"when": ""` name different elements.
+ElementId = tuple[tuple[str, str | None], ...]
+
 # The JSON primitive kinds, serialized verbatim so they are a `Literal` and never an `Enum`.
 ScalarKind = Literal["null", "bool", "int", "float", "str"]
 
@@ -191,7 +196,7 @@ def _to_node(value: object) -> Node:
     return scalar(value)
 
 
-def path_label(path: KeyPath) -> str:
+def path_label(path: KeyPath, element: ElementId | None = None) -> str:
     """A key path as a person reads it, so two different paths never print the same string.
 
     A settings file spells a flat setting `"editor.fontSize"` — one key whose *name* contains a dot
@@ -200,7 +205,30 @@ def path_label(path: KeyPath) -> str:
     another step's spelling: when it is empty, when it holds a dot, when it holds a quote, or when it
     is the word the whole document prints. Everything else stays bare, so the common nested path
     still reads as `editor.fontSize`. Standard library only (``AGENTS.md`` §2.1).
+
+    A conflict on one element of an array names that element after the path, so the user can tell
+    two bindings under the same path apart.
     """
+    label = _path_text(path)
+    return label if element is None else f"{label} {element_label(element)}"
+
+
+def element_label(element: ElementId) -> str:
+    """An array element's identity as `[key="…", when=(missing)]`.
+
+    A missing optional field prints as `(missing)`, which is not the same as `""`, so the two cannot
+    be confused in a prompt.
+    """
+    shown = [f"{field}={_value_text(value)}" for field, value in element]
+    return f"[{', '.join(shown)}]"
+
+
+def _value_text(value: str | None) -> str:
+    return "(missing)" if value is None else json.dumps(value, ensure_ascii=False)
+
+
+def _path_text(path: KeyPath) -> str:
+    """The dotted form of a path, without any element."""
     if not path:
         return "(document)"
     return ".".join(_step_label(step) for step in path)
@@ -247,6 +275,7 @@ __all__ = [
     "ABSENT",
     "Absent",
     "Array",
+    "ElementId",
     "EmptyObject",
     "KeyPath",
     "Leaf",
@@ -255,6 +284,7 @@ __all__ = [
     "Scalar",
     "ScalarKind",
     "Tree",
+    "element_label",
     "path_label",
     "scalar",
     "tree_from_value",

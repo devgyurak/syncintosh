@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from syncintosh.core.tree import Absent, KeyPath, Leaf, Tree
+from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree
 
 # Whether a value applies to every machine or only to the current one.
 Scope = Literal["common", "machine"]
@@ -37,11 +37,15 @@ class Conflict:
     base: Leaf
     local: Leaf
     remote: Leaf
+    # Set when the conflict is one element of an array merged by identity (`core/keyed_array.py`);
+    # `None` for a conflict on the whole path.
+    element: ElementId | None = None
 
     def __repr__(self) -> str:
-        # The sides are plaintext settings; a log or a traceback must not print them (§4).
+        # The sides are plaintext settings; a log or a traceback must not print them (§4). The
+        # element identity is the field names and values that name it, never the array's content.
         return (
-            f"Conflict(path={self.path!r}, base=<{_shape(self.base)}>, "
+            f"Conflict(path={self.path!r}, element={self.element!r}, base=<{_shape(self.base)}>, "
             f"local=<{_shape(self.local)}>, remote=<{_shape(self.remote)}>)"
         )
 
