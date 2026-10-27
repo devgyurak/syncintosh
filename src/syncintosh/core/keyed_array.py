@@ -368,13 +368,17 @@ def _ordered(
     place(remote_sequence, lambda identity: owners.get(identity) == "remote")
     place(local_sequence, lambda identity: True)
     place(remote_sequence, lambda identity: True)
-    ordered = _in_chosen_order(ordered, owners, {"local": local_sequence, "remote": remote_sequence})
-    return [(identity, node_of[identity]) for identity in ordered]
+    chosen_order = _in_chosen_order(ordered, owners, {"local": local_sequence, "remote": remote_sequence})
+    if chosen_order is None:
+        # Placement put a settled side's bindings where they cannot read in that side's order. That is not a result to
+        # publish silently, so the array stays one conflict.
+        return None
+    return [(identity, node_of[identity]) for identity in chosen_order]
 
 
 def _in_chosen_order(
     ordered: list[ElementId], owners: dict[ElementId, str], sequences: dict[str, list[ElementId]]
-) -> list[ElementId]:
+) -> list[ElementId] | None:
     """Each settled side's bindings put into that side's order, inside the places they already hold.
 
     Placement already follows the chosen side, so this changes nothing when placement is right; it is the guarantee
@@ -385,9 +389,10 @@ def _in_chosen_order(
         members = {identity for identity, owner in owners.items() if owner == side}
         places = [index for index, identity in enumerate(result) if identity in members]
         wanted = [identity for identity in sequence if identity in members]
-        if len(places) == len(wanted):
-            for place, identity in zip(places, wanted, strict=True):
-                result[place] = identity
+        if len(places) != len(wanted):
+            return None
+        for place, identity in zip(places, wanted, strict=True):
+            result[place] = identity
     return result
 
 

@@ -21,6 +21,7 @@ from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.advice import Advice
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
+from syncintosh.core.content_merge import RENDER_REFUSED
 from syncintosh.core.errors import SecretScanError
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
@@ -706,3 +707,68 @@ def test_a_reordered_binding_group_settles_in_one_resolve_and_both_machines_conv
     assert _read(b, KEYBINDINGS).index(b"terminal.clear") < _read(b, KEYBINDINGS).index(b"b.extra")
     _run(a)
     assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
+
+
+def test_a_moved_binding_converges_on_the_other_machine_with_its_notes_above_it(tmp_path, memory_key_store) -> None:
+    # given — two bindings with a note above each; A moves them, B edits the first one's args
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    with_notes = (
+        b'[\n  // note on clear\n  {"key": "cmd+shift+k", "command": "workbench.action.terminal.clear"},\n'
+        b'  // note on navigate\n  {"key": "cmd+alt+left", "command": "-workbench.action.navigateBack"}\n]\n'
+    )
+    _write(a, KEYBINDINGS, with_notes)
+    _run(a)
+    _run(b)
+    _write(
+        a,
+        KEYBINDINGS,
+        with_notes.replace(
+            b'"command": "workbench.action.terminal.clear"},', b'"command": "workbench.action.terminal.clear"},', 1
+        ),
+    )
+    moved_by_a = (
+        b'[\n  // note on navigate\n  {"key": "cmd+alt+left", "command": "-workbench.action.navigateBack"},\n'
+        b'  // note on clear\n  {"key": "cmd+shift+k", "command": "workbench.action.terminal.clear"}\n]\n'
+    )
+    _write(a, KEYBINDINGS, moved_by_a)
+    _run(a)
+    _write(
+        b,
+        KEYBINDINGS,
+        with_notes.replace(
+            b'"command": "workbench.action.terminal.clear"}',
+            b'"command": "workbench.action.terminal.clear", "args": {"x": 1}}',
+        ),
+    )
+
+    # when
+    report = _run(b)
+
+    # then — no conflict; B has A's order, each note still directly above its binding, and B's own edit
+    text = _read(b, KEYBINDINGS)
+    assert report.has_conflicts is False
+    assert b'// note on navigate\n  {"key": "cmd+alt+left"' in text
+    assert b'// note on clear\n  {"key": "cmd+shift+k"' in text
+    assert text.index(b"navigateBack") < text.index(b"terminal.clear")
+    assert b'"args": {"x": 1}' in text
+    _run(a)
+    assert _read(a, KEYBINDINGS) == text
+
+
+def test_a_removed_note_bearing_element_of_a_rule_less_array_stays_a_conflict_with_its_reason(
+    tmp_path, memory_key_store
+) -> None:
+    # given — A removes the element of `editor.rulers` that carries a note; B edits an unrelated setting
+    rulers = b'{\n  "editor.fontSize": 13,\n  "editor.rulers": [\n    80, // pep8\n    120\n  ]\n}\n'
+    a, b = _pair(tmp_path, memory_key_store, rulers)
+    _write(a, SETTINGS, b'{\n  "editor.fontSize": 13,\n  "editor.rulers": [\n    120\n  ]\n}\n')
+    _run(a)
+    _write(b, SETTINGS, rulers.replace(b"13", b"14"))
+
+    # when
+    report = _run(b)
+
+    # then — a conflict, and the reason is said; nothing is published over B's file
+    assert report.has_conflicts is True
+    assert RENDER_REFUSED in report.conflicts[0].detail
+    assert b"pep8" in _read(b, SETTINGS)

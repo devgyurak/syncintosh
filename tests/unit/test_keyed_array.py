@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.core.diff import changed_addresses
@@ -18,7 +18,7 @@ from syncintosh.core.keyed_array import (
 )
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.resolution import Side
-from syncintosh.core.tree import ABSENT, Array, Node, Tree, element_label, tree_from_value
+from syncintosh.core.tree import ABSENT, Array, ElementId, Node, Tree, element_label, tree_from_value
 
 # The rule a VS Code `keybindings.json` declares: an element is its key, command and when; the key and
 # the command must be present; the group is the (key, when) pair a binding is bound under.
@@ -626,16 +626,18 @@ def test_a_proposal_keeps_the_key_order_of_the_binding_it_replaces() -> None:
     assert list(_plain(result.merged)[0]) == ["key", "command", "args"]
 
 
-def test_a_when_clause_is_labelled_by_a_digest_so_its_text_is_not_printed() -> None:
+def test_a_when_clause_is_labelled_hidden_without_a_tagger_and_by_its_tag_with_one() -> None:
     # given
     element = (("key", "ctrl+k"), ("when", "resourcePath =~ /corp\\.internal/"))
 
     # when
-    label = element_label(element)
+    hidden = element_label(element)
+    tagged = element_label(element, when_tag=lambda text: "tag-7")
 
-    # then
-    assert "corp" not in label
-    assert label.startswith('[key="ctrl+k", when=sha256:')
+    # then — the clause's text never shows; the key shows
+    assert hidden == '[key="ctrl+k", when=(hidden)]'
+    assert tagged == '[key="ctrl+k", when=tag-7]'
+    assert "corp" not in hidden and "corp" not in tagged
 
 
 def test_group_leaves_indexes_each_group_once_with_its_own_bindings() -> None:
@@ -810,3 +812,77 @@ def test_a_group_settled_to_a_side_reads_exactly_as_that_side_had_it(data: st.Da
     chosen = local_bindings if pick == "local" else remote_bindings
     assert result.conflicts == ()
     assert _plain(result.merged) == chosen
+
+
+_TWO_GROUP_POOL = [("ctrl+k", "p"), ("ctrl+k", "q"), ("ctrl+m", "r"), ("ctrl+m", "s"), ("ctrl+z", "t")]
+
+
+@st.composite
+def _two_group_side(draw: st.DrawFn, base: list[tuple[str, str]]) -> list[dict[str, object]]:
+    """A side over several groups: some base bindings, in a random order, with random args."""
+    chosen = draw(st.lists(st.sampled_from(base), unique=True, max_size=len(base)))
+    order = draw(st.permutations(chosen))
+    args = draw(st.lists(st.sampled_from([None, 1]), min_size=len(order), max_size=len(order)))
+    sides: list[dict[str, object]] = []
+    for (key, command), value in zip(order, args, strict=True):
+        binding: dict[str, object] = {"key": key, "command": command}
+        if value is not None:
+            binding["args"] = value
+        sides.append(binding)
+    return sides
+
+
+@settings(max_examples=600, deadline=None)
+@given(data=st.data())
+def test_settled_groups_read_in_their_chosen_side_order_with_several_groups(data: st.DataObject) -> None:
+    # given — several groups; the ones both sides changed differently are settled to a side picked at random
+    base_pairs: list[tuple[str, str]] = data.draw(
+        st.lists(st.sampled_from(_TWO_GROUP_POOL), unique=True, min_size=2, max_size=len(_TWO_GROUP_POOL))
+    )
+    base_bindings = [_binding(key, command) for key, command in base_pairs]
+    local_bindings = data.draw(_two_group_side(base_pairs))
+    remote_bindings = data.draw(_two_group_side(base_pairs))
+    base, local, remote = _array(list(base_bindings)), _array(list(local_bindings)), _array(list(remote_bindings))
+    keys = sorted({key for key, _ in base_pairs})
+    picks: dict[ElementId, Side | Array] = {
+        _group(key): data.draw(st.sampled_from(("local", "remote"))) for key in keys
+    }
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks=picks)
+
+    # then — no conflict is left, and each group both sides changed reads in the order of its picked side
+    assume(result is not None)
+    assert result is not None
+    merged = _plain(result.merged)
+    assert result.conflicts == ()
+    assert _misordered_groups(base_bindings, local_bindings, remote_bindings, picks, merged, keys) == []
+
+
+def _group(key: str) -> ElementId:
+    """The group identity of the bindings under one key, with no `when` clause."""
+    return (("key", key), ("when", None))
+
+
+def _misordered_groups(
+    base_bindings: list[dict[str, object]],
+    local_bindings: list[dict[str, object]],
+    remote_bindings: list[dict[str, object]],
+    picks: dict[ElementId, Side | Array],
+    merged: list[dict[str, object]],
+    keys: list[str],
+) -> list[str]:
+    """Keys of the groups both sides changed differently whose merged order is not their picked side's."""
+
+    def group_of(bindings: list[dict[str, object]], key: str) -> list[dict[str, object]]:
+        return [binding for binding in bindings if binding["key"] == key]
+
+    both_changed = [
+        key
+        for key in keys
+        if group_of(local_bindings, key) != group_of(base_bindings, key)
+        and group_of(remote_bindings, key) != group_of(base_bindings, key)
+        and group_of(local_bindings, key) != group_of(remote_bindings, key)
+    ]
+    picked = {key: local_bindings if picks[_group(key)] == "local" else remote_bindings for key in both_changed}
+    return [key for key in both_changed if group_of(merged, key) != group_of(picked[key], key)]

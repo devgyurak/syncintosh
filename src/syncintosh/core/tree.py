@@ -24,12 +24,14 @@ Three shapes keep a flat map honest:
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
+
+if TYPE_CHECKING:
+    from syncintosh.core.ports import WhenTag
 
 # A key path is a tuple of object keys; an array contributes no segment because it is compared
 # whole. The empty tuple is the document root.
@@ -198,7 +200,7 @@ def _to_node(value: object) -> Node:
     return scalar(value)
 
 
-def path_label(path: KeyPath, element: ElementId | None = None) -> str:
+def path_label(path: KeyPath, element: ElementId | None = None, *, when_tag: WhenTag | None = None) -> str:
     """A key path as a person reads it, so two different paths never print the same string.
 
     A settings file spells a flat setting `"editor.fontSize"` — one key whose *name* contains a dot
@@ -212,28 +214,30 @@ def path_label(path: KeyPath, element: ElementId | None = None) -> str:
     two bindings under the same path apart.
     """
     label = _path_text(path)
-    return label if element is None else f"{label} {element_label(element)}"
+    return label if element is None else f"{label} {element_label(element, when_tag=when_tag)}"
 
 
-def element_label(element: ElementId, *, when_text: bool = False) -> str:
-    """An array element's identity as `[key="…", when=sha256:…]`.
+def element_label(element: ElementId, *, when_tag: WhenTag | None = None, when_text: bool = False) -> str:
+    """An array element's identity as `[key="…", when=<tag>]`.
 
-    A `when` clause is shown as a short digest by default: it can name an internal project or host, and a
-    conflict prints in logs and pending state. The digest still tells two bindings under one key apart. Only a
-    caller that sends the label to a model that masks it asks for the text (`when_text=True`); the digest is not
-    a safe thing to send, because a short predictable value can be guessed and confirmed against it. A missing
-    optional field prints as `(missing)`, which is not the same as `""`, so the two cannot be confused in a prompt.
+    A `when` clause is never printed as its text: it can name an internal project or host, and a conflict reaches logs,
+    pending state and the terminal. With a `when_tag` (a keyed tag of this machine, from the port) the clause shows as
+    that tag, so two bindings under one key still tell apart; without one it shows as `(hidden)`. Only a caller whose
+    text goes to a masking model asks for the text itself (`when_text=True`). A missing optional field prints as
+    `(missing)`, which is not the same as `""`, so the two cannot be confused in a prompt.
     """
-    shown = [f"{field}={_value_text(field, value, when_text)}" for field, value in element]
+    shown = [f"{field}={_value_text(field, value, when_tag, when_text)}" for field, value in element]
     return f"[{', '.join(shown)}]"
 
 
-def _value_text(field: str, value: str | None, when_text: bool) -> str:
+def _value_text(field: str, value: str | None, when_tag: WhenTag | None, when_text: bool) -> str:
     if value is None:
         return "(missing)"
-    if field == "when" and not when_text:
-        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-    return json.dumps(value, ensure_ascii=False)
+    if field != "when":
+        return json.dumps(value, ensure_ascii=False)
+    if when_text:
+        return json.dumps(value, ensure_ascii=False)
+    return "(hidden)" if when_tag is None else when_tag(value)
 
 
 def _path_text(path: KeyPath) -> str:

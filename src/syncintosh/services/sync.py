@@ -71,6 +71,7 @@ from syncintosh.core.ports import (
     SecretScanner,
     SyncLock,
     SyntaxValidator,
+    WhenTag,
     remote_ref,
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
@@ -195,6 +196,8 @@ class _Presets:
     catalog: PresetCatalog
     adapters: Mapping[FileFormat, ContentAdapter]
     validators: Mapping[ValidatorName, SyntaxValidator]
+    # The keyed tag a conflict names a `when` clause by; `None` shows it as hidden (`core/tree.py`).
+    when_tag: WhenTag | None = None
 
     def policy_for(self, path: str) -> PresetFile | None:
         """The strip/validate policy for `path`, or `None` when no preset owns it."""
@@ -823,7 +826,9 @@ def _collect_first_sight(
     state.collected.append(item.path)
 
 
-def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str, why: str = "") -> str:
+def _content_detail(
+    addresses: tuple[ConflictAddress, ...], reason: str, why: str = "", when_tag: WhenTag | None = None
+) -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
     A binding is named by its `key` and `when` (its group): those are the structure a person picks by, while
@@ -834,7 +839,7 @@ def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str, why: st
     (`"a.b"` as one key against `a` → `b`) do not print the same string. A conflict on one binding of
     an identified array names that binding too. The same label is what the `merge` command prints.
     """
-    named = dict.fromkeys(path_label(path, element) for path, element in addresses)
+    named = dict.fromkeys(path_label(path, element, when_tag=when_tag) for path, element in addresses)
     detail = reason if not named else f"{reason}: {', '.join(named)}"
     # A refusal the adapter gave (its fixed text) is said, so the person knows why no pick would settle it.
     return f"{detail} ({why})" if why else detail
@@ -855,7 +860,8 @@ class Resolution:
     reruns; every rerun answers at least one conflict the run had not answered before.
     """
 
-    picks: Picks = MappingProxyType({})
+    # Keyed by fingerprint, which identifies a conflict's values: a repr shows neither the keys nor the picks.
+    picks: Picks = field(default=MappingProxyType({}), repr=False)
     decide: Decide | None = None
     resolving: bool = False
     rounds: int = 0
@@ -1151,7 +1157,8 @@ def _settle_content(
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
     views = _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses)
-    return _Settled(data=None, detail=_content_detail(merged.conflict_addresses, reason, merged.reason), views=views)
+    detail = _content_detail(merged.conflict_addresses, reason, merged.reason, presets.when_tag)
+    return _Settled(data=None, detail=detail, views=views)
 
 
 def _record_fingerprint(conflict: RecordConflict) -> str:
@@ -1952,13 +1959,14 @@ def sync(
     adopt: AdoptChoice | None = None,
     resolving: bool = False,
     decide: Decide | None = None,
+    when_tag: WhenTag | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
 
     `resolving` runs the cycle that `resolve` settles a pending state with; `decide` answers the
     conflicts that cycle finds (see `Resolution`). A plain sync passes neither.
     """
-    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
+    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators, when_tag=when_tag)
     lock.acquire()
     try:
         if resolving:

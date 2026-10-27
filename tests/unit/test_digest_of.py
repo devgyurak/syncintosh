@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 from syncintosh.core.resolution import digest_of, fingerprint
 from syncintosh.core.tree import ABSENT, Array, Object, Scalar, Tree
 
@@ -83,3 +87,24 @@ def test_a_tuple_and_a_list_with_the_same_members_digest_differently() -> None:
 def test_bytes_and_their_text_digest_differently() -> None:
     # when & then
     assert digest_of(b"abc") != digest_of("abc")
+
+
+def test_a_digest_is_the_same_under_every_hash_seed() -> None:
+    # given — a mapping and a set, whose iteration order is the one that depends on hashing
+    script = (
+        "from syncintosh.core.resolution import digest_of\n"
+        "print(digest_of({'a': 1, 'b': [2, 3], 'c': {'d', 'e', 'f'}}))\n"
+    )
+    digests = {
+        seed: subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in range(6)
+    }
+
+    # when & then — the same value digests the same in every process
+    assert len(set(digests.values())) == 1

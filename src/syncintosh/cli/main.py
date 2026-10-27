@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 
 from syncintosh.core.errors import DomainError
+from syncintosh.core.ports import WhenTag
 from syncintosh.core.tree import path_label
 from syncintosh.core.watch import DEFAULT_QUIET_SECONDS
 from syncintosh.services import SyncReport
@@ -403,6 +404,14 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     _render_diff(report, values=values)
 
 
+def _when_tag() -> WhenTag | None:
+    """This machine's keyed tag for a `when` clause, or `None` when no key exists yet (it is never created here)."""
+    from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.scan_allow import keyed_when_tag
+
+    return keyed_when_tag(MachinePaths.default().scan_allow_file)
+
+
 def _render_diff(report, *, values: bool) -> None:
     """Render a `DiffReport`; nothing here decides *what* differs (``AGENTS.md`` §2.3)."""
     import difflib
@@ -412,7 +421,7 @@ def _render_diff(report, *, values: bool) -> None:
         return
     _say(report.source)
     for entry in report.entries:
-        keys = ", ".join(path_label(path, element) for path, element in entry.addresses)
+        keys = ", ".join(path_label(path, element, when_tag=_when_tag()) for path, element in entry.addresses)
         suffix = f" [{keys}]" if keys else ""
         _say(f"{entry.status}: {entry.path}{suffix}")
     if not values:
@@ -471,7 +480,7 @@ def merge(
         for conflict in result.conflicts:
             # The same label the pending-conflict detail uses; an array at the root —
             # `keybindings.json` — is compared whole, so the document itself is the conflict.
-            typer.echo(f"conflict: {path_label(conflict.path, conflict.element)}", err=True)
+            typer.echo(f"conflict: {path_label(conflict.path, conflict.element, when_tag=_when_tag())}", err=True)
         if result.reason:
             # The render refused: say why, so a person knows what would have to change to merge this file.
             typer.echo(f"not merged: {result.reason}", err=True)
@@ -689,7 +698,7 @@ def _present_suggestion(suggestion: Suggestion) -> bool:
     console = Console()
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path, view.element))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=_when_tag()))}"
     console.print(heading)
     console.print(f"  model: {escape(suggestion.rationale)}")
     if suggestion.refused is not None:
@@ -731,7 +740,7 @@ def _show_conflict(console: Console, view: ConflictView) -> None:
 
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path, view.element))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=_when_tag()))}"
     console.print(heading)
     if view.kind == "key":
         console.print(f"  base    {escape(view.base_text)}")
@@ -770,7 +779,7 @@ def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
 
     place = f"  {view.path}  {view.kind}"
     if view.key_path is not None:
-        place += f"  key {path_label(view.key_path, view.element)}"
+        place += f"  key {path_label(view.key_path, view.element, when_tag=_when_tag())}"
     if not isinstance(pick, Proposal):
         return [f"{place}  ->  {pick}"]
     if view.kind == "file":
@@ -799,7 +808,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.lock import FileLock
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.repo_files import FileRepo
-    from syncintosh.system.scan_allow import load_scan_allow
+    from syncintosh.system.scan_allow import keyed_when_tag, load_scan_allow
     from syncintosh.system.secret_scan import PatternSecretScanner
     from syncintosh.vcs.git import GitCLITransport
 
@@ -832,6 +841,7 @@ def _sync_ports(config, paths) -> dict:
         "config": config,
         "home": str(paths.home),
         "branch": transport.branch() or BRANCH,
+        "when_tag": keyed_when_tag(paths.scan_allow_file),
     }
 
 

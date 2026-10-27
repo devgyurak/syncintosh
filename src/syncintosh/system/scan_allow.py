@@ -34,14 +34,18 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
 from syncintosh.core.errors import ScanAllowCorrupt
+from syncintosh.core.ports import WhenTag
 
 # The allowlist format version. Serialized verbatim, so a plain `int` constant, never an `Enum`.
 ALLOW_VERSION: Final = 1
+
+# How much of an HMAC tag of a `when` clause is shown: enough to tell two bindings under one key apart.
+WHEN_TAG_HEX_LEN = 12
 
 # 128 bits of HMAC-SHA256 as lowercase hex. The value is copied from a refusal message into
 # `scan allow`, so it is kept short; a collision inside one machine's list is negligible and would
@@ -82,7 +86,7 @@ class ScanAllowEntry:
 
     path: str
     label: str
-    fingerprint: str
+    fingerprint: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not self.path:
@@ -244,3 +248,41 @@ __all__ = [
     "new_scan_allow",
     "save_scan_allow",
 ]
+
+
+def keyed_when_tag(path: Path) -> WhenTag | None:
+    """A tagger for `when` clauses, keyed with this machine's scan key, or `None` when no key exists yet.
+
+    The key is read but never created here: a caller that only shows a diff must not write the allowlist. Without a key
+    there is nothing to tag with, so the caller falls back to the hidden form. The tag is an HMAC under a domain label,
+    so it cannot be confused with a scan fingerprint, and without the key it is not a guessable digest of the text.
+    """
+    key = _read_key(path)
+    if key is None:
+        return None
+
+    def tag(text: str) -> str:
+        return hmac.new(key, b"when\x00" + text.encode("utf-8"), hashlib.sha256).hexdigest()[:WHEN_TAG_HEX_LEN]
+
+    return tag
+
+
+def _read_key(path: Path) -> bytes | None:
+    """The stored per-machine key, or `None` when the allowlist does not exist yet. Never creates the file."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
+    try:
+        parsed: Any = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ScanAllowCorrupt(f"the scan allowlist {path} is not valid JSON: {exc}") from exc
+    key_raw = parsed.get("key") if isinstance(parsed, dict) else None
+    if not isinstance(key_raw, str):
+        raise ScanAllowCorrupt(f"the scan allowlist {path} has no key")
+    try:
+        return bytes.fromhex(key_raw)
+    except ValueError as exc:
+        raise ScanAllowCorrupt(f"the scan allowlist {path} has a malformed key") from exc

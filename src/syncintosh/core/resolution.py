@@ -63,7 +63,8 @@ class _Text:
 
 def _encode(value: object) -> str:
     """The structural encoding of `value`, built with an explicit stack so a deeply nested value cannot exhaust
-    the recursion limit.
+    the recursion limit. Only a mapping key and a set member are encoded by a nested call, and only for their own
+    shape: a value's nesting never adds a level of recursion.
 
     Each container is written with its kind and its delimiters, mapping keys and set members are written in sorted
     order, and each scalar is written with its type name, so `1`, `1.0`, `"1"` and `True` all differ.
@@ -82,12 +83,13 @@ def _encode(value: object) -> str:
                 stack.append(getattr(item, field_.name))
                 stack.append(_Text(f"{field_.name}="))
         elif isinstance(item, Mapping):
-            pairs = sorted(item.items(), key=lambda pair: _encode(pair[0]))
+            # Each key is encoded once, for its order and its text; a key is a name, so its encoding is shallow.
+            keyed = sorted(((_encode(key), child) for key, child in item.items()), key=lambda pair: pair[0])
             parts.append("{")
             stack.append(_Text("}"))
-            for key, child in reversed(pairs):
+            for key_text, child in reversed(keyed):
                 stack.append(child)
-                stack.append(_Text(f"{_encode(key)}:"))
+                stack.append(_Text(f"{key_text}:"))
         elif isinstance(item, (tuple, list)):
             parts.append(f"{type(item).__name__}[")
             stack.append(_Text("]"))

@@ -11,7 +11,8 @@ from syncintosh.core.models import Conflict, TextMerge, TreeMerge
 from syncintosh.core.tree import ABSENT, Array, EmptyObject, Object, Scalar, Tree
 from syncintosh.services.diff import FileDiff
 from syncintosh.services.merge_service import RenderedMerge
-from syncintosh.services.sync import _Collect, _Projected, _Settled
+from syncintosh.services.sync import Resolution, _Collect, _Projected, _Settled
+from syncintosh.system.scan_allow import ScanAllowEntry
 
 SECRET = "SECRET-PLAINTEXT-XYZ"
 
@@ -34,6 +35,8 @@ def _leaves() -> list[object]:
         _Collect(contents={"f": SECRET.encode()}, views={"f": SECRET.encode()}, seen={"f": SECRET.encode()}),
         _Projected(raw=SECRET.encode(), view=SECRET.encode(), failure=None),
         RenderedMerge(text=SECRET, conflicts=(), conflicted=False),
+        Resolution(picks={"f" * 64: "local"}),
+        ScanAllowEntry(path="p", label="URL with credentials", fingerprint="f" * 32),
         _Settled(data=SECRET.encode(), detail="d", views=()),
         Conflict(
             path=("k",),
@@ -57,3 +60,14 @@ def test_a_repr_never_shows_the_plaintext(value) -> None:
 def test_an_absent_leaf_still_prints_as_absent() -> None:
     # when & then
     assert repr(ABSENT) == "ABSENT"
+
+
+def test_a_fingerprint_is_never_in_a_repr() -> None:
+    # given — a pick keyed by a fingerprint, and an allowlist entry holding one
+    fingerprint = "9f2c" * 16
+    resolution = Resolution(picks={fingerprint: "local"})
+    entry = ScanAllowEntry(path="p", label="URL with credentials", fingerprint=fingerprint[:32])
+
+    # when & then — neither repr shows the fingerprint that identifies a conflict or a span
+    assert fingerprint not in repr(resolution)
+    assert fingerprint[:32] not in repr(entry)
