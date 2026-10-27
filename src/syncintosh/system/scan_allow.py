@@ -206,7 +206,8 @@ def read_scan_allow(path: Path) -> ScanAllow | None:
         raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
     try:
         parsed: Any = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is a ValueError, and so is the error for an integer with too many digits to convert.
         raise ScanAllowCorrupt(f"the scan allowlist {path} is not valid JSON: {exc}") from exc
     except RecursionError as exc:
         # Nesting deeper than the parser can follow is refused like any other corruption, never a crash of a display.

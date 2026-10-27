@@ -26,6 +26,7 @@ _UNUSABLE = {
     "not JSON": "{ nope",
     "key too short": json.dumps({"version": ALLOW_VERSION, "key": "ab", "entries": []}),
     "unknown version": json.dumps({"version": ALLOW_VERSION + 1, "key": "00" * KEY_BYTES, "entries": []}),
+    "integer too long to read": '{"version": 1, "key": "' + "00" * KEY_BYTES + '", "entries": ' + "1" * 5000 + "}",
     "nested too deeply": '{"version": 1, "key": "'
     + "00" * KEY_BYTES
     + '", "entries": '
