@@ -60,16 +60,18 @@ def test_an_added_element_goes_after_the_kept_ones_and_their_comments_stay() -> 
     )
 
 
-def test_removing_a_binding_that_carries_a_same_line_comment_is_refused() -> None:
+def test_removing_a_binding_takes_its_same_line_comment_with_it() -> None:
     # given — the `// drop me` note is on the removed binding's own line
     template = (
         '[\n    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }, // drop me\n'
         '    { "key": "c", "command": "z" }\n]'
     )
 
-    # when & then — a comment is never deleted silently; the merge becomes a conflict
-    with pytest.raises(ContentParseError):
-        _render(template, [_a("x"), _c("z")])
+    # when
+    rendered = _render(template, [_a("x"), _c("z")])
+
+    # then — the binding and its own note go; the others keep theirs
+    assert rendered == '[\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
 
 
 def test_removing_the_last_element_drops_the_comma_its_predecessor_was_left_with() -> None:
@@ -195,13 +197,32 @@ def test_a_comment_above_a_removed_element_stays_where_it_is() -> None:
     assert rendered == '[\n    // why x\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
 
 
-def test_an_inline_comment_on_a_removed_element_refuses_rather_than_moving_onto_its_replacement() -> None:
+def test_an_inline_comment_on_a_removed_element_goes_with_it_and_never_moves_onto_its_replacement() -> None:
     # given
     template = '[\n    { "key": "a", "command": "x" }, // inline why\n    { "key": "c", "command": "z" }\n]'
 
-    # when & then
-    with pytest.raises(ContentParseError):
-        _render(template, [_b("y"), _c("z")])
+    # when
+    rendered = _render(template, [_b("y"), _c("z")])
+
+    # then
+    assert "inline why" not in rendered
+    assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _c("z")])
+
+
+def test_a_moved_binding_keeps_its_own_comments_and_its_text() -> None:
+    # given — the remote moved `b` ahead of `a`; both carry a note, and `b` has an inline note too
+    template = (
+        '[\n    // note on a\n    { "key": "a", "command": "x" },\n'
+        '    // note on b\n    { "key": "b", "command": "y" }, // b inline\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_b("y"), _a("x"), _c("z")])
+
+    # then — it parses to the moved order, and every note is still there
+    assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x"), _c("z")])
+    assert all(note in rendered for note in ("// note on a", "// note on b", "// b inline"))
 
 
 def test_a_changed_binding_keeps_its_inline_comment() -> None:
@@ -261,14 +282,16 @@ def test_a_group_with_several_bindings_on_each_side_pairs_them_in_order() -> Non
 
 
 def test_the_rendered_bytes_do_not_depend_on_the_hash_seed() -> None:
-    # given — several groups change in one array, so the order groups are visited in could show
+    # given — several groups change in one array, with notes and a reorder, visited in a hash-dependent order
     script = (
         "from syncintosh.adapters.jsonc import JsoncAdapter\n"
         "from syncintosh.core.keyed_array import ArrayRule\n"
         "from syncintosh.core.tree import tree_from_value\n"
         "rule = ArrayRule.create(identity=('key','command','when'), required=('key','command'), group=('key','when'))\n"
-        'template = \'[\\n  {"key": "a", "command": "x"},\\n  {"key": "b", "command": "y"},\\n\''
-        ' \'  {"key": "c", "command": "z"},\\n  {"key": "d", "command": "w"}\\n]\'\n'
+        'template = (\'[\\n  // n-a\\n  {"key": "a", "command": "x"}, // ia\\n\'\n'
+        '  \'  // n-b\\n  {"key": "b", "command": "y"},\\n\'\n'
+        '  \'  // n-c\\n  {"key": "c", "command": "z"},\\n\'\n'
+        '  \'  {"key": "d", "command": "w"}\\n]\')\n'
         "value = [{'key': 'd', 'command': 'w2'}, {'key': 'a', 'command': 'x2'}, {'key': 'c', 'command': 'z2'},"
         " {'key': 'b', 'command': 'y2'}]\n"
         "print(JsoncAdapter().render(tree_from_value(value), template, {(): rule}))\n"
@@ -288,35 +311,7 @@ def test_the_rendered_bytes_do_not_depend_on_the_hash_seed() -> None:
     assert len(set(outputs.values())) == 1
 
 
-# --- property: on the identity path, a render parses back exactly or refuses, and no note is ever dropped ----------
-
 _POOL = [("a", "x"), ("a", "y"), ("b", "x"), ("c", "z"), ("d", "w"), ("e", "v")]
-
-
-@st.composite
-def _binding_case(draw: st.DrawFn) -> tuple[str, list[tuple[str, str]], list[dict[str, object]]]:
-    """A keybindings-shaped template, each binding under its own note, and a random merged target over the same pool."""
-    base = draw(st.lists(st.sampled_from(_POOL), unique=True, min_size=1, max_size=5))
-    target = draw(
-        st.lists(
-            st.tuples(st.sampled_from(_POOL), st.sampled_from([None, 1])),
-            unique_by=lambda item: item[0],
-            max_size=5,
-        )
-    )
-    lines = ["["]
-    for index, (key, command) in enumerate(base):
-        lines.append(f"    // note {index}")
-        comma = "," if index < len(base) - 1 else ""
-        lines.append(f'    {{"key": "{key}", "command": "{command}"}}{comma}')
-    lines.append("]")
-    value: list[dict[str, object]] = []
-    for (key, command), args in target:
-        binding: dict[str, object] = {"key": key, "command": command}
-        if args is not None:
-            binding["args"] = args
-        value.append(binding)
-    return "\n".join(lines), base, value
 
 
 def _try_render(template: str, value: list[dict[str, object]]) -> str | None:
@@ -327,7 +322,31 @@ def _try_render(template: str, value: list[dict[str, object]]) -> str | None:
         return None
 
 
-@given(case=_binding_case())
+@st.composite
+def _notes_case(draw: st.DrawFn) -> tuple[str, list[tuple[str, str]], list[dict[str, object]]]:
+    """A keybindings template with notes above, beside, and inside each binding; a random reordered merged target."""
+    base = draw(st.lists(st.sampled_from(_POOL), unique=True, min_size=1, max_size=5))
+    with_inline = draw(st.lists(st.booleans(), min_size=len(base), max_size=len(base)))
+    lines = ["["]
+    for index, (key, command) in enumerate(base):
+        lines.append(f"    // note {index}")
+        comma = "," if index < len(base) - 1 else ""
+        inline = f" // inl {index}" if with_inline[index] else ""
+        lines.append(f'    {{"key": "{key}", /* in {index} */ "command": "{command}"}}{comma}{inline}')
+    lines.append("]")
+    chosen = draw(st.lists(st.sampled_from(base), unique=True, max_size=5))
+    order = draw(st.permutations(chosen)) if chosen else []
+    changed = draw(st.lists(st.booleans(), min_size=len(order), max_size=len(order)))
+    value: list[dict[str, object]] = []
+    for (key, command), change in zip(order, changed, strict=True):
+        binding: dict[str, object] = {"key": key, "command": command}
+        if change:
+            binding["args"] = 1
+        value.append(binding)
+    return "\n".join(lines), base, value
+
+
+@given(case=_notes_case())
 def test_a_keyed_render_parses_back_exactly_or_refuses(case: tuple[str, list[tuple[str, str]], list[dict]]) -> None:
     # given
     template, _, value = case
@@ -339,14 +358,31 @@ def test_a_keyed_render_parses_back_exactly_or_refuses(case: tuple[str, list[tup
     assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(value)
 
 
-@given(case=_binding_case())
-def test_a_keyed_render_never_drops_a_note_above_a_binding(case: tuple[str, list[tuple[str, str]], list[dict]]) -> None:
+def _inner_notes_lost(index: int, rendered: str, template: str) -> bool:
+    """True when a binding's inner note, or its inline note, is in the template but gone from the render."""
+    inline_present = f"// inl {index}" in template
+    return f"/* in {index} */" not in rendered or (inline_present and f"// inl {index}" not in rendered)
+
+
+@given(case=_notes_case())
+def test_a_note_above_a_binding_is_never_dropped_and_an_unchanged_binding_keeps_its_notes(
+    case: tuple[str, list[tuple[str, str]], list[dict]],
+) -> None:
     # given
     template, base, value = case
 
     # when
     rendered = _try_render(template, value)
 
-    # then — a note stays with the array, whichever binding it sat above; nothing is removed silently
-    missing = [index for index in range(len(base)) if rendered is not None and f"// note {index}" not in rendered]
-    assert missing == []
+    # then — a note above any binding stays with the array; an unchanged binding keeps its inner and inline notes
+    unchanged = {f"{binding['key']}/{binding['command']}" for binding in value if "args" not in binding}
+    rendered_ok = rendered is not None
+    text = "" if rendered is None else rendered
+    dropped_above = [index for index in range(len(base)) if rendered_ok and f"// note {index}" not in text]
+    lost_inside = [
+        index
+        for index, (key, command) in enumerate(base)
+        if rendered_ok and f"{key}/{command}" in unchanged and _inner_notes_lost(index, text, template)
+    ]
+    assert dropped_above == []
+    assert lost_inside == []

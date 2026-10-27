@@ -49,26 +49,59 @@ def digest_of(value: object) -> str:
     hide a value (a setting's text is kept out of it on purpose), and then two different conflicts would share one
     fingerprint, and a pick made for one would settle the other.
     """
-    return hashlib.sha256(repr(_canonical(value)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_encode(value).encode("utf-8")).hexdigest()
 
 
-def _canonical(value: object) -> object:
-    """A structural form of a value that keeps every field, every element and every kind."""
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return (
-            type(value).__name__,
-            tuple((item.name, _canonical(getattr(value, item.name))) for item in dataclasses.fields(value)),
-        )
-    if isinstance(value, Mapping):
-        items = sorted(((repr(_canonical(key)), _canonical(item)) for key, item in value.items()), key=lambda p: p[0])
-        return ("map", tuple(items))
-    if isinstance(value, (tuple, list)):
-        return (type(value).__name__, tuple(_canonical(item) for item in value))
-    if isinstance(value, (set, frozenset)):
-        return ("set", tuple(sorted(repr(_canonical(item)) for item in value)))
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    return (type(value).__name__, repr(value))
+class _Text:
+    """A literal piece of an encoding: a token, not a value, so the encoder never recurses into it."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _encode(value: object) -> str:
+    """The structural encoding of `value`, built with an explicit stack so a deeply nested value cannot exhaust
+    the recursion limit.
+
+    Each container is written with its kind and its delimiters, mapping keys and set members are written in sorted
+    order, and each scalar is written with its type name, so `1`, `1.0`, `"1"` and `True` all differ.
+    """
+    parts: list[str] = []
+    stack: list[object] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, _Text):
+            parts.append(item.text)
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            fields = dataclasses.fields(item)
+            parts.append(f"<{type(item).__name__}:")
+            stack.append(_Text(">"))
+            for field_ in reversed(fields):
+                stack.append(getattr(item, field_.name))
+                stack.append(_Text(f"{field_.name}="))
+        elif isinstance(item, Mapping):
+            pairs = sorted(item.items(), key=lambda pair: _encode(pair[0]))
+            parts.append("{")
+            stack.append(_Text("}"))
+            for key, child in reversed(pairs):
+                stack.append(child)
+                stack.append(_Text(f"{_encode(key)}:"))
+        elif isinstance(item, (tuple, list)):
+            parts.append(f"{type(item).__name__}[")
+            stack.append(_Text("]"))
+            for child in reversed(item):
+                stack.append(child)
+                stack.append(_Text(","))
+        elif isinstance(item, (set, frozenset)):
+            members = sorted(_encode(member) for member in item)
+            parts.append(f"{type(item).__name__}{{" + ",".join(members) + "}")
+        elif isinstance(item, bytes):
+            parts.append(f"bytes({item.hex()})")
+        else:
+            parts.append(f"{type(item).__name__}({item!r})")
+    return "".join(parts)
 
 
 def fingerprint(file_id: str, key_path: KeyPath | None, base: str, local: str, remote: str) -> str:
@@ -115,7 +148,8 @@ class ConflictView:
     file_id: str
     path: str
     key_path: KeyPath | None
-    fingerprint: str
+    # A fingerprint identifies a conflict for the pick that settles it; a repr shows it only as nothing (AGENTS.md §4).
+    fingerprint: str = field(repr=False)
     local_present: bool = True
     remote_present: bool = True
     # False when a side is not text (a binary file). Such a conflict is never shown to a model, and no text

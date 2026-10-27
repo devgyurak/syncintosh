@@ -116,19 +116,25 @@ def render_merged(
     treats `None` as a conflict rather than writing text that says it is the merge but is not.
     Shared by the byte-level content merge and the `merge` command so the two cannot drift.
     """
-    return _render_checked(adapter, merged, template, arrays)[0]
+    return render_checked(adapter, merged, template, arrays)[0]
 
 
-def _render_checked(
+# The reasons a render can refuse, as fixed texts: a reason that echoed the adapter's message could carry a key name,
+# and a conflict must never show a value (AGENTS.md §4).
+RENDER_REFUSED = "this change cannot be written without losing a comment"
+ROUND_TRIP_REFUSED = "the merged result does not render back to itself"
+
+
+def render_checked(
     adapter: ContentAdapter, merged: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None
 ) -> tuple[str | None, str]:
-    """`render_merged`, with the adapter's own reason when it refuses (a fixed text, never a value)."""
+    """`render_merged`, with a fixed reason when it refuses (never the adapter's own message)."""
     try:
         rendered = adapter.render(merged, template, arrays)
         if adapter.parse(rendered) != merged:
-            return None, "the merged result does not render back to itself"
-    except ContentParseError as exc:
-        return None, str(exc)
+            return None, ROUND_TRIP_REFUSED
+    except ContentParseError:
+        return None, RENDER_REFUSED
     return rendered, ""
 
 
@@ -203,7 +209,7 @@ def _merge_via_adapter(
     )
     if result.has_conflicts:
         return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts)), ""
-    rendered, reason = _render_checked(adapter, result.merged, local_text, arrays)
+    rendered, reason = render_checked(adapter, result.merged, local_text, arrays)
     if rendered is None:
         return None, (), reason
     return rendered, (), ""

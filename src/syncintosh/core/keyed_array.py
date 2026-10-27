@@ -368,7 +368,27 @@ def _ordered(
     place(remote_sequence, lambda identity: owners.get(identity) == "remote")
     place(local_sequence, lambda identity: True)
     place(remote_sequence, lambda identity: True)
+    ordered = _in_chosen_order(ordered, owners, {"local": local_sequence, "remote": remote_sequence})
     return [(identity, node_of[identity]) for identity in ordered]
+
+
+def _in_chosen_order(
+    ordered: list[ElementId], owners: dict[ElementId, str], sequences: dict[str, list[ElementId]]
+) -> list[ElementId]:
+    """Each settled side's bindings put into that side's order, inside the places they already hold.
+
+    Placement already follows the chosen side, so this changes nothing when placement is right; it is the guarantee
+    that a settled group reads in the order its side had, whatever the placement did with the other bindings.
+    """
+    result = list(ordered)
+    for side, sequence in sequences.items():
+        members = {identity for identity, owner in owners.items() if owner == side}
+        places = [index for index, identity in enumerate(result) if identity in members]
+        wanted = [identity for identity in sequence if identity in members]
+        if len(places) == len(wanted):
+            for place, identity in zip(places, wanted, strict=True):
+                result[place] = identity
+    return result
 
 
 def _with_replacement(

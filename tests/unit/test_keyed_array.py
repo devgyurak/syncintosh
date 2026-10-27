@@ -17,6 +17,7 @@ from syncintosh.core.keyed_array import (
     merge_keyed_array,
 )
 from syncintosh.core.merge import merge_tree
+from syncintosh.core.resolution import Side
 from syncintosh.core.tree import ABSENT, Array, Node, Tree, element_label, tree_from_value
 
 # The rule a VS Code `keybindings.json` declares: an element is its key, command and when; the key and
@@ -769,3 +770,43 @@ def test_the_merge_is_the_same_whatever_order_the_identities_are_visited_in() ->
     assert first is not None and second is not None
     assert _plain(first.merged) == _plain(second.merged)
     assert [conflict.element for conflict in first.conflicts] == [conflict.element for conflict in second.conflicts]
+
+
+_SIDE_COMMANDS = ("p", "q", "r", "s")
+
+
+@st.composite
+def _side(draw: st.DrawFn, base: list[str]) -> list[dict[str, object]]:
+    """A side of one `ctrl+k` group: some of the base bindings, in a random order, each with random args."""
+    chosen = draw(st.lists(st.sampled_from(base), unique=True, max_size=len(base)))
+    order = draw(st.permutations(chosen))
+    args = draw(st.lists(st.sampled_from([None, 1]), min_size=len(order), max_size=len(order)))
+    return [
+        _binding("ctrl+k", command, args=value) if value is not None else _binding("ctrl+k", command)
+        for command, value in zip(order, args, strict=True)
+    ]
+
+
+@given(data=st.data())
+def test_a_group_settled_to_a_side_reads_exactly_as_that_side_had_it(data: st.DataObject) -> None:
+    # given — one group, both sides changed it differently, and the person picks one side
+    base_commands: list[str] = data.draw(
+        st.lists(st.sampled_from(list(_SIDE_COMMANDS)), unique=True, min_size=1, max_size=4)
+    )
+    base_bindings = [_binding("ctrl+k", command) for command in base_commands]
+    local_bindings = data.draw(_side(base_commands))
+    remote_bindings = data.draw(_side(base_commands))
+    pick: Side = data.draw(st.sampled_from(("local", "remote")))
+    base, local, remote = _array(list(base_bindings)), _array(list(local_bindings)), _array(list(remote_bindings))
+    group = (("key", "ctrl+k"), ("when", None))
+    assume(local_bindings != remote_bindings and local_bindings != base_bindings and remote_bindings != base_bindings)
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: pick})
+
+    # then — no whole-array conflict and no leftover conflict: the result is the chosen side's group, in its order
+    assume(result is not None)
+    assert result is not None
+    chosen = local_bindings if pick == "local" else remote_bindings
+    assert result.conflicts == ()
+    assert _plain(result.merged) == chosen

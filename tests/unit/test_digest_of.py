@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from syncintosh.core.resolution import digest_of, fingerprint
-from syncintosh.core.tree import ABSENT, Array, Scalar, Tree
+from syncintosh.core.tree import ABSENT, Array, Object, Scalar, Tree
 
 
 def test_two_different_values_at_one_path_have_different_digests() -> None:
@@ -40,3 +40,46 @@ def test_a_fingerprint_of_one_path_changes_when_its_value_does() -> None:
 def test_an_array_and_an_absent_side_have_distinct_digests() -> None:
     # when & then
     assert digest_of(Array((Scalar("str", "a"),))) != digest_of(ABSENT)
+
+
+def _nested_object(depth: int, leaf: str) -> Object:
+    """An object nested `depth` levels deep, ending in a scalar `leaf`; built without recursion."""
+    node: object = Scalar("str", leaf)
+    for _ in range(depth):
+        node = Object((("k", node),))
+    assert isinstance(node, Object)
+    return node
+
+
+def test_a_deeply_nested_value_digests_without_exhausting_the_recursion_limit() -> None:
+    # given — deeper than Python's recursion limit
+    deep = _nested_object(5000, "one")
+
+    # when & then — it digests, and a change at the bottom changes the digest
+    assert digest_of(deep) != digest_of(_nested_object(5000, "two"))
+
+
+def test_one_and_one_point_zero_and_true_and_the_string_one_all_digest_differently() -> None:
+    # when & then — the kind is part of the value
+    scalars = [Scalar("int", 1), Scalar("float", 1.0), Scalar("bool", True), Scalar("str", "1")]
+    assert len({digest_of(scalar) for scalar in scalars}) == 4
+
+
+def test_mapping_key_order_does_not_change_the_digest() -> None:
+    # when & then — a mapping is a set of entries
+    assert digest_of({"a": 1, "b": 2}) == digest_of({"b": 2, "a": 1})
+
+
+def test_set_member_order_does_not_change_the_digest() -> None:
+    # when & then
+    assert digest_of({"x", "y", "z"}) == digest_of({"z", "y", "x"})
+
+
+def test_a_tuple_and_a_list_with_the_same_members_digest_differently() -> None:
+    # when & then
+    assert digest_of((1, 2)) != digest_of([1, 2])
+
+
+def test_bytes_and_their_text_digest_differently() -> None:
+    # when & then
+    assert digest_of(b"abc") != digest_of("abc")

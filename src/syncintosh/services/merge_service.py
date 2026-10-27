@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from syncintosh.core.content_merge import render_merged
+from syncintosh.core.content_merge import render_checked
 from syncintosh.core.merge import IgnorePaths, merge_tree
 from syncintosh.core.models import Conflict
 from syncintosh.core.ports import ContentAdapter, PresetCatalog
@@ -29,6 +29,8 @@ class RenderedMerge:
     text: str = field(repr=False)
     conflicts: tuple[Conflict, ...] = ()
     conflicted: bool = False
+    # Why the render refused, as a fixed text (never a value); empty when it did not refuse.
+    reason: str = ""
 
     @property
     def has_conflicts(self) -> bool:
@@ -60,9 +62,11 @@ def merge_text(
     arrays = None if policy is None else policy.array_rules
     result = merge_tree(base, local, remote, ignore=ignore, keyed=arrays)
     if result.has_conflicts:
-        rendered = render_merged(adapter, result.merged, local_text, arrays)
-        return RenderedMerge(text=local_text if rendered is None else rendered, conflicts=result.conflicts)
-    rendered = render_merged(adapter, result.merged, local_text, arrays)
+        rendered, reason = render_checked(adapter, result.merged, local_text, arrays)
+        return RenderedMerge(
+            text=local_text if rendered is None else rendered, conflicts=result.conflicts, reason=reason
+        )
+    rendered, reason = render_checked(adapter, result.merged, local_text, arrays)
     if rendered is None:
-        return RenderedMerge(text=local_text, conflicted=True)
+        return RenderedMerge(text=local_text, conflicted=True, reason=reason)
     return RenderedMerge(text=rendered)
