@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.tree import Array, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
@@ -352,6 +353,8 @@ class _Diff:
                     return
                 if self._splice_inline(node, path, edits):
                     return
+            if isinstance(leaf, Array) and isinstance(node, _ArrayNode) and self._splice_array(node, leaf, edits):
+                return
             if leaf is not None:
                 self._rewrite(node, _leaf_text(leaf), edits)
             return
@@ -523,6 +526,92 @@ class _Diff:
         if self._comments.overlaps(node.span.start, node.span.end):
             raise ContentParseError("cannot rewrite a value that contains a comment")
         edits.append(_Edit(node.span.start, node.span.end, text))
+
+    def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit]) -> bool:
+        """Edit a one-element-per-line array by element, so untouched elements keep their comments.
+
+        Elements the merge kept are left as they are (or, when the merge changed their value, only their
+        own span is rewritten); a removed element goes with its line, its comma and a same-line comment; an
+        added element goes above the next kept element's own comments. A comma is set from the final order:
+        every element but the last gets one, and the last gets one only when the template had a trailing
+        comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
+        """
+        if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
+            return False
+        text = self._source
+        template = [_to_node(element) for element in node.elements]
+        wanted = list(leaf.elements)
+        slots: list[_Slot] = []
+        deleted: list[int] = []
+        for tag, i1, i2, j1, j2 in SequenceMatcher(None, template, wanted, autojunk=False).get_opcodes():
+            if tag == "equal":
+                slots.extend(_Kept(index, None) for index in range(i1, i2))
+                continue
+            pairs = min(i2 - i1, j2 - j1)
+            slots.extend(_Kept(i1 + offset, wanted[j1 + offset]) for offset in range(pairs))
+            deleted.extend(range(i1 + pairs, i2))
+            slots.extend(_Added(wanted[j]) for j in range(j1 + pairs, j2))
+
+        trailing = _comma_after(self._comments, node.elements[-1]) is not None
+        indent = text[_line_start(text, node.elements[0].span.start) : node.elements[0].span.start]
+        multiline = any(
+            isinstance(element, _ObjectNode) and "\n" in text[element.span.start : element.span.end]
+            for element in node.elements
+        )
+        last = len(slots) - 1
+        for position, slot in enumerate(slots):
+            if isinstance(slot, _Kept) and slot.replacement is not None:
+                # A changed element keeps its span; a comment inside it refuses the rewrite (a conflict).
+                self._rewrite(node.elements[slot.index], self._element_text(slot.replacement, indent, multiline), edits)
+            wants = position < last or trailing
+            if isinstance(slot, _Kept):
+                element = node.elements[slot.index]
+                comma = _comma_at(self._comments, element.span.end)
+                if wants and comma is None:
+                    edits.append(_Edit(element.span.end, element.span.end, ","))
+                if not wants and comma is not None:
+                    edits.append(_Edit(comma, comma + 1, ""))
+
+        # Insertions go before the deletions below, so at a shared offset the new lines come first.
+        pending: list[str] = []
+        anchor: int | None = None
+        for position, slot in enumerate(slots):
+            if isinstance(slot, _Added):
+                wants = position < last or trailing
+                pending.append(
+                    indent + self._element_text(slot.value, indent, multiline) + ("," if wants else "") + self._newline
+                )
+                continue
+            if pending:
+                start = _open_block_position(text, self._comments, node.elements[slot.index].span.start)
+                edits.append(_Edit(start, start, "".join(pending)))
+                pending = []
+            anchor = slot.index
+        if pending:
+            if anchor is None:
+                start = _open_block_position(text, self._comments, node.elements[0].span.start)
+            else:
+                end = node.elements[anchor].span.end
+                start = _past_block_comment(self._comments, end, _next_line_start(text, end))
+            edits.append(_Edit(start, start, "".join(pending)))
+
+        for index in deleted:
+            element = node.elements[index]
+            start = _line_start(text, element.span.start)
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            edits.append(_Edit(start, end, ""))
+        return True
+
+    def _element_text(self, node: Node, indent: str, multiline: bool) -> str:
+        """An array element's text: an object spread over lines when the array's own objects are."""
+        if multiline and isinstance(node, Object) and node.entries:
+            inner = indent + self._indent
+            members = [
+                inner + json.dumps(key, ensure_ascii=False) + ": " + self._element_text(value, inner, True)
+                for key, value in node.entries
+            ]
+            return "{" + self._newline + ("," + self._newline).join(members) + self._newline + indent + "}"
+        return _leaf_text(node)
 
     def _matches(self, node: _AstNode, path: KeyPath) -> bool:
         children = self._children(path)
@@ -846,15 +935,72 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
         limit = _next_line_start(comments.text, closing)
 
 
-def _comma_after(comments: _Comments, member: _MemberNode) -> int | None:
-    """The offset of the comma that follows `member`'s value, or `None` when there is none.
+def _comma_after(comments: _Comments, member: _MemberNode | _AstNode) -> int | None:
+    """The offset of the comma that follows a value, or `None` when there is none.
 
     A comment between the value and its comma is skipped, so `1 /* n */,` reads as followed by a
     comma; a line comment ends the search, because a comma cannot follow it on the line.
     """
-    position = comments.next_meaningful(member.value.span.end)
+    value = member.value if isinstance(member, _MemberNode) else member
+    return _comma_at(comments, value.span.end)
+
+
+def _comma_at(comments: _Comments, end: int) -> int | None:
+    """The offset of the comma that follows a value ending at `end`, or `None` (see `_comma_after`)."""
+    position = comments.next_meaningful(end)
     text = comments.text
     return position if position < len(text) and text[position] == "," else None
+
+
+@dataclass(frozen=True)
+class _Kept:
+    """A template element the merged array keeps, with its new value when the merge changed it."""
+
+    index: int
+    replacement: Node | None
+
+
+@dataclass(frozen=True)
+class _Added:
+    """A value the merged array has and the template does not, placed where it falls in order."""
+
+    value: Node
+
+
+_Slot = _Kept | _Added
+
+
+def _clean_multiline_array(text: str, node: _ArrayNode, comments: _Comments) -> bool:
+    """True when the array spans lines, its closing bracket is alone, and each element starts its own line.
+
+    Only then can elements be spliced by line. An array on one line, or one with two elements on a line, or
+    a comment before an element on its line, is rewritten whole instead, as before.
+    """
+    if "\n" not in text[node.span.start : node.span.end]:
+        return False
+    close = node.span.end - 1
+    if text[_line_start(text, close) : close].strip() != "":
+        return False
+    return all(
+        text[_line_start(text, element.span.start) : element.span.start].strip() == ""
+        and _member_tail_clean(comments, element.span.end)
+        for element in node.elements
+    )
+
+
+def _open_block_position(text: str, comments: _Comments, start: int) -> int:
+    """Where a block placed before the element starting at `start` goes: above that element's own comments.
+
+    The same walk `_open_position` makes for an object member: a comment on the line above documents the
+    element below it, so the block must not separate them.
+    """
+    position = _line_start(text, start)
+    while position > 0:
+        previous = _line_start(text, position - 1)
+        if not comments.is_own_line_comment(previous, position - 1):
+            break
+        position = previous
+    return position
 
 
 def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
