@@ -30,7 +30,6 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
@@ -535,32 +534,34 @@ class _Diff:
         edits.append(_Edit(node.span.start, node.span.end, text))
 
     def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
-        """Edit a one-element-per-line array by element, so untouched elements keep their comments.
+        """Edit a one-element-per-line array to the merged elements, moving text where the order changed.
 
-        Elements the merge kept are left as they are (or, when the merge changed their value, only their
-        own span is rewritten); a removed element goes with its line and its comma, and a removal is refused when
-        a comment sits on those lines; an added element goes above the next kept element's own comments. A comma is
-        set from the final order: every element but the last gets one, and the last gets one only when the template
-        had a trailing comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
+        Each template element is matched to the merged element with the same key: its identity under the array's
+        rule, or its exact value when there is no rule; then, within a group, the elements left on each side pair in
+        order. The longest run of matches that keeps the order stays where it is; every other matched element moves,
+        with its text and its comments. A changed element is rewritten in its span, which refuses when a comment is
+        inside the span. A removed element goes with its lines, its comma and the comments on them; the note above it
+        stays. The comma follows the final order, and a trailing comma is kept when the template had one. Returns False
+        for a layout this does not handle, so the caller rewrites the whole value.
         """
         if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
             return False
         text = self._source
         template = [_to_node(element) for element in node.elements]
         wanted = list(leaf.elements)
+        pairs = _match(template, wanted, rule)
+        stay = _stable(pairs)
+        template_of = {m: t for t, m in pairs}
+        matched = {t for t, _ in pairs}
         slots: list[_Slot] = []
-        deleted: list[int] = []
-        for tag, i1, i2, j1, j2 in SequenceMatcher(None, template, wanted, autojunk=False).get_opcodes():
-            if tag == "equal":
-                slots.extend(_Kept(index, None) for index in range(i1, i2))
+        for m, element in enumerate(wanted):
+            if m not in template_of:
+                slots.append(_Added(element))
                 continue
-            for old_offset, new_offset in _pair_block(template[i1:i2], wanted[j1:j2], rule):
-                if old_offset is None and new_offset is not None:
-                    slots.append(_Added(wanted[j1 + new_offset]))
-                elif old_offset is not None and new_offset is None:
-                    deleted.append(i1 + old_offset)
-                elif old_offset is not None and new_offset is not None:
-                    slots.append(_Kept(i1 + old_offset, wanted[j1 + new_offset]))
+            t = template_of[m]
+            slots.append(_Placed(t, None if template[t] == element else element, t in stay))
+        removed = [t for t in range(len(template)) if t not in matched]
+        moved = [t for t, _ in pairs if t not in stay]
 
         trailing = _comma_after(self._comments, node.elements[-1]) is not None
         indent = text[_line_start(text, node.elements[0].span.start) : node.elements[0].span.start]
@@ -571,38 +572,37 @@ class _Diff:
         unit = _array_unit(text, node, indent) or self._indent
         last = len(slots) - 1
         for position, slot in enumerate(slots):
-            if isinstance(slot, _Kept) and slot.replacement is not None:
+            if not (isinstance(slot, _Placed) and slot.stay):
+                continue
+            if slot.replacement is not None:
                 # A changed element keeps its span; a comment inside it refuses the rewrite (a conflict).
                 self._rewrite(
                     node.elements[slot.index], self._element_text(slot.replacement, indent, multiline, unit), edits
                 )
+            element = node.elements[slot.index]
+            comma = _comma_at(self._comments, element.span.end)
             wants = position < last or trailing
-            if isinstance(slot, _Kept):
-                element = node.elements[slot.index]
-                comma = _comma_at(self._comments, element.span.end)
-                if wants and comma is None:
-                    edits.append(_Edit(element.span.end, element.span.end, ","))
-                if not wants and comma is not None:
-                    edits.append(_Edit(comma, comma + 1, ""))
+            if wants and comma is None:
+                edits.append(_Edit(element.span.end, element.span.end, ","))
+            if not wants and comma is not None:
+                edits.append(_Edit(comma, comma + 1, ""))
 
-        # Insertions go before the deletions below, so at a shared offset the new lines come first.
+        # Insertions go before the removals below, so at a shared offset the new lines come first.
         pending: list[str] = []
         anchor: int | None = None
         for position, slot in enumerate(slots):
-            if isinstance(slot, _Added):
-                wants = position < last or trailing
-                pending.append(
-                    indent
-                    + self._element_text(slot.value, indent, multiline, unit)
-                    + ("," if wants else "")
-                    + self._newline
-                )
-                continue
-            if pending:
-                start = _open_block_position(text, self._comments, node.elements[slot.index].span.start)
-                edits.append(_Edit(start, start, "".join(pending)))
-                pending = []
-            anchor = slot.index
+            wants = position < last or trailing
+            if isinstance(slot, _Placed) and slot.stay:
+                if pending:
+                    start = _open_block_position(text, self._comments, node.elements[slot.index].span.start)
+                    edits.append(_Edit(start, start, "".join(pending)))
+                    pending = []
+                anchor = slot.index
+            elif isinstance(slot, _Added):
+                element_text = self._element_text(slot.value, indent, multiline, unit)
+                pending.append(indent + element_text + ("," if wants else "") + self._newline)
+            else:
+                pending.append(self._moved_line(node, slot, indent, multiline, unit, wants))
         if pending:
             if anchor is None:
                 start = _open_block_position(text, self._comments, node.elements[0].span.start)
@@ -611,20 +611,33 @@ class _Diff:
                 start = _past_block_comment(self._comments, end, _next_line_start(text, end))
             edits.append(_Edit(start, start, "".join(pending)))
 
-        for index in deleted:
-            # Only the element's own line goes (with its comma). The comment lines above it
-            # stay where they are: which element they documented cannot be known from the text alone, and silently
-            # deleting a note is worse than leaving it attached to the element below.
+        for index in [*removed, *moved]:
+            # The element's own lines go, with its comma and every comment on them; the comment lines above it stay,
+            # because which element they documented cannot be known from the text alone.
             element = node.elements[index]
             start = _line_start(text, element.span.start)
-            end = _next_line_start(text, element.span.end)
-            # A comment on the element's own lines is a note on it, and deleting the lines would drop it silently;
-            # refusing makes the merge a conflict instead.
-            if self._comments.overlaps(start, end):
-                raise ContentParseError("cannot remove a binding that carries a comment")
-            end = _line_end_outside_comment(self._comments, start, end)
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
             edits.append(_Edit(start, end, ""))
         return True
+
+    def _moved_line(self, node: _ArrayNode, slot: _Placed, indent: str, multiline: bool, unit: str, wants: bool) -> str:
+        """A matched element that changes place, re-emitted with its own text, comments and tail."""
+        text = self._source
+        element = node.elements[slot.index]
+        if slot.replacement is None:
+            core = text[element.span.start : element.span.end]
+        else:
+            if self._comments.overlaps(element.span.start, element.span.end):
+                raise ContentParseError("cannot rewrite a value that contains a comment")
+            core = self._element_text(slot.replacement, indent, multiline, unit)
+        start = _line_start(text, element.span.start)
+        line_end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+        comma = _comma_at(self._comments, element.span.end)
+        if comma is not None and comma < line_end:
+            tail = text[element.span.end : comma] + text[comma + 1 : line_end]
+        else:
+            tail = text[element.span.end : line_end]
+        return indent + core + ("," if wants else "") + tail.rstrip("\r\n") + self._newline
 
     def _element_text(self, node: Node, indent: str, multiline: bool, unit: str) -> str:
         """An array element's text: an object spread over lines, indented in the array's own unit."""
@@ -977,11 +990,12 @@ def _comma_at(comments: _Comments, end: int) -> int | None:
 
 
 @dataclass(frozen=True)
-class _Kept:
-    """A template element the merged array keeps, with its new value when the merge changed it."""
+class _Placed:
+    """A template element the merged array keeps (`stay`) or moves, with its new value when the merge changed it."""
 
     index: int
     replacement: Node | None
+    stay: bool
 
 
 @dataclass(frozen=True)
@@ -991,7 +1005,71 @@ class _Added:
     value: Node
 
 
-_Slot = _Kept | _Added
+_Slot = _Placed | _Added
+
+
+def _key(node: Node, rule: ArrayRule | None) -> tuple[str, object]:
+    """Which binding a node is: its identity under the rule, or its exact value when the rule names none."""
+    identity = None if rule is None else element_identity(node, rule)
+    return ("id", identity) if identity is not None else ("value", node)
+
+
+def _match(template: list[Node], wanted: list[Node], rule: ArrayRule | None) -> list[tuple[int, int]]:
+    """The `(template index, merged index)` pairs of elements that are the same binding, in template order.
+
+    Same key pairs first, in order of occurrence. Then, within a group, the bindings left on each side pair in order,
+    so a changed binding (its command changed, say) is rewritten in its own place rather than removed and re-added.
+    """
+    free: dict[tuple[str, object], list[int]] = {}
+    for m, node in enumerate(wanted):
+        free.setdefault(_key(node, rule), []).append(m)
+    pairs: dict[int, int] = {}
+    for t, node in enumerate(template):
+        candidates = free.get(_key(node, rule))
+        if candidates:
+            pairs[t] = candidates.pop(0)
+    if rule is not None:
+        taken = set(pairs.values())
+        left_by_group: dict[tuple[tuple[str, str | None], ...], list[int]] = {}
+        for m, node in enumerate(wanted):
+            identity = element_identity(node, rule)
+            if identity is not None and m not in taken:
+                left_by_group.setdefault(element_group(identity, rule), []).append(m)
+        for t, node in enumerate(template):
+            identity = element_identity(node, rule)
+            if t in pairs or identity is None:
+                continue
+            candidates = left_by_group.get(element_group(identity, rule))
+            if candidates:
+                pairs[t] = candidates.pop(0)
+    return sorted(pairs.items())
+
+
+def _stable(pairs: list[tuple[int, int]]) -> set[int]:
+    """The template indexes of the longest run of pairs whose merged indexes also ascend: those keep their place.
+
+    Every other pair moves. Found by longest increasing subsequence, so it is the fewest moves that keep the order.
+    """
+    tails: list[int] = []  # the smallest merged index that ends an increasing run of each length
+    tail_pairs: list[int] = []  # the pair index that ends that run
+    previous = [-1] * len(pairs)
+    for index, (_, m) in enumerate(pairs):
+        position = bisect.bisect_left(tails, m)
+        previous[index] = tail_pairs[position - 1] if position > 0 else -1
+        if position == len(tails):
+            tails.append(m)
+            tail_pairs.append(index)
+        else:
+            tails[position] = m
+            tail_pairs[position] = index
+    if not tail_pairs:
+        return set()
+    kept: set[int] = set()
+    index = tail_pairs[-1]
+    while index != -1:
+        kept.add(pairs[index][0])
+        index = previous[index]
+    return kept
 
 
 def _clean_multiline_array(text: str, node: _ArrayNode, comments: _Comments) -> bool:
@@ -1025,69 +1103,6 @@ def _open_block_position(text: str, comments: _Comments, start: int) -> int:
             break
         position = previous
     return position
-
-
-def _pair_block(old: list[Node], new: list[Node], rule: ArrayRule | None) -> list[tuple[int | None, int | None]]:
-    """Pair a replaced run by declared identity: `(old, new)` pairs, `(old, None)` removals, `(None, new)` additions.
-
-    Two elements pair when they have the same identity; then, within each group, the elements left on each side pair
-    in order. A pair must keep the array's order, so each new pair is placed between its neighbours. Anything else is a
-    removal and an addition. With no rule nothing pairs, so an array whose elements cannot be told apart is never
-    rewritten in place. The result does not depend on hashing: groups are visited in the order they first appear.
-    """
-    if rule is None:
-        return [*((i, None) for i in range(len(old))), *((None, k) for k in range(len(new)))]
-    old_ids = [element_identity(element, rule) for element in old]
-    new_ids = [element_identity(element, rule) for element in new]
-    olds: list[int] = []  # the paired old indexes, ascending
-    news: list[int] = []  # their new indexes, ascending as well
-    used: set[int] = set()
-
-    def fits(i: int, j: int) -> bool:
-        k = bisect.bisect_left(olds, i)
-        return (k == 0 or news[k - 1] < j) and (k == len(olds) or news[k] > j) and j not in used
-
-    def pair(i: int, j: int) -> None:
-        k = bisect.bisect_left(olds, i)
-        olds.insert(k, i)
-        news.insert(k, j)
-        used.add(j)
-
-    for i, identity in enumerate(old_ids):
-        if identity is None:
-            continue
-        j = next((j for j, other in enumerate(new_ids) if other == identity and j not in used), None)
-        if j is not None and fits(i, j):
-            pair(i, j)
-    groups = dict.fromkeys(element_group(identity, rule) for identity in old_ids if identity is not None)
-    for group in groups:
-        old_left = [
-            i
-            for i, identity in enumerate(old_ids)
-            if identity is not None and i not in olds and element_group(identity, rule) == group
-        ]
-        new_left = [
-            j
-            for j, identity in enumerate(new_ids)
-            if identity is not None and j not in used and element_group(identity, rule) == group
-        ]
-        for i, j in zip(old_left, new_left, strict=False):
-            if fits(i, j):
-                pair(i, j)
-
-    pairs = dict(zip(olds, news, strict=True))
-    result: list[tuple[int | None, int | None]] = []
-    new_cursor = 0
-    for i in range(len(old)):
-        if i not in pairs:
-            result.append((i, None))
-            continue
-        j = pairs[i]
-        result.extend((None, k) for k in range(new_cursor, j))
-        result.append((i, j))
-        new_cursor = j + 1
-    result.extend((None, k) for k in range(new_cursor, len(new)))
-    return result
 
 
 def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:
