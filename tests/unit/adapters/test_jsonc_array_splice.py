@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
@@ -517,6 +517,7 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(value)
 
 
+@settings(max_examples=400, deadline=None)
 @given(case=_rich_case())
 def test_an_unchanged_binding_keeps_its_note_above_it_and_its_inner_and_inline_notes(case) -> None:
     # given
