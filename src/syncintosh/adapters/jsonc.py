@@ -28,12 +28,13 @@ from __future__ import annotations
 import bisect
 import json
 import re
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
-from syncintosh.core.tree import Array, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
+from syncintosh.core.tree import Array, ElementId, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
 
 # Whitespace the scanner skips; a BOM is treated as leading trivia so spans stay absolute.
 _WHITESPACE = " \t\r\n\ufeff"
@@ -534,15 +535,18 @@ class _Diff:
         edits.append(_Edit(node.span.start, node.span.end, text))
 
     def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
-        """Edit a one-element-per-line array to the merged elements, moving text where the order changed.
+        """Edit a one-element-per-line array to the merged elements, moving each binding with its own notes.
 
-        Each template element is matched to the merged element with the same key: its identity under the array's
-        rule, or its exact value when there is no rule; then, within a group, the elements left on each side pair in
-        order. The longest run of matches that keeps the order stays where it is; every other matched element moves,
-        with its text and its comments. A changed element is rewritten in its span, which refuses when a comment is
-        inside the span. A removed element goes with its lines, its comma and the comments on them; the note above it
-        stays. The comma follows the final order, and a trailing comma is kept when the template had one. Returns False
-        for a layout this does not handle, so the caller rewrites the whole value.
+        A binding's notes are the block of comment lines directly above it (no blank line between), the comments on
+        its own line, and the comments inside it. Each template element is matched to the merged element with the same
+        key: its identity under the array's rule, or its exact value when there is no rule; then, within a group, the
+        elements left on each side pair in order. The longest run of matches that keeps the order stays in place; every
+        other matched binding moves with its notes. A changed binding is rewritten in its own span, which refuses when a
+        comment is inside that span. A removed binding goes with its lines, its comma, and the comments on those lines;
+        the block above it stays, since nothing says which binding those notes were about. Without a rule a removal
+        that would take any note is refused, because nothing can tell which binding the note belonged to. The comma
+        follows the final order, and a trailing comma is kept when the template had one. Returns False for a layout
+        this does not handle, so the caller rewrites the whole value.
         """
         if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
             return False
@@ -611,11 +615,21 @@ class _Diff:
                 start = _past_block_comment(self._comments, end, _next_line_start(text, end))
             edits.append(_Edit(start, start, "".join(pending)))
 
-        for index in [*removed, *moved]:
-            # The element's own lines go, with its comma and every comment on them; the comment lines above it stay,
-            # because which element they documented cannot be known from the text alone.
+        for index in removed:
+            # The element's own lines go, with its comma and the comments on them. The comment lines directly above
+            # it stay: the text cannot say which element they documented, and a note is never guessed onto another.
             element = node.elements[index]
             start = _line_start(text, element.span.start)
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            if rule is None and self._comments.overlaps(_owned_start(text, self._comments, element.span.start), end):
+                # Without a rule nothing says which binding a note belongs to, so a removal that would take one
+                # is refused rather than losing it.
+                raise ContentParseError(UNRULED_REMOVAL_REFUSED)
+            edits.append(_Edit(start, end, ""))
+        for index in moved:
+            # A moved element carries the block of comment lines directly above it, so its notes move with it.
+            element = node.elements[index]
+            start = _owned_start(text, self._comments, element.span.start)
             end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
             edits.append(_Edit(start, end, ""))
         return True
@@ -637,7 +651,8 @@ class _Diff:
             tail = text[element.span.end : comma] + text[comma + 1 : line_end]
         else:
             tail = text[element.span.end : line_end]
-        return indent + core + ("," if wants else "") + tail.rstrip("\r\n") + self._newline
+        notes = text[_owned_start(text, self._comments, element.span.start) : start]
+        return notes + indent + core + ("," if wants else "") + tail.rstrip("\r\n") + self._newline
 
     def _element_text(self, node: Node, indent: str, multiline: bool, unit: str) -> str:
         """An array element's text: an object spread over lines, indented in the array's own unit."""
@@ -989,6 +1004,12 @@ def _comma_at(comments: _Comments, end: int) -> int | None:
     return position if position < len(text) and text[position] == "," else None
 
 
+# Refusals are fixed texts: a message that echoed a value or a key name would leak it into a conflict.
+UNRULED_REMOVAL_REFUSED = (
+    "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
+)
+
+
 @dataclass(frozen=True)
 class _Placed:
     """A template element the merged array keeps (`stay`) or moves, with its new value when the merge changed it."""
@@ -1008,9 +1029,8 @@ class _Added:
 _Slot = _Placed | _Added
 
 
-def _key(node: Node, rule: ArrayRule | None) -> tuple[str, object]:
+def _key(identity: ElementId | None, node: Node) -> tuple[str, object]:
     """Which binding a node is: its identity under the rule, or its exact value when the rule names none."""
-    identity = None if rule is None else element_identity(node, rule)
     return ("id", identity) if identity is not None else ("value", node)
 
 
@@ -1019,29 +1039,30 @@ def _match(template: list[Node], wanted: list[Node], rule: ArrayRule | None) -> 
 
     Same key pairs first, in order of occurrence. Then, within a group, the bindings left on each side pair in order,
     so a changed binding (its command changed, say) is rewritten in its own place rather than removed and re-added.
+    Each identity is computed once.
     """
-    free: dict[tuple[str, object], list[int]] = {}
-    for m, node in enumerate(wanted):
-        free.setdefault(_key(node, rule), []).append(m)
+    template_ids = [None if rule is None else element_identity(node, rule) for node in template]
+    wanted_ids = [None if rule is None else element_identity(node, rule) for node in wanted]
+    free: dict[tuple[str, object], deque[int]] = {}
+    for m, (node, identity) in enumerate(zip(wanted, wanted_ids, strict=True)):
+        free.setdefault(_key(identity, node), deque()).append(m)
     pairs: dict[int, int] = {}
-    for t, node in enumerate(template):
-        candidates = free.get(_key(node, rule))
+    for t, (node, identity) in enumerate(zip(template, template_ids, strict=True)):
+        candidates = free.get(_key(identity, node))
         if candidates:
-            pairs[t] = candidates.pop(0)
+            pairs[t] = candidates.popleft()
     if rule is not None:
         taken = set(pairs.values())
-        left_by_group: dict[tuple[tuple[str, str | None], ...], list[int]] = {}
-        for m, node in enumerate(wanted):
-            identity = element_identity(node, rule)
+        left_by_group: dict[tuple[tuple[str, str | None], ...], deque[int]] = {}
+        for m, identity in enumerate(wanted_ids):
             if identity is not None and m not in taken:
-                left_by_group.setdefault(element_group(identity, rule), []).append(m)
-        for t, node in enumerate(template):
-            identity = element_identity(node, rule)
+                left_by_group.setdefault(element_group(identity, rule), deque()).append(m)
+        for t, identity in enumerate(template_ids):
             if t in pairs or identity is None:
                 continue
             candidates = left_by_group.get(element_group(identity, rule))
             if candidates:
-                pairs[t] = candidates.pop(0)
+                pairs[t] = candidates.popleft()
     return sorted(pairs.items())
 
 
@@ -1086,8 +1107,27 @@ def _clean_multiline_array(text: str, node: _ArrayNode, comments: _Comments) -> 
     return all(
         text[_line_start(text, element.span.start) : element.span.start].strip() == ""
         and _member_tail_clean(comments, element.span.end)
+        and _comma_stays_on_its_line(text, comments, element)
         for element in node.elements
     )
+
+
+def _comma_stays_on_its_line(text: str, comments: _Comments, element: _AstNode) -> bool:
+    """True when an element's comma, if it has one, is on the element's own line rather than a line of its own.
+
+    A comma alone on a line would survive the removal of its element's line and leave the array invalid, so such a
+    layout is not spliced; the whole value is rewritten instead.
+    """
+    comma = _comma_at(comments, element.span.end)
+    return comma is None or "\n" not in text[element.span.end : comma]
+
+
+def _owned_start(text: str, comments: _Comments, element_start: int) -> int:
+    """Where an element's own notes begin: the block of comment lines directly above it, with no blank line between.
+
+    A blank line, or any other line, ends the block; a note past one is a section title that belongs to no element.
+    """
+    return _open_block_position(text, comments, element_start)
 
 
 def _open_block_position(text: str, comments: _Comments, start: int) -> int:

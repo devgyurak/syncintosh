@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import random
 import subprocess
 import sys
 
@@ -179,11 +180,11 @@ def test_an_element_level_render_always_parses_back_to_the_merged_tree(case: tup
     # given
     template, target = case
 
-    # when
-    rendered = ADAPTER.render(tree_from_value(target), template)
+    # when — a rule-less array refuses a removal that would take a note, so the render may refuse; never a wrong file
+    rendered = _try_plain_render(template, target)
 
     # then
-    assert ADAPTER.parse(rendered) == tree_from_value(target)
+    assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(target)
 
 
 def test_a_comment_above_a_removed_element_stays_where_it_is() -> None:
@@ -314,6 +315,14 @@ def test_the_rendered_bytes_do_not_depend_on_the_hash_seed() -> None:
 _POOL = [("a", "x"), ("a", "y"), ("b", "x"), ("c", "z"), ("d", "w"), ("e", "v")]
 
 
+def _try_plain_render(template: str, value: list[int]) -> str | None:
+    """The render of an array with no rule, or `None` when the adapter refuses it."""
+    try:
+        return ADAPTER.render(tree_from_value(value), template)
+    except ContentParseError:
+        return None
+
+
 def _try_render(template: str, value: list[dict[str, object]]) -> str | None:
     """The render, or `None` when the adapter refuses it (a conflict, which is allowed; a silent wrong file is not)."""
     try:
@@ -386,3 +395,204 @@ def test_a_note_above_a_binding_is_never_dropped_and_an_unchanged_binding_keeps_
     ]
     assert dropped_above == []
     assert lost_inside == []
+
+
+def test_moved_bindings_take_their_own_notes_to_their_new_place() -> None:
+    # given — each binding has a note directly above it; the merged order is b, a, c
+    template = (
+        '[\n    // note on a\n    { "key": "a", "command": "x" },\n'
+        '    // note on b\n    { "key": "b", "command": "y" },\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_b("y"), _a("x"), _c("z")])
+
+    # then — each note sits directly above its own binding, and no blank line is left behind
+    assert rendered == (
+        '[\n    // note on b\n    { "key": "b", "command": "y" },\n'
+        '    // note on a\n    { "key": "a", "command": "x" },\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+
+def test_a_rule_less_array_refuses_a_removal_that_would_drop_a_note() -> None:
+    # given — the `editor.rulers` array has no rule, so nothing says which value a note belongs to
+    template = '{\n  "editor.rulers": [\n    80, // pep8\n    120\n  ]\n}'
+
+    # when & then — the removal of 80 would take its note, so the render refuses rather than dropping it
+    with pytest.raises(ContentParseError):
+        ADAPTER.render(tree_from_value({"editor.rulers": [79, 120]}), template)
+
+
+def test_a_rule_array_changes_a_binding_whose_when_changed_and_keeps_its_upper_note() -> None:
+    # given — the binding gains a `when`, so it is no longer the same binding; its note above stays, its inline one goes
+    template = (
+        '[\n    // upper note\n    { "key": "a", "command": "x" }, // inline note\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+    gained_when = {"key": "a", "command": "x", "when": "editorFocus"}
+
+    # when
+    rendered = _render(template, [gained_when, _c("z")])
+
+    # then
+    assert "// upper note" in rendered
+    assert "// inline note" not in rendered
+    assert ADAPTER.parse(rendered) == tree_from_value([gained_when, _c("z")])
+
+
+def test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json() -> None:
+    # given — a comma starts its own line between two bindings
+    template = '[\n  { "key": "a", "command": "x" }\n  ,\n  { "key": "b", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y"), _a("x")])
+
+    # then — the array is rewritten whole, so the result parses to the merged order
+    assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x")])
+
+
+# --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
+
+
+@st.composite
+def _rich_case(draw: st.DrawFn) -> tuple[str, list[dict[str, object]], list[str], list[int], list[dict[str, object]]]:
+    """A template with notes of all three kinds, a section title, `when` fields, and a random merged target.
+
+    Returns the template, the base bindings, each base binding's text fragment, and the indexes of the base bindings
+    the target keeps unchanged (the ones whose notes must survive).
+    """
+    base = draw(st.lists(st.sampled_from(_POOL), unique=True, min_size=1, max_size=4))
+    flags = draw(
+        st.lists(
+            st.tuples(st.booleans(), st.booleans(), st.booleans(), st.booleans()),
+            min_size=len(base),
+            max_size=len(base),
+        )
+    )
+    bindings: list[dict[str, object]] = []
+    fragments: list[str] = []
+    lines = ["["]
+    for index, ((key, command), (inner, inline, section, has_when)) in enumerate(zip(base, flags, strict=True)):
+        binding: dict[str, object] = {"key": key, "command": command}
+        body = f'"key": "{key}", ' + (f"/* in {index} */ " if inner else "") + f'"command": "{command}"'
+        if has_when:
+            binding["when"] = f"w{index}"
+            body += f', "when": "w{index}"'
+        bindings.append(binding)
+        fragments.append(body)
+        if section:
+            lines.extend(["", f"    // section {index}", ""])
+        lines.append(f"    // note {index}")
+        comma = "," if index < len(base) - 1 else ""
+        lines.append(f"    {{{body}}}{comma}" + (f" // inl {index}" if inline else ""))
+    lines.append("]")
+    template = "\n".join(lines)
+
+    kept = draw(st.lists(st.integers(min_value=0, max_value=len(base) - 1), unique=True, max_size=len(base)))
+    order = draw(st.permutations(kept))
+    changed = draw(st.lists(st.booleans(), min_size=len(order), max_size=len(order)))
+    value: list[dict[str, object]] = []
+    unchanged: list[int] = []
+    for index, change in zip(order, changed, strict=True):
+        item = dict(bindings[index])
+        if change:
+            item["args"] = 1
+        else:
+            unchanged.append(index)
+        value.append(item)
+    return template, bindings, fragments, unchanged, value
+
+
+@given(case=_rich_case())
+def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
+    # given
+    template, _, _, _, value = case
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then
+    assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(value)
+
+
+@given(case=_rich_case())
+def test_an_unchanged_binding_keeps_its_note_above_it_and_its_inner_and_inline_notes(case) -> None:
+    # given
+    template, _bindings, fragments, unchanged, value = case
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then — checked as text in place: the note sits directly above the binding's own line, not merely somewhere
+    text = "" if rendered is None else rendered
+    missing = [
+        index
+        for index in unchanged
+        if rendered is not None
+        and (
+            f"// note {index}\n    {{{fragments[index]}" not in text
+            or (f"/* in {index} */" in template and f"/* in {index} */" not in text)
+            or (f"// inl {index}" in template and f"// inl {index}" not in text)
+        )
+    ]
+    assert missing == []
+
+
+def _refusal_share(samples: int, seed: int) -> tuple[int, int]:
+    """Refused and total renders over a fixed sample of the notes generator, from one seeded source."""
+    rng = random.Random(seed)
+    refused = 0
+    for _ in range(samples):
+        base = rng.sample(_POOL, rng.randint(1, 4))
+        lines = ["["]
+        for index, (key, command) in enumerate(base):
+            comma = "," if index < len(base) - 1 else ""
+            lines.append(f"    // note {index}")
+            lines.append(f'    {{"key": "{key}", "command": "{command}"}}{comma}')
+        lines.append("]")
+        kept = rng.sample(base, rng.randint(0, len(base)))
+        value: list[dict[str, object]] = [{"key": key, "command": command} for key, command in kept]
+        if rng.random() < 0.5 and value:
+            value[0]["args"] = 1
+        refused += _try_render("\n".join(lines), value) is None
+    return refused, samples
+
+
+def test_refusals_are_not_the_majority_of_generated_renders() -> None:
+    # given — a fixed, seeded sample, so the count is the same on every run
+    samples = 200
+
+    # when
+    refused, total = _refusal_share(samples, seed=7)
+
+    # then
+    assert refused * 2 < total
+
+
+def _rule_less_template(values: list[int]) -> str:
+    """A bulleted array of plain values, each under its own note."""
+    lines = ["["]
+    for index, value in enumerate(values):
+        comma = "," if index < len(values) - 1 else ""
+        lines.append(f"    // note {index}")
+        lines.append(f"    {value}{comma}")
+    lines.append("]")
+    return "\n".join(lines)
+
+
+@given(case=st.data())
+def test_a_rule_less_render_never_drops_a_note_when_it_succeeds(case: st.DataObject) -> None:
+    # given — an array with no rule, so each value is its own identity; notes sit above every value
+    values = case.draw(st.lists(st.integers(min_value=0, max_value=9), unique=True, min_size=1, max_size=5))
+    target = case.draw(st.lists(st.sampled_from(values), unique=True, max_size=5))
+    template = _rule_less_template(values)
+
+    # when
+    rendered = _try_plain_render(template, target)
+
+    # then
+    text = "" if rendered is None else rendered
+    dropped = [index for index in range(len(values)) if rendered is not None and f"// note {index}" not in text]
+    assert dropped == []
