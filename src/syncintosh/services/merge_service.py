@@ -7,7 +7,7 @@ free of use-case concerns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from syncintosh.core.content_merge import render_merged
 from syncintosh.core.merge import IgnorePaths, merge_tree
@@ -25,7 +25,8 @@ class RenderedMerge:
     must treat it as a conflict too, never as a successful merge.
     """
 
-    text: str
+    # The whole merged document: a setting's value is plaintext, so a repr never shows it (AGENTS.md §4).
+    text: str = field(repr=False)
     conflicts: tuple[Conflict, ...] = ()
     conflicted: bool = False
 

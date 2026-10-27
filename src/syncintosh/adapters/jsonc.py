@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError
@@ -61,7 +61,7 @@ class _Span:
 @dataclass(frozen=True)
 class _ScalarNode:
     kind: ScalarKind
-    value: str | int | float | bool | None
+    value: str | int | float | bool | None = field(repr=False)
     span: _Span
 
 
@@ -285,7 +285,7 @@ class _Edit:
 
     start: int
     end: int
-    text: str
+    text: str = field(repr=False)
 
 
 class JsoncAdapter:
@@ -537,10 +537,10 @@ class _Diff:
         """Edit a one-element-per-line array by element, so untouched elements keep their comments.
 
         Elements the merge kept are left as they are (or, when the merge changed their value, only their
-        own span is rewritten); a removed element goes with its line, its comma and a same-line comment; an
-        added element goes above the next kept element's own comments. A comma is set from the final order:
-        every element but the last gets one, and the last gets one only when the template had a trailing
-        comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
+        own span is rewritten); a removed element goes with its line and its comma, and a removal is refused when
+        a comment sits on those lines; an added element goes above the next kept element's own comments. A comma is
+        set from the final order: every element but the last gets one, and the last gets one only when the template
+        had a trailing comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
         """
         if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
             return False
@@ -611,7 +611,7 @@ class _Diff:
             edits.append(_Edit(start, start, "".join(pending)))
 
         for index in deleted:
-            # Only the element's own line goes (with its comma and a same-line comment). The comment lines above it
+            # Only the element's own line goes (with its comma). The comment lines above it
             # stay where they are: which element they documented cannot be known from the text alone, and silently
             # deleting a note is worse than leaving it attached to the element below.
             element = node.elements[index]
@@ -869,7 +869,7 @@ class _Comments:
     and a settings file documents path globs in its comments.
     """
 
-    text: str
+    text: str = field(repr=False)
     spans: tuple[_Span, ...]
 
     def overlaps(self, start: int, end: int) -> bool:
