@@ -8,6 +8,7 @@ import random
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 from hypothesis import given, settings
@@ -543,6 +544,22 @@ def test_a_moved_binding_between_blank_lines_leaves_no_doubled_blank_line() -> N
     # then — it parses to the merged order, and no two blank lines sit side by side
     assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x"), _c("z")])
     assert _has_doubled_blank(rendered) is False
+
+
+def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> None:
+    # given — a binding under two thousand note lines, and the merge moves it below its neighbour
+    notes = "".join(f"    // note line {index}\n" for index in range(2000))
+    template = "[\n" + notes + '    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]\n'
+    started = time.perf_counter()
+
+    # when
+    rendered = _render(template, [_b("y"), _a("x")])
+
+    # then — the note block still sits directly above `a`; the bound is far above the expected time, so CI stays stable
+    assert rendered.index('{ "key": "b"') < rendered.index("// note line 0") < rendered.index('{ "key": "a"')
+    assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
+    assert rendered.count("// note line") == 2000
+    assert time.perf_counter() - started < 2.0
 
 
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------

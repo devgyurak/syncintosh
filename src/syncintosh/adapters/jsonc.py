@@ -31,6 +31,7 @@ import re
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
@@ -957,8 +958,17 @@ class _Comments:
             return first.start
         return None
 
+    @cached_property
+    def _starts(self) -> tuple[int, ...]:
+        """The start of each comment span; the parser records them in text order, so this is sorted."""
+        return tuple(span.start for span in self.spans)
+
     def _span_at(self, position: int) -> _Span | None:
-        return next((span for span in self.spans if span.start <= position < span.end), None)
+        index = bisect.bisect_right(self._starts, position) - 1
+        if index < 0:
+            return None
+        span = self.spans[index]
+        return span if position < span.end else None
 
 
 def _line_start(text: str, pos: int) -> int:
