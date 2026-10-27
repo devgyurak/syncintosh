@@ -74,6 +74,24 @@ class GroupConflict:
     remote: Leaf = field(repr=False)
 
 
+# Fixed text, never a value: it is shown in place of the bare "(document)" a whole-array conflict would print.
+ORDER_CONFLICT_REASON = (
+    "the two sides reordered shared bindings differently, so they cannot be settled one binding at a time; "
+    "choosing a whole side drops the other side's added bindings"
+)
+
+
+@dataclass(frozen=True)
+class OrderConflict:
+    """The two sides reordered the bindings they share differently, so the array is one conflict.
+
+    Group picks cannot settle it: the order is decided by the bindings that did not change. The reason says so, and
+    that choosing a whole side drops the other side's additions.
+    """
+
+    reason: str = ORDER_CONFLICT_REASON
+
+
 @dataclass(frozen=True)
 class KeyedMerge:
     """The merged array, with the groups that still conflict.
@@ -92,12 +110,13 @@ def merge_keyed_array(
     remote: Leaf,
     rule: ArrayRule,
     picks: Mapping[ElementId, Side | Array] | None = None,
-) -> KeyedMerge | None:
-    """Merge three array leaves element by element, or ``None`` when the whole-array compare must decide.
+) -> KeyedMerge | OrderConflict | None:
+    """Merge three array leaves element by element, or say why the whole-array compare must decide.
 
     ``None`` covers a side that is not an array, a base that is not an array (an array newly added on
-    both sides has no base to group against), an array the rule cannot identify, and an order the two
-    sides changed differently. The caller records a whole-array conflict in each of those cases.
+    both sides has no base to group against), and an array the rule cannot identify. ``OrderConflict``
+    is returned when the two sides reordered the shared bindings differently. The caller records a
+    whole-array conflict in each of those cases, and carries the reason of an order conflict.
 
     ``picks`` settles conflicting groups by identity: a side takes that side's group, and a proposed array
     takes the proposed elements, provided every one of them belongs to that group. A pick that does not
@@ -168,8 +187,8 @@ def merge_keyed_array(
         chosen.extend(picked)
 
     ordered = _ordered(base_ids, local_ids, remote_ids, chosen, owners, replacements, frozenset(set_aside))
-    if ordered is None:
-        return None
+    if isinstance(ordered, OrderConflict):
+        return ordered
     return KeyedMerge(merged=Array(tuple(node for _, node in ordered)), conflicts=tuple(conflicts))
 
 
@@ -319,8 +338,8 @@ def _ordered(
     owners: dict[ElementId, str],
     replacements: list[tuple[frozenset[ElementId], frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]],
     set_aside: frozenset[ElementId],
-) -> list[_Item] | None:
-    """The merged elements in order, or ``None`` when the two sides reordered the shared ones differently.
+) -> list[_Item] | OrderConflict:
+    """The merged elements in order, or an `OrderConflict` when the two sides reordered the shared ones differently.
 
     The elements that survive, exist on all three sides, and are not set aside carry the order ("anchors"). A set-aside
     binding is placed from the side its conflict was settled to (`owners`), in that side's order, and the rest follow
@@ -342,7 +361,7 @@ def _ordered(
     elif local_order == remote_order or remote_order == base_order:
         anchored = local_order
     else:
-        return None
+        return OrderConflict()
 
     local_sequence, remote_sequence = list(local_ids), list(remote_ids)
     # The base as the replacements already made have changed it, so a later group is placed after an earlier
@@ -372,7 +391,7 @@ def _ordered(
     if chosen_order is None:
         # Placement put a settled side's bindings where they cannot read in that side's order. That is not a result to
         # publish silently, so the array stays one conflict.
-        return None
+        return OrderConflict()
     return [(identity, node_of[identity]) for identity in chosen_order]
 
 

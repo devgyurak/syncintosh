@@ -44,6 +44,9 @@ class Conflict:
     # Set when the conflict is one element of an array merged by identity (`core/keyed_array.py`);
     # `None` for a conflict on the whole path.
     element: ElementId | None = None
+    # A fixed text saying why this conflict cannot be settled one element at a time, when it is a whole-array conflict
+    # the rule could have settled (`ORDER_CONFLICT_REASON`); empty otherwise. It never carries a value.
+    reason: str = ""
 
     def __repr__(self) -> str:
         # The sides are plaintext settings; a log or a traceback must not print them (§4). The

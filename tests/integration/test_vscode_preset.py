@@ -22,6 +22,7 @@ from syncintosh.core.advice import Advice
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.errors import SecretScanError
+from syncintosh.core.keyed_array import ORDER_CONFLICT_REASON
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
 from syncintosh.core.repo import COMMITMENTS_PATH
@@ -704,6 +705,51 @@ def test_a_reordered_binding_group_settles_in_one_resolve_and_both_machines_conv
     assert settled.has_conflicts is False
     assert b'"b": 2' in _read(b, KEYBINDINGS)
     assert _read(b, KEYBINDINGS).index(b"terminal.clear") < _read(b, KEYBINDINGS).index(b"b.extra")
+    _run(a)
+    assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
+
+
+def test_an_order_conflict_is_one_view_with_its_reason_and_one_whole_side_pick_converges_both_machines(
+    tmp_path, memory_key_store
+) -> None:
+    # given — four bindings. A reorders the three it did not change, and edits the first; B reorders the same three
+    # into a different order, and edits the first differently. The unchanged bindings disagree on the order.
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    base = (
+        b'[\n  {"key": "cmd+1", "command": "x.one"},\n  {"key": "cmd+2", "command": "x.two"},\n'
+        b'  {"key": "cmd+3", "command": "x.three"},\n  {"key": "cmd+4", "command": "x.four"}\n]\n'
+    )
+    _write(a, KEYBINDINGS, base)
+    _run(a)
+    _run(b)
+    _write(
+        a,
+        KEYBINDINGS,
+        b'[\n  {"key": "cmd+1", "command": "x.one.a"},\n  {"key": "cmd+3", "command": "x.three"},\n'
+        b'  {"key": "cmd+2", "command": "x.two"},\n  {"key": "cmd+4", "command": "x.four"}\n]\n',
+    )
+    _run(a)
+    edited_by_b = (
+        b'[\n  {"key": "cmd+1", "command": "x.one.b"},\n  {"key": "cmd+2", "command": "x.two"},\n'
+        b'  {"key": "cmd+4", "command": "x.four"},\n  {"key": "cmd+3", "command": "x.three"}\n]\n'
+    )
+    _write(b, KEYBINDINGS, edited_by_b)
+
+    # when — B's sync stops on the array
+    stopped = _run(b)
+
+    # then — one view for the whole array, and it says why: the order cannot be settled one binding at a time
+    assert stopped.has_conflicts is True
+    assert len(stopped.conflicts) == 1
+    assert stopped.conflicts[0].path == KEYBINDINGS
+    assert ORDER_CONFLICT_REASON in stopped.conflicts[0].detail
+
+    # when — B picks its own side for the whole array, in one resolve round
+    settled = _run(b, decide=decision(take_chooser("local")), resolving=True)
+
+    # then — no conflict is left, B keeps its own file, and A converges to it
+    assert settled.has_conflicts is False
+    assert _read(b, KEYBINDINGS) == edited_by_b
     _run(a)
     assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
 

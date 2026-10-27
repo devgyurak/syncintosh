@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
-from syncintosh.core.keyed_array import ArrayRule, merge_keyed_array
+from syncintosh.core.keyed_array import ArrayRule, KeyedMerge, OrderConflict, merge_keyed_array
 from syncintosh.core.models import Conflict, TreeMerge
 from syncintosh.core.resolution import Side
 from syncintosh.core.tree import ABSENT, Absent, Array, ElementId, EmptyObject, KeyPath, Leaf, Node, Scalar, Tree
@@ -88,7 +88,7 @@ def merge_tree(
                 if path in rules
                 else None
             )
-            if element_merge is not None:
+            if isinstance(element_merge, KeyedMerge):
                 merged[path] = element_merge.merged
                 conflicts.extend(
                     Conflict(
@@ -101,7 +101,10 @@ def merge_tree(
                     for group in element_merge.conflicts
                 )
                 continue
-            conflicts.append(Conflict(path=path, base=base_value, local=local_value, remote=remote_value))
+            reason = element_merge.reason if isinstance(element_merge, OrderConflict) else ""
+            conflicts.append(
+                Conflict(path=path, base=base_value, local=local_value, remote=remote_value, reason=reason)
+            )
         if not isinstance(chosen, Absent):
             merged[path] = chosen
 

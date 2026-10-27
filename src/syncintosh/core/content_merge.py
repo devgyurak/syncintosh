@@ -214,7 +214,10 @@ def _merge_via_adapter(
         element_picks=_settled_elements(adapter, element_picks),
     )
     if result.has_conflicts:
-        return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts)), ""
+        # The first fixed reason a conflict carries (an order conflict), so the person is told why it is a whole array.
+        reason = next((conflict.reason for conflict in result.conflicts if conflict.reason), "")
+        addresses = tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts))
+        return None, addresses, reason
     rendered, reason = render_checked(adapter, result.merged, local_text, arrays)
     if rendered is None:
         return None, (), reason

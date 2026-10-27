@@ -489,7 +489,9 @@ def merge(
         for conflict in result.conflicts:
             # The same label the pending-conflict detail uses; an array at the root —
             # `keybindings.json` — is compared whole, so the document itself is the conflict.
-            typer.echo(f"conflict: {path_label(conflict.path, conflict.element, when_tag=when_tag)}", err=True)
+            label = path_label(conflict.path, conflict.element, when_tag=when_tag)
+            # An order conflict says why it is a whole array; the reason is a fixed text, never a value.
+            typer.echo(f"conflict: {label}" + (f" ({conflict.reason})" if conflict.reason else ""), err=True)
         if result.reason:
             # The render refused: say why, so a person knows what would have to change to merge this file.
             typer.echo(f"not merged: {result.reason}", err=True)

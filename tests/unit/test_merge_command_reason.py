@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from syncintosh.adapters.jsonc import CHANGED_WITH_NOTE_REFUSED, UNRULED_REMOVAL_REFUSED
 from syncintosh.cli import main as main_module
 from syncintosh.cli.main import WHEN_RUN_KEY_NOTICE
+from syncintosh.core.keyed_array import ORDER_CONFLICT_REASON
 from syncintosh.presets.vscode import KEYBINDINGS
 from syncintosh.system.paths import MachinePaths
 
@@ -96,6 +97,27 @@ def test_a_when_clause_conflict_prints_a_tag_and_never_the_clause_text(
     assert re.fullmatch(r"conflict: \(document\) \[key=\"b\", when=[0-9a-f]{12}\]", conflicts[0]) is not None
     # the tags come from a key for this run only, so the person is told once, on stderr
     assert WHEN_RUN_KEY_NOTICE in result.output
+
+
+def test_an_order_conflict_names_the_whole_array_and_why_it_is_one(tmp_path: Path) -> None:
+    # given — both sides reorder the shared bindings, to different orders
+    def binding(name: str) -> bytes:
+        return b'{ "key": "%s", "command": "x" }' % name.encode()
+
+    base = tmp_path / "base.jsonc"
+    local = tmp_path / "local.jsonc"
+    remote = tmp_path / "remote.jsonc"
+    base.write_bytes(b"[\n  " + b",\n  ".join(binding(k) for k in "abc") + b"\n]\n")
+    local.write_bytes(b"[\n  " + b",\n  ".join(binding(k) for k in "bac") + b"\n]\n")
+    remote.write_bytes(b"[\n  " + b",\n  ".join(binding(k) for k in "acb") + b"\n]\n")
+
+    # when
+    result = runner.invoke(main_module.app, ["merge", str(base), str(local), str(remote), "--path", KEYBINDINGS])
+
+    # then — the conflict line names the whole array and the fixed reason; it is not a bare "(document)"
+    conflicts = [line for line in result.output.splitlines() if line.startswith("conflict:")]
+    assert result.exit_code == 1
+    assert conflicts == [f"conflict: (document) ({ORDER_CONFLICT_REASON})"]
 
 
 def test_a_rule_less_refusal_says_its_fixed_reason(tmp_path: Path) -> None:
