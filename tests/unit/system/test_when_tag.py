@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from syncintosh.system.scan_allow import keyed_when_tag, new_scan_allow, save_scan_allow
+import pytest
+
+from syncintosh.core.errors import ScanAllowCorrupt
+from syncintosh.system.scan_allow import ALLOW_VERSION, keyed_when_tag, new_scan_allow, save_scan_allow
 
 
 def test_the_same_text_under_one_machine_key_gives_the_same_tag(tmp_path: Path) -> None:
@@ -43,3 +47,13 @@ def test_without_a_key_there_is_no_tagger_and_the_allowlist_is_not_created(tmp_p
     # then — the caller falls back to the hidden form, and nothing was written
     assert tag is None
     assert not allow.exists()
+
+
+def test_a_key_of_the_wrong_length_is_refused_rather_than_used_to_tag(tmp_path: Path) -> None:
+    # given — an allowlist whose key is shorter than the loader accepts
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"version": ALLOW_VERSION, "key": "ab", "entries": []}), encoding="utf-8")
+
+    # when & then — a short key would make the tag a guessable digest, so it is refused, not used
+    with pytest.raises(ScanAllowCorrupt):
+        keyed_when_tag(allow)

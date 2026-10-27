@@ -244,6 +244,7 @@ __all__ = [
     "ScanAllow",
     "ScanAllowEntry",
     "fingerprint",
+    "keyed_when_tag",
     "load_scan_allow",
     "new_scan_allow",
     "save_scan_allow",
@@ -283,6 +284,10 @@ def _read_key(path: Path) -> bytes | None:
     if not isinstance(key_raw, str):
         raise ScanAllowCorrupt(f"the scan allowlist {path} has no key")
     try:
-        return bytes.fromhex(key_raw)
+        key = bytes.fromhex(key_raw)
     except ValueError as exc:
         raise ScanAllowCorrupt(f"the scan allowlist {path} has a malformed key") from exc
+    # The same length the loader enforces: a shorter key would make the tag a guessable digest, not a keyed one.
+    if len(key) != KEY_BYTES:
+        raise ScanAllowCorrupt(f"the scan allowlist {path} key must be {KEY_BYTES} bytes")
+    return key
