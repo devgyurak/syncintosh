@@ -13,7 +13,6 @@ from syncintosh.core.diff import changed_addresses
 from syncintosh.core.keyed_array import (
     ArrayRule,
     accepts_group,
-    group_ids,
     group_leaf,
     group_leaves,
     merge_keyed_array,
@@ -553,17 +552,6 @@ def test_accepts_group_refuses_a_non_array_and_admits_an_empty_one() -> None:
     assert accepts_group(tree_from_value("scalar").value(()), RULE, group) is False
 
 
-def test_group_ids_lists_each_group_once_in_order() -> None:
-    # given
-    array = _array([_binding("a", "1"), _binding("a", "2"), _binding("b", "3", when="p")])
-
-    # when
-    groups = group_ids(array, RULE)
-
-    # then
-    assert groups == ((("key", "a"), ("when", None)), (("key", "b"), ("when", "p")))
-
-
 def test_changed_addresses_names_only_the_binding_that_changed() -> None:
     # given
     left = tree_from_value({"keys": [_binding("a", "1"), _binding("b", "2")]})
@@ -576,7 +564,7 @@ def test_changed_addresses_names_only_the_binding_that_changed() -> None:
     assert addresses == ((("keys",), (("key", "b"), ("when", None))),)
 
 
-def test_a_picked_group_whose_order_the_shared_order_contradicts_is_one_conflict() -> None:
+def test_a_picked_group_keeps_the_order_of_the_side_it_was_picked_from() -> None:
     # given — local edits the first binding's args; remote edits the same group and moves it after the other
     base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b")])
     local = _array([_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")])
@@ -586,8 +574,10 @@ def test_a_picked_group_whose_order_the_shared_order_contradicts_is_one_conflict
     # when
     picked_local = merge_keyed_array(base, local, remote, RULE, picks={group: "local"})
 
-    # then — local's order cannot be kept with remote's, so the whole array is a conflict instead
-    assert picked_local is None
+    # then — local's group, in local's order, without a whole-array conflict or a stuck resolve
+    assert picked_local is not None
+    assert picked_local.conflicts == ()
+    assert _plain(picked_local.merged) == [_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")]
 
 
 def test_a_pick_of_the_side_whose_order_is_kept_settles_without_a_conflict() -> None:
@@ -659,4 +649,19 @@ def test_group_leaves_indexes_each_group_once_and_matches_group_leaf() -> None:
     # then
     assert leaves is not None
     assert leaves[group] == group_leaf(array, RULE, group)
-    assert set(leaves) == set(group_ids(array, RULE) or ())
+    assert set(leaves) == {((("key", "a"), ("when", None))), ((("key", "b"), ("when", "p")))}
+
+
+def test_a_proposal_for_a_group_the_local_side_removed_stays_between_its_neighbours() -> None:
+    # given — local removed the `ctrl+k` binding; remote changed it; the model proposes a replacement for it
+    base = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k"), _binding("ctrl+y", "y")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+y", "y")])
+    remote = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k", args=1), _binding("ctrl+y", "y")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: _array([_binding("ctrl+k", "p")])})
+
+    # then — the proposal sits where the group was, not after `ctrl+y`
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p", "y"]

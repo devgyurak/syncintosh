@@ -115,14 +115,18 @@ def merge_keyed_array(
     local_groups = _groups(local_items, rule)
     remote_groups = _groups(remote_items, rule)
 
+    base_ids = [identity for identity, _ in base_items]
     local_ids = [identity for identity, _ in local_items]
     remote_ids = [identity for identity, _ in remote_items]
     chosen: list[_Item] = []
     conflicts: list[GroupConflict] = []
-    # Each settled group's bindings, with the order they had on their source, so the final order can be checked
-    # against the order the person chose; and each proposed group's replacement, so it takes the group's place.
+    # A settled group's bindings, with the order they had on the side the person chose, so the order is put back
+    # into that side's order inside the group's own places. A proposed group's replacement, with where the group held
+    # on each side, so the proposed bindings take its place.
     constraints: list[tuple[frozenset[ElementId], list[ElementId]]] = []
-    replacements: list[tuple[frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]] = []
+    replacements: list[
+        tuple[frozenset[ElementId], frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]
+    ] = []
     for group in _union(base_groups, local_groups, remote_groups):
         base_group = base_groups.get(group, ())
         local_group = local_groups.get(group, ())
@@ -157,10 +161,11 @@ def merge_keyed_array(
                     constraints.append((remote_members, remote_ids))
                 else:
                     constraints.append((frozenset(identities), identities))
-                    replacements.append((local_members, remote_members, tuple(identities)))
+                    base_members = frozenset(identity for identity, _ in base_group)
+                    replacements.append((local_members, remote_members, base_members, tuple(identities)))
         chosen.extend(picked)
 
-    ordered = _ordered(base_items, local_items, remote_items, chosen, constraints, replacements)
+    ordered = _ordered(base_ids, local_ids, remote_ids, chosen, constraints, replacements)
     if ordered is None:
         return None
     return KeyedMerge(merged=Array(tuple(node for _, node in ordered)), conflicts=tuple(conflicts))
@@ -259,16 +264,6 @@ def accepts_group(leaf: Leaf, rule: ArrayRule, group: ElementId) -> bool:
     return items is not None and all(_group_of(identity, rule) == group for identity, _ in items)
 
 
-def group_ids(leaf: Leaf, rule: ArrayRule) -> tuple[ElementId, ...] | None:
-    """The groups an array leaf holds, in first-seen order; ``None`` when the rule cannot identify it."""
-    if not isinstance(leaf, Array):
-        return None
-    items = _items(leaf, rule)
-    if items is None:
-        return None
-    return tuple(dict.fromkeys(_group_of(identity, rule) for identity, _ in items))
-
-
 def group_leaves(leaf: Leaf, rule: ArrayRule) -> dict[ElementId, Leaf] | None:
     """Every group of an array leaf, each as its leaf, in one pass; ``None`` when the rule cannot identify it.
 
@@ -315,23 +310,21 @@ def _leaf(items: tuple[_Item, ...]) -> Leaf:
 
 
 def _ordered(
-    base_items: list[_Item],
-    local_items: list[_Item],
-    remote_items: list[_Item],
+    base_ids: list[ElementId],
+    local_ids: list[ElementId],
+    remote_ids: list[ElementId],
     chosen: list[_Item],
     constraints: list[tuple[frozenset[ElementId], list[ElementId]]],
-    replacements: list[tuple[frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]],
+    replacements: list[tuple[frozenset[ElementId], frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]],
 ) -> list[_Item] | None:
     """The merged elements in order, or ``None`` when the two sides reordered the shared ones differently.
 
-    The elements that survive and exist on all three sides ("anchors") carry the order. Each other
-    element is placed after its nearest preceding sibling on the side it came from, so local additions
-    keep their local order and remote additions land where they were on the remote.
+    The elements that survive and exist on all three sides ("anchors") carry the order. A group the person
+    settled to one side is put into that side's order inside the places it already holds, so the choice shows
+    in the file exactly as it was seen. Each other element is placed after its nearest preceding sibling on the
+    side it came from.
     """
     node_of = dict(chosen)
-    base_ids = [identity for identity, _ in base_items]
-    local_ids = [identity for identity, _ in local_items]
-    remote_ids = [identity for identity, _ in remote_items]
     local_set, remote_set = set(local_ids), set(remote_ids)
     anchors = {
         identity for identity in base_ids if identity in node_of and identity in local_set and identity in remote_set
@@ -346,18 +339,12 @@ def _ordered(
         anchored = local_order
     else:
         return None
-    # A group the person settled keeps the order it had on the side they chose, as far as its own bindings go.
-    # When the shared order cannot show that, the array is one conflict rather than a silently reordered file.
-    for members, order in constraints:
-        if [identity for identity in order if identity in members and identity in anchors] != [
-            identity for identity in anchored if identity in members
-        ]:
-            return None
+    anchored = _within_settled(anchored, constraints, anchors)
 
     local_sequence, remote_sequence = list(local_ids), list(remote_ids)
-    for old_local, old_remote, new_identities in replacements:
-        local_sequence = _spine(local_sequence, old_local, new_identities)
-        remote_sequence = _spine(remote_sequence, old_remote, new_identities)
+    for local_old, remote_old, base_old, new_identities in replacements:
+        local_sequence = _spine(local_sequence, local_old, new_identities, base_ids, base_old)
+        remote_sequence = _spine(remote_sequence, remote_old, new_identities, base_ids, base_old)
 
     ordered = list(anchored)
     placed = set(ordered)
@@ -370,18 +357,55 @@ def _ordered(
     return [(identity, node_of[identity]) for identity in ordered]
 
 
-def _spine(sequence: list[ElementId], old: frozenset[ElementId], new: tuple[ElementId, ...]) -> list[ElementId]:
-    """`sequence` with a group's identities replaced by a proposal's, at the first place the group held.
+def _within_settled(
+    anchored: list[ElementId],
+    constraints: list[tuple[frozenset[ElementId], list[ElementId]]],
+    anchors: set[ElementId],
+) -> list[ElementId]:
+    """The shared order, with each settled group's anchors put into the order of the side it was settled to.
 
-    A proposed binding takes the position the binding it replaces held on this side, rather than the end of
-    the array, so a proposal never moves a binding relative to the others.
+    The group keeps the places it holds in the shared order; only the order among those places changes, so the
+    rest of the array keeps its order. A group that does not hold the same anchors on both sides cannot be placed
+    this way, so it is left as the shared order gives it.
+    """
+    result = list(anchored)
+    for members, order in constraints:
+        places = [index for index, identity in enumerate(result) if identity in members]
+        wanted = [identity for identity in order if identity in members and identity in anchors]
+        if len(places) == len(wanted):
+            for place, identity in zip(places, wanted, strict=True):
+                result[place] = identity
+    return result
+
+
+def _spine(
+    sequence: list[ElementId],
+    old: frozenset[ElementId],
+    new: tuple[ElementId, ...],
+    base_ids: list[ElementId],
+    base_old: frozenset[ElementId],
+) -> list[ElementId]:
+    """`sequence` with a group's identities replaced by a proposal's, where the group held on this side.
+
+    When the group is absent on this side (the side removed it), the proposal goes where the group sat in the base,
+    after the nearest base binding this side still has, so it is never moved to the end.
     """
     position = next((index for index, identity in enumerate(sequence) if identity in old), None)
-    if position is None:
-        return [identity for identity in sequence if identity not in old] + list(new)
-    before = sequence[:position]
-    after = [identity for identity in sequence[position:] if identity not in old]
-    return [*before, *new, *after]
+    if position is not None:
+        return [*sequence[:position], *new, *[identity for identity in sequence[position:] if identity not in old]]
+    base_position = next((index for index, identity in enumerate(base_ids) if identity in base_old), None)
+    if base_position is None:
+        return [*sequence, *new]
+    present = set(sequence)
+    for before in reversed(base_ids[:base_position]):
+        if before in present:
+            index = sequence.index(before) + 1
+            return [*sequence[:index], *new, *sequence[index:]]
+    for after in base_ids[base_position + 1 :]:
+        if after in present:
+            index = sequence.index(after)
+            return [*sequence[:index], *new, *sequence[index:]]
+    return [*sequence, *new]
 
 
 def _slot(sequence: list[ElementId], position: int, ordered: list[ElementId], placed: set[ElementId]) -> int:

@@ -7,7 +7,7 @@ afterwards (``AGENTS.md`` §2.7).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree, element_label
@@ -92,9 +92,11 @@ class ContentMerge:
     undecodable, unparseable, or text merge).
     """
 
-    data: bytes
+    # The merged bytes are plaintext, so a repr never shows them; the addresses name a binding, which can carry a
+    # `when` clause, so they stay out of a repr too (a caller that prints them uses `element_label`).
+    data: bytes = field(repr=False)
     conflicted: bool
-    conflict_addresses: tuple[ConflictAddress, ...] = ()
+    conflict_addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)

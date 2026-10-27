@@ -14,7 +14,7 @@ as in-sync, exactly as `sync` would treat it (one implementation, ``AGENTS.md`` 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -61,9 +61,9 @@ class FileDiff:
 
     path: str
     status: DiffStatus
-    addresses: tuple[ConflictAddress, ...] = ()
-    here: str | None = None
-    repo: str | None = None
+    addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
+    here: str | None = field(default=None, repr=False)
+    repo: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

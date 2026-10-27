@@ -45,7 +45,7 @@ from syncintosh.core.errors import (
     ProjectionError,
     SyntaxInvalid,
 )
-from syncintosh.core.keyed_array import ArrayRule, group_leaf
+from syncintosh.core.keyed_array import ArrayRule, group_leaves
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
@@ -97,7 +97,7 @@ from syncintosh.core.resolution import (
     digest_of,
     fingerprint,
 )
-from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
+from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
@@ -997,15 +997,11 @@ def _element_view(
     path: str,
     key_path: KeyPath,
     element: ElementId,
-    rule: ArrayRule,
-    base_tree: Tree,
-    local_tree: Tree,
-    remote_tree: Tree,
+    base_part: Leaf,
+    local_part: Leaf,
+    remote_part: Leaf,
 ) -> ConflictView:
     """One binding group of an identified array as a choice. Its digests cover the group's bindings only."""
-    base_part = group_leaf(base_tree.value(key_path), rule, element)
-    local_part = group_leaf(local_tree.value(key_path), rule, element)
-    remote_part = group_leaf(remote_tree.value(key_path), rule, element)
     return ConflictView(
         kind="key",
         file_id=file_id,
@@ -1025,6 +1021,11 @@ def _element_view(
     )
 
 
+def _group_index(leaf: Leaf, rule: ArrayRule) -> dict[ElementId, Leaf]:
+    """Every binding group of one side's array, indexed once; an unidentifiable array has none."""
+    return group_leaves(leaf, rule) or {}
+
+
 def _content_views(
     file_id: str,
     path: str,
@@ -1041,13 +1042,32 @@ def _content_views(
     if trees is None:
         return (_whole_view(file_id, path, fmt, base, local, remote),)
     base_tree, local_tree, remote_tree = trees
+    # Each array is indexed once per side, not scanned once per binding group it conflicts in.
+    indexed: dict[KeyPath, tuple[dict[ElementId, Leaf], dict[ElementId, Leaf], dict[ElementId, Leaf]]] = {}
     views: list[ConflictView] = []
     for key_path, element in dict.fromkeys(addresses):
         if element is None:
             views.append(_key_view(file_id, path, key_path, base_tree, local_tree, remote_tree))
-        else:
+            continue
+        if key_path not in indexed:
             rule = arrays[key_path]
-            views.append(_element_view(file_id, path, key_path, element, rule, base_tree, local_tree, remote_tree))
+            indexed[key_path] = (
+                _group_index(base_tree.value(key_path), rule),
+                _group_index(local_tree.value(key_path), rule),
+                _group_index(remote_tree.value(key_path), rule),
+            )
+        base_leaves, local_leaves, remote_leaves = indexed[key_path]
+        views.append(
+            _element_view(
+                file_id,
+                path,
+                key_path,
+                element,
+                base_leaves.get(element, ABSENT),
+                local_leaves.get(element, ABSENT),
+                remote_leaves.get(element, ABSENT),
+            )
+        )
     return tuple(views)
 
 
