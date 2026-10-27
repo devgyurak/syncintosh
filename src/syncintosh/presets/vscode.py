@@ -133,9 +133,9 @@ VSCODE = Preset.create(
         # entry overrides an earlier one), so the merge keeps local's order and places each addition after
         # its predecessor on its own side, and it never reorders across sides silently. Two bindings are
         # the same group when they share `key` and `when`; a group both machines changed differently is a
-        # conflict, and only that binding is asked about. The conflict names a binding by its key and when
-        # (structure, not values); its command and args are never printed. `key` is compared exactly, so `Ctrl+A` and
-        # `ctrl+a` are two groups even though VS Code reads them as one (decision V6, issue #21).
+        # conflict, and only that binding is asked about. The conflict names a binding by its key and a digest of
+        # its `when`, never the text; its command and args are never printed. `key` is compared exactly, so
+        # `Ctrl+A` and `ctrl+a` are two groups even though VS Code reads them as one (decision V6, issue #21).
         PresetFile.create(
             path=KEYBINDINGS,
             format="jsonc",

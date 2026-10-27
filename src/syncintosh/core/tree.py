@@ -214,21 +214,23 @@ def path_label(path: KeyPath, element: ElementId | None = None) -> str:
     return label if element is None else f"{label} {element_label(element)}"
 
 
-def element_label(element: ElementId) -> str:
+def element_label(element: ElementId, *, when_text: bool = False) -> str:
     """An array element's identity as `[key="…", when=sha256:…]`.
 
-    A `when` clause is shown as a short digest, not its text: it can name an internal project or host, and a
-    conflict prints in logs and pending state. The digest still tells two bindings under one key apart. A missing
+    A `when` clause is shown as a short digest by default: it can name an internal project or host, and a
+    conflict prints in logs and pending state. The digest still tells two bindings under one key apart. Only a
+    caller that sends the label to a model that masks it asks for the text (`when_text=True`); the digest is not
+    a safe thing to send, because a short predictable value can be guessed and confirmed against it. A missing
     optional field prints as `(missing)`, which is not the same as `""`, so the two cannot be confused in a prompt.
     """
-    shown = [f"{field}={_value_text(field, value)}" for field, value in element]
+    shown = [f"{field}={_value_text(field, value, when_text)}" for field, value in element]
     return f"[{', '.join(shown)}]"
 
 
-def _value_text(field: str, value: str | None) -> str:
+def _value_text(field: str, value: str | None, when_text: bool) -> str:
     if value is None:
         return "(missing)"
-    if field == "when":
+    if field == "when" and not when_text:
         return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
     return json.dumps(value, ensure_ascii=False)
 

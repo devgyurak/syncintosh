@@ -541,3 +541,32 @@ def test_a_binding_proposal_of_its_own_group_may_be_offered() -> None:
         )
         is None
     )
+
+
+def test_a_binding_conflict_sent_to_the_model_carries_its_when_masked_and_never_a_digest() -> None:
+    # given — a binding whose `when` names an internal host
+    view = ConflictView(
+        kind="key",
+        file_id="f" * 32,
+        path=KEYBINDINGS,
+        key_path=(),
+        fingerprint="z" * 64,
+        base_text='[{"key": "ctrl+k", "command": "a", "when": "resourceHost == \'build.internal\'"}]',
+        local_text="[]",
+        remote_text="[]",
+        element=(("key", "ctrl+k"), ("when", "resourceHost == 'build.internal'")),
+    )
+    sent: list[str] = []
+
+    class Recording:
+        def advise(self, index, *, path, key, base, local, remote):
+            sent.append(key.text)
+            return
+
+    # when
+    _chooser(Recording(), lambda suggestion: True)(view)
+
+    # then — the model is not sent the digest, and the internal host does not reach it either
+    assert sent, "the advisor was asked"
+    assert "sha256:" not in sent[0]
+    assert "build.internal" not in sent[0]

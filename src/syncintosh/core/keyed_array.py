@@ -66,8 +66,9 @@ class GroupConflict:
     an array, or ``ABSENT`` when that side has none in the group.
     """
 
-    element: ElementId
-    # The bindings are plaintext settings, so a repr never shows them (AGENTS.md §4); the identity stays visible.
+    # Plaintext settings, so a repr shows neither the bindings nor the identity: a `when` clause can name an internal
+    # host. A caller that needs the group's name prints `element_label`.
+    element: ElementId = field(repr=False)
     base: Leaf = field(repr=False)
     local: Leaf = field(repr=False)
     remote: Leaf = field(repr=False)
