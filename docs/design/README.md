@@ -13,6 +13,7 @@ of at an unversioned document.
 | [03-manifest.md](03-manifest.md) | File IDs, records, canonical serialization | Accepted |
 | [04-envelope-v1.md](04-envelope-v1.md) | Envelope layout, AAD, decrypt errors | Accepted |
 | [05-key-generations.md](05-key-generations.md) | The key ring, rotation, distribution | Accepted |
+| [06-llm-assist.md](06-llm-assist.md) | LLM-assisted resolution: masking, validation, URLs, endpoint | Accepted |
 | [presets.md](presets.md) | Built-in preset reference table | Living table |
 
 `Accepted` means implemented or about to be implemented; changing one follows the revision

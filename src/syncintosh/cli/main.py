@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -32,10 +33,13 @@ from syncintosh.services import sync as sync_service
 from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 
 if TYPE_CHECKING:  # these names appear only in annotations
+    from collections.abc import Callable
+
     from syncintosh.core.ports import SyntaxValidator
     from syncintosh.core.presets import ValidatorName
     from syncintosh.core.resolution import Choice, ConflictView, NamedChoice, Picks
     from syncintosh.services.keys import RotationMode
+    from syncintosh.services.resolve import Suggestion
 
 app = typer.Typer(
     help="Keep developer-environment settings in step across Macs.",
@@ -557,11 +561,13 @@ def resolve(
         None, "--remote", help="settle the conflict on this path to remote (repeatable)"
     ),
     yes: bool = typer.Option(False, "--yes", help="publish without the approval prompt"),
+    llm: bool = typer.Option(False, "--llm", help="ask the configured model for each content conflict"),
 ) -> None:
     """Settle the conflicts a stopped sync left pending, then sync. Exits 1 when conflicts remain.
 
-    With no side named, each conflict is shown with its values and you choose for it. A run that
-    leaves any conflict without a choice publishes nothing.
+    With no side named, each conflict is shown with its values and you choose for it. With --llm the
+    configured model suggests a choice for each content conflict; you accept or decline each one, and
+    the final approval still applies. A run that leaves any conflict without a choice publishes nothing.
     """
     from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
     from syncintosh.system.config import load_config
@@ -572,17 +578,25 @@ def resolve(
         raise typer.BadParameter("--take must be `local` or `remote`")
     if take is not None and scoped:
         raise typer.BadParameter("--take settles every conflict; drop --local/--remote, or drop --take")
+    if llm and (take is not None or scoped):
+        raise typer.BadParameter("--llm chooses for you; drop --take/--local/--remote to use it")
     machine = MachinePaths.default()
     approve = None if yes else _confirm_resolution
     try:
         config = load_config(machine.config_file)
+        if llm and yes and config.llm.auto_apply:
+            # --yes skips the approval screen, the only place an auto-applied proposal is seen.
+            raise typer.BadParameter("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
+        ports = _sync_ports(config, machine)
         if take is not None:
             choose = take_chooser(take)
         elif scoped:
             choose = scoped_chooser(tuple(local or ()), tuple(remote or ()), home=str(machine.home))
+        elif llm:
+            choose = _assisted_choice(config, machine, ports)
         else:
             choose = _ask_choice
-        report = sync_service(**_sync_ports(config, machine), resolving=True, decide=decision(choose, approve=approve))
+        report = sync_service(**ports, resolving=True, decide=decision(choose, approve=approve))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     except DomainError as exc:
@@ -592,6 +606,86 @@ def resolve(
     if report.has_conflicts or report.needs_adopt:
         typer.echo("nothing was published; the conflicts that remain are still pending", err=True)
         raise typer.Exit(code=1)
+
+
+def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], Choice | None]:
+    """The chooser for `--llm`: the configured model first, the person by hand whenever it has no usable answer.
+
+    The endpoint is confirmed before the first call when it is not a loopback or private-network address,
+    because the conflicting values leave the machine. Nothing is sent before that answer.
+    """
+    from getpass import getuser
+
+    from syncintosh.core.advice import is_public_endpoint
+    from syncintosh.llm.client import OpenAIAdvisor, OpenAIChatTransport
+    from syncintosh.llm.keys import llm_api_key
+    from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
+    from syncintosh.system.masking import TextMasker
+
+    llm = config.llm
+    if llm.base_url is None or llm.model is None:
+        raise typer.BadParameter("set llm.base_url and llm.model in config.json before using --llm")
+    if urlsplit(llm.base_url).scheme == "http" and is_public_endpoint(llm.base_url, llm.internal_domains):
+        # The key and the conflicting values would travel in clear to a host off the network.
+        raise typer.BadParameter("llm.base_url over plain http may not name a public host; use https")
+    shell = shell_presets(ports["catalog"], llm.auto_apply)
+    if shell:
+        # A shell file is code the next shell runs. A model's change to it is always shown, never applied unasked.
+        raise typer.BadParameter(f"llm.auto_apply names shell presets, which are always asked: {', '.join(shell)}")
+    if is_public_endpoint(llm.base_url, llm.internal_domains) and not typer.confirm(
+        f"{llm.base_url} is not a loopback or private-network address: the conflicting values would leave "
+        "this network. Continue?",
+        default=False,
+    ):
+        raise typer.Exit(code=1)
+    catalog, adapters, validators = ports["catalog"], ports["adapters"], ports["validators"]
+    return advised_chooser(
+        advisor=OpenAIAdvisor(
+            OpenAIChatTransport(base_url=llm.base_url, model=llm.model, api_key=llm_api_key(), timeout=60.0)
+        ),
+        masker=TextMasker(home=str(machine.home), username=getuser(), internal_domains=llm.internal_domains),
+        fallback=_ask_choice,
+        present=_present_suggestion,
+        auto_apply=auto_apply_for(catalog, frozenset(llm.auto_apply)),
+        check=lambda view, text: proposal_problem(
+            view, text, catalog=catalog, adapters=adapters, validators=validators
+        ),
+    )
+
+
+def _present_suggestion(suggestion: Suggestion) -> bool:
+    """Show a model's suggestion with its rationale, the change it would make, and any new URL; read the accept.
+
+    A refused suggestion is shown with the reason and declined without asking. A URL the proposal
+    introduces is flagged as untrusted with its domain, whatever it matches.
+    """
+    from difflib import unified_diff
+
+    from rich.markup import escape
+
+    from syncintosh.core.resolution import Proposal
+
+    view = suggestion.view
+    console = Console()
+    heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
+    if view.key_path is not None:
+        heading += f"  key {escape(path_label(view.key_path))}"
+    console.print(heading)
+    console.print(f"  model: {escape(suggestion.rationale)}")
+    if suggestion.refused is not None:
+        console.print(f"  [red]not offered:[/] {escape(suggestion.refused)}")
+        return False
+    for url in suggestion.urls:
+        console.print(f"  [bold yellow]UNTRUSTED {escape(url.domain)}[/]  {escape(url.url)}")
+    choice = suggestion.choice
+    proposed = (
+        choice.text if isinstance(choice, Proposal) else (view.remote_text if choice == "remote" else view.local_text)
+    )
+    from syncintosh.core.advice import visible
+
+    for line in unified_diff(view.local_text.splitlines(), proposed.splitlines(), "local", "suggested", lineterm=""):
+        console.print(escape(visible(line)))
+    return typer.confirm("  accept this suggestion?", default=False)
 
 
 def _ask_choice(view: ConflictView) -> Choice:
@@ -635,11 +729,34 @@ def _show_conflict(console: Console, view: ConflictView) -> None:
 
 
 def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks) -> bool:
-    """Show what will be published and ask before anything is written to the remote."""
+    """Show what will be published, in full, and ask before anything is written to the remote.
+
+    A value a model proposed is shown as its text, never as the repr of its carrier, and every control
+    character is escaped, so the person reads what will be applied, including an auto-applied proposal.
+    """
     for view in views:
         if view.fingerprint in picks:
-            typer.echo(f"  {view.path}  {view.kind}  ->  {picks[view.fingerprint]}")
+            for line in _pick_lines(view, picks[view.fingerprint]):
+                typer.echo(line)
     return typer.confirm("Publish these choices?", default=False)
+
+
+def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
+    """One pick as the lines a person reads before publishing: its place, then the change it makes."""
+    from difflib import unified_diff
+
+    from syncintosh.core.advice import visible
+    from syncintosh.core.resolution import Proposal
+
+    place = f"  {view.path}  {view.kind}"
+    if view.key_path is not None:
+        place += f"  key {path_label(view.key_path)}"
+    if not isinstance(pick, Proposal):
+        return [f"{place}  ->  {pick}"]
+    if view.kind == "file":
+        change = unified_diff(view.local_text.splitlines(), pick.text.splitlines(), "local", "proposed", lineterm="")
+        return [f"{place}  ->  proposed by the model", *(f"    {visible(line)}" for line in change)]
+    return [f"{place}  ->  proposed by the model", f"    {visible(pick.text)}"]
 
 
 def _sync_ports(config, paths) -> dict:

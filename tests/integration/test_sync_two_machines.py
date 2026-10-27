@@ -36,7 +36,7 @@ from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest
 from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
 from syncintosh.core.paths import collision_key
-from syncintosh.core.ports import LiveFiles, PresetCatalog, PushOutcome, SyntaxValidator
+from syncintosh.core.ports import ContentAdapter, LiveFiles, PresetCatalog, PushOutcome, SyntaxValidator
 from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
 from syncintosh.core.resolution import Decide, Proposal
@@ -1875,3 +1875,152 @@ def test_an_apply_reports_the_restore_point_its_overwrites_come_from(tmp_path, m
     assert _git(b.repo, "rev-parse", f"{report.backup_commit}^").strip() == before
     assert _object_at(b, report.backup_commit, _only_file_id(b, report.backup_commit)) == b"one\ntwo\nTHREE\n"
     assert _read_live(b) == b"ONE\ntwo\nTHREE\n"
+
+
+# --------------------------------------------------------------------------- assisted resolve
+
+
+class _ReplyAdvisor:
+    """A stand-in model: one canned answer for every conflict, and a record of what it was sent."""
+
+    def __init__(self, advice) -> None:
+        self.advice = advice
+        self.sent: list[str] = []
+
+    def advise(self, index, *, path, key, base, local, remote):
+        self.sent.extend([path.text, key.text, base.text, local.text, remote.text])
+        return self.advice
+
+
+def _assisted(b: Machine, advisor, *, accept: bool):
+    from syncintosh.services.resolve import advised_chooser, proposal_problem
+    from syncintosh.system.masking import TextMasker
+
+    catalog = BuiltinCatalog.default()
+    adapters: dict[FileFormat, ContentAdapter] = {"jsonc": JsoncAdapter()}
+
+    def check(view, text):
+        return proposal_problem(view, text, catalog=catalog, adapters=adapters, validators={})
+
+    return advised_chooser(
+        advisor=advisor,
+        masker=TextMasker(home=str(b.home), username="integration", internal_domains=()),
+        fallback=take_chooser("local"),
+        present=lambda suggestion: accept,
+        auto_apply=lambda view: False,
+        check=check,
+    )
+
+
+def test_an_accepted_proposal_settles_the_conflict_and_both_machines_converge(tmp_path, memory_key_store) -> None:
+    # given — A and B changed the same key to different values, and the model proposes a third
+    from syncintosh.core.advice import Advice
+
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "14"), encoding="utf-8")
+    _run(b)
+    advisor = _ReplyAdvisor(Advice(choice="proposal", value="16", rationale="a third value"))
+
+    # when
+    report = _run(b, resolving=True, decide=decision(_assisted(b, advisor, accept=True)))
+
+    # then — the proposal is published and A converges on it; the model saw masked text only
+    assert report.has_conflicts is False
+    assert _read_jsonc(b) == JSONC_BASE.replace("13", "16")
+    assert _run(a).has_conflicts is False
+    assert _read_jsonc(a) == JSONC_BASE.replace("13", "16")
+    assert all(str(b.home) not in text for text in advisor.sent)
+
+
+def test_a_suggestion_that_breaks_the_syntax_is_never_applied(tmp_path, memory_key_store) -> None:
+    # given — the model's value does not parse, so the check refuses it before anything is applied
+    from syncintosh.core.advice import Advice
+
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "14"), encoding="utf-8")
+    _run(b)
+    advisor = _ReplyAdvisor(Advice(choice="proposal", value='"unclosed', rationale="broken"))
+
+    # when — the person accepts nothing the check did not offer, so the fallback side settles it
+    report = _run(b, resolving=True, decide=decision(_assisted(b, advisor, accept=True)))
+
+    # then — the broken value never reaches either file; the fallback's local side is what publishes
+    assert report.has_conflicts is False
+    assert _read_jsonc(b) == JSONC_BASE.replace("13", "14")
+    assert _run(a).has_conflicts is False
+    assert _read_jsonc(a) == JSONC_BASE.replace("13", "14")
+    assert '"unclosed' not in _read_jsonc(a)
+
+
+def test_a_text_proposal_cannot_settle_a_conflict_whose_bytes_do_not_decode(tmp_path, memory_key_store) -> None:
+    # given — both sides hold bytes that are not UTF-8, so the content cannot be text
+    a, b, _ = _pair(tmp_path, memory_key_store, b"\xff\xfe one\n")
+    _write_live(a, b"\xff\xfe FROM A\n")
+    _run(a)
+    _write_live(b, b"\xff\xfe FROM B\n")
+    _run(b)
+
+    # when — a proposal that would replace the bytes with a string
+    report = _run(b, resolving=True, decide=decision(lambda view: Proposal("text\n")))
+
+    # then — refused: the conflict stays pending and the live file is untouched
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_live(b) == b"\xff\xfe FROM B\n"
+
+
+def test_a_run_that_applies_a_proposal_refuses_a_file_whose_content_is_not_in_the_restore_point(
+    tmp_path, memory_key_store
+) -> None:
+    # given — ZSH is pending-apply on B: A changed it, but B's apply was aborted, so B's live file still holds the
+    # old bytes, which no commit's record matches. PROFILE then diverges, and a model's proposal settles it.
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    stopped = _run(b)
+    assert stopped.has_conflicts is True
+
+    # when — the proposal is applied in this run, so every overwrite must keep its current content in the restore point
+    report = _run(
+        b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
+    )
+
+    # then — PROFILE is published with the proposal; ZSH is refused and its live bytes are left as they were
+    assert report.has_conflicts is False
+    assert (b.home / PROFILE).read_bytes() == b"alpha\nMERGED\n"
+    assert _read_live(b) == b"one\ntwo\nthree\n"
+    refused = [refusal for refusal in report.refused if refusal.path == ZSH]
+    assert len(refused) == 1
+    assert "restore point" in refused[0].reason
+
+
+def test_a_file_refused_by_a_proposal_run_is_applied_by_the_next_plain_sync(tmp_path, memory_key_store) -> None:
+    # given — the same refusal as above: ZSH was pending-apply and the proposal run left its live file alone
+    a, b = _two_file_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_file(a, PROFILE, b"alpha\nFROM A\n")
+    _run(a)
+    _write_file(b, PROFILE, b"alpha\nFROM B\n")
+    _run(b)
+    refused = _run(
+        b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
+    )
+    assert [refusal.path for refusal in refused.refused] == [ZSH]
+
+    # when — a plain sync has no proposal, so the guard does not apply and the stale record is written
+    report = _run(b)
+
+    # then — the file is not stuck: the next plain sync applies the published content. Whether that overwrite
+    # keeps a restore point is the open gap tracked in the design note, and is not decided here.
+    assert ZSH in report.applied
+    assert _read_live(b) == b"ONE\ntwo\nthree\n"

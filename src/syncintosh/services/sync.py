@@ -213,15 +213,17 @@ class Backup:
     that commit: an `--adopt remote` overwrite, or a file an earlier cycle published but never applied,
     can replace bytes that only an older commit (the ledger's) holds. That gap is tracked separately.
     `commit` is `None` only when nothing has been committed yet; `_apply` then refuses to overwrite
-    a file that exists.
+    a file that exists. `records` is the restore point's manifest records, when there is a commit: an
+    apply that a model proposed checks each overwritten file against them (`_in_restore_point`).
     """
 
     commit: str | None
+    records: Mapping[str, ManifestRecord] | None = field(default=None, repr=False)
 
     @classmethod
-    def create(cls, commit: str | None) -> Backup:
+    def create(cls, commit: str | None, records: Mapping[str, ManifestRecord] | None = None) -> Backup:
         """Name the restore point. Called only once the cycle has its collect commit, or its HEAD."""
-        return cls(commit=commit)
+        return cls(commit=commit, records=records)
 
 
 @dataclass(frozen=True)
@@ -470,6 +472,9 @@ _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 _NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
+_NOT_IN_RESTORE_POINT = (
+    "this run applies a model's proposal, and the file's current content is not in the restore point"
+)
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -903,7 +908,16 @@ def _whole_fingerprint(file_id: str, base: bytes, local: bytes, remote: bytes) -
     return fingerprint(file_id, None, _sha256(base), _sha256(local), _sha256(remote))
 
 
-def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: bytes) -> ConflictView:
+def _is_text(fmt: FileFormat, *sides: bytes) -> bool:
+    """True when the record is text and every side decodes as UTF-8.
+
+    The record's format decides first: a `binary` record is never text, however its bytes happen to
+    decode. A text record with a side that does not decode is not text either.
+    """
+    return fmt != "binary" and all(_decode(side) is not None for side in sides)
+
+
+def _whole_view(file_id: str, path: str, fmt: FileFormat, base: bytes, local: bytes, remote: bytes) -> ConflictView:
     """The whole file as one choice. Its three digests identify it; its text and diff are shown."""
     local_text = _readable(local)
     remote_text = _readable(remote)
@@ -917,6 +931,7 @@ def _whole_view(file_id: str, path: str, base: bytes, local: bytes, remote: byte
         file_id=file_id,
         path=path,
         key_path=None,
+        readable=_is_text(fmt, base, local, remote),
         fingerprint=_whole_fingerprint(file_id, base, local, remote),
         base_text=_readable(base),
         local_text=local_text,
@@ -964,6 +979,7 @@ def _key_view(
 def _content_views(
     file_id: str,
     path: str,
+    fmt: FileFormat,
     base: bytes,
     local: bytes,
     remote: bytes,
@@ -973,7 +989,7 @@ def _content_views(
     """The choices for one content conflict: one per conflicted key, or the whole file."""
     trees = _parsed(adapter, base, local, remote) if adapter is not None and key_paths else None
     if trees is None:
-        return (_whole_view(file_id, path, base, local, remote),)
+        return (_whole_view(file_id, path, fmt, base, local, remote),)
     base_tree, local_tree, remote_tree = trees
     return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
 
@@ -988,12 +1004,12 @@ def _content_pick(pick: Choice | None) -> Side | Proposal | None:
 
 
 def _checked(
-    presets: _Presets, data: bytes, path: str, file_id: str, base: bytes, local: bytes, remote: bytes
+    presets: _Presets, data: bytes, path: str, file_id: str, fmt: FileFormat, base: bytes, local: bytes, remote: bytes
 ) -> _Settled:
     """A merged result passes its syntax check whoever decided it; a failure is a conflict again."""
     if _syntax_ok(presets, data, path):
         return _Settled(data=data)
-    whole = _whole_view(file_id, path, base, local, remote)
+    whole = _whole_view(file_id, path, fmt, base, local, remote)
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
@@ -1018,22 +1034,25 @@ def _settle_content(
     """
     adapter = presets.adapter_for(fmt)
     whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
+    if isinstance(whole, Proposal) and not _is_text(fmt, base, local, remote):
+        # A text proposal cannot settle a binary file: it would replace the bytes with a string.
+        whole = None
     if whole is not None:
         settled = merge_content(base, local, remote, driver, adapter, choice=whole)
         if not settled.conflicted:
-            return _checked(presets, settled.data, path, file_id, base, local, remote)
+            return _checked(presets, settled.data, path, file_id, fmt, base, local, remote)
     first = merge_content(base, local, remote, driver, adapter)
     if not first.conflicted:
-        return _checked(presets, first.data, path, file_id, base, local, remote)
+        return _checked(presets, first.data, path, file_id, fmt, base, local, remote)
     key_choices: dict[KeyPath, Side | Proposal] = {}
-    for view in _content_views(file_id, path, base, local, remote, adapter, first.conflict_paths):
+    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, first.conflict_paths):
         key_pick = _content_pick(picks.get(view.fingerprint))
         if view.key_path is not None and key_pick is not None:
             key_choices[view.key_path] = key_pick
     merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
     if not merged.conflicted:
-        return _checked(presets, merged.data, path, file_id, base, local, remote)
-    views = _content_views(file_id, path, base, local, remote, adapter, merged.conflict_paths)
+        return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
+    views = _content_views(file_id, path, fmt, base, local, remote, adapter, merged.conflict_paths)
     return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
 
 
@@ -1549,6 +1568,7 @@ def _apply(
     home: str,
     adopt: AdoptChoice | None,
     backup: Backup,
+    guard_overwrites: bool = False,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
@@ -1674,6 +1694,15 @@ def _apply(
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
+        # A proposal settled this run, so an overwrite must replace only what the restore point holds.
+        if (
+            guard_overwrites
+            and live_bytes is not None
+            and live_bytes != data
+            and not _in_restore_point(backup, file_id, live_view)
+        ):
+            refused.append(Refusal(record.path, _NOT_IN_RESTORE_POINT))
+            continue
         live.write(live_path, data)
         applied.append(record.path)
     return _Applied(
@@ -1686,6 +1715,18 @@ def _apply(
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
     )
+
+
+def _in_restore_point(backup: Backup, file_id: str, live_view: bytes | None) -> bool:
+    """True when the restore point holds this file's current projected content, byte for byte.
+
+    The digest is of the projection, the form a record holds. A file that cannot be projected cannot be
+    shown to be in the restore point, so it is not.
+    """
+    if backup.records is None or live_view is None:
+        return False
+    record = backup.records.get(file_id)
+    return record is not None and _sha256(live_view) == record.sha256
 
 
 def _decision(
@@ -2059,6 +2100,10 @@ def _cycle(
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
     # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge.
+    # Only a run that applies a proposal checks overwrites against its records, so only that run reads them.
+    guard_overwrites = any(isinstance(pick, Proposal) for pick in resolution.picks.values())
+    restore_manifest = _read_manifest(transport, cipher, local_commit) if guard_overwrites and local_commit else None
+    backup_records = None if restore_manifest is None else restore_manifest.records
     applied = _apply(
         transport=transport,
         cipher=cipher,
@@ -2074,7 +2119,8 @@ def _cycle(
         config=config,
         home=home,
         adopt=adopt,
-        backup=Backup.create(local_commit),
+        backup=Backup.create(local_commit, records=backup_records),
+        guard_overwrites=guard_overwrites,
     )
     ledger_store.save(
         _settle_ledger(
