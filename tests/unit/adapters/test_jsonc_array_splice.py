@@ -14,7 +14,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from syncintosh.adapters.jsonc import UNRULED_REMOVAL_REFUSED, JsoncAdapter
+from syncintosh.adapters.jsonc import CHANGED_WITH_NOTE_REFUSED, UNRULED_REMOVAL_REFUSED, JsoncAdapter
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.tree import tree_from_value
@@ -560,6 +560,17 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
     assert rendered.count("// note line") == 2000
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_changed_binding_with_a_comment_inside_is_refused_with_its_fixed_reason() -> None:
+    # given — `a` has a comment inside it and gains an `args`, so the same binding is rewritten in its span
+    template = '[\n    { "key": "a", /* why */ "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when & then — the refusal names the cause with the adapter's fixed text, and no value
+    with pytest.raises(RenderRefused) as refused:
+        _render(template, [{"key": "a", "command": "x", "args": 1}, _c("z")])
+    assert refused.value.reason == CHANGED_WITH_NOTE_REFUSED
+    assert "x" not in CHANGED_WITH_NOTE_REFUSED.split()
 
 
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------

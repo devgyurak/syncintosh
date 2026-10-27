@@ -532,7 +532,7 @@ class _Diff:
         conflict, which the caller surfaces rather than publishing a stripped file.
         """
         if self._comments.overlaps(node.span.start, node.span.end):
-            raise ContentParseError("cannot rewrite a value that contains a comment")
+            raise RenderRefused(CHANGED_WITH_NOTE_REFUSED)
         edits.append(_Edit(node.span.start, node.span.end, text))
 
     def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
@@ -646,7 +646,7 @@ class _Diff:
             core = text[element.span.start : element.span.end]
         else:
             if self._comments.overlaps(element.span.start, element.span.end):
-                raise ContentParseError("cannot rewrite a value that contains a comment")
+                raise RenderRefused(CHANGED_WITH_NOTE_REFUSED)
             core = self._element_text(slot.replacement, indent, multiline, unit)
         start = _line_start(text, element.span.start)
         line_end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
@@ -1056,6 +1056,11 @@ def _comma_at(comments: _Comments, end: int) -> int | None:
 
 
 # Refusals are fixed texts: a message that echoed a value or a key name would leak it into a conflict.
+# A changed binding is rewritten whole, so a comment inside it would be lost; the text names the cause, never a value.
+CHANGED_WITH_NOTE_REFUSED = (
+    "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
+)
+
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
 )
