@@ -8,12 +8,13 @@ import random
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from syncintosh.adapters.jsonc import UNRULED_REMOVAL_REFUSED, JsoncAdapter
+from syncintosh.adapters.jsonc import CHANGED_WITH_NOTE_REFUSED, UNRULED_REMOVAL_REFUSED, JsoncAdapter
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.tree import tree_from_value
@@ -188,17 +189,6 @@ def test_an_element_level_render_always_parses_back_to_the_merged_tree(case: tup
     assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(target)
 
 
-def test_a_comment_above_a_removed_element_stays_where_it_is() -> None:
-    # given — `// why x` sits above x; the merge removes x and puts a different binding y in its place
-    template = '[\n    // why x\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
-
-    # when
-    rendered = _render(template, [_b("y"), _c("z")])
-
-    # then — the note is not deleted: it stays above the line that follows, rather than being guessed onto y
-    assert rendered == '[\n    // why x\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
-
-
 def test_an_inline_comment_on_a_removed_element_goes_with_it_and_never_moves_onto_its_replacement() -> None:
     # given
     template = '[\n    { "key": "a", "command": "x" }, // inline why\n    { "key": "c", "command": "z" }\n]'
@@ -334,11 +324,17 @@ def _try_render(template: str, value: list[dict[str, object]]) -> str | None:
 
 @st.composite
 def _notes_case(draw: st.DrawFn) -> tuple[str, list[tuple[str, str]], list[dict[str, object]]]:
-    """A keybindings template with notes above, beside, and inside each binding; a random reordered merged target."""
+    """A keybindings template with notes above, beside and inside each binding, section titles, and a random target.
+
+    A section title is a comment separated from the binding below it by a blank line, so it belongs to no binding.
+    """
     base = draw(st.lists(st.sampled_from(_POOL), unique=True, min_size=1, max_size=5))
     with_inline = draw(st.lists(st.booleans(), min_size=len(base), max_size=len(base)))
+    with_section = draw(st.lists(st.booleans(), min_size=len(base), max_size=len(base)))
     lines = ["["]
     for index, (key, command) in enumerate(base):
+        if with_section[index]:
+            lines.extend(["", f"    // section {index}", ""])
         lines.append(f"    // note {index}")
         comma = "," if index < len(base) - 1 else ""
         inline = f" // inl {index}" if with_inline[index] else ""
@@ -375,7 +371,7 @@ def _inner_notes_lost(index: int, rendered: str, template: str) -> bool:
 
 
 @given(case=_notes_case())
-def test_a_note_above_a_binding_is_never_dropped_and_an_unchanged_binding_keeps_its_notes(
+def test_a_kept_binding_keeps_its_notes_a_removed_one_loses_them_and_section_titles_stay(
     case: tuple[str, list[tuple[str, str]], list[dict]],
 ) -> None:
     # given
@@ -384,18 +380,30 @@ def test_a_note_above_a_binding_is_never_dropped_and_an_unchanged_binding_keeps_
     # when
     rendered = _try_render(template, value)
 
-    # then — a note above any binding stays with the array; an unchanged binding keeps its inner and inline notes
-    unchanged = {f"{binding['key']}/{binding['command']}" for binding in value if "args" not in binding}
-    rendered_ok = rendered is not None
+    # then — checked as text, and only for a render that happened: a kept binding's note sits directly above its own
+    # line, a removed binding's notes are gone, a section title stays, and no two blank lines sit side by side
     text = "" if rendered is None else rendered
-    dropped_above = [index for index in range(len(base)) if rendered_ok and f"// note {index}" not in text]
-    lost_inside = [
+    kept = {f"{binding['key']}/{binding['command']}" for binding in value}
+    removed_notes = [
         index
         for index, (key, command) in enumerate(base)
-        if rendered_ok and f"{key}/{command}" in unchanged and _inner_notes_lost(index, text, template)
+        if rendered is not None and f"{key}/{command}" not in kept and f"// note {index}" in text
     ]
-    assert dropped_above == []
-    assert lost_inside == []
+    not_directly_above = [
+        index
+        for index, (key, command) in enumerate(base)
+        if rendered is not None and f"{key}/{command}" in kept and f'// note {index}\n    {{"key": "{key}"' not in text
+    ]
+    sections_lost = [
+        index
+        for index in range(len(base))
+        if rendered is not None and f"// section {index}" in template and f"// section {index}" not in text
+    ]
+    doubled = rendered is not None and _has_doubled_blank(text)
+    assert removed_notes == []
+    assert not_directly_above == []
+    assert sections_lost == []
+    assert doubled is False
 
 
 def test_moved_bindings_take_their_own_notes_to_their_new_place() -> None:
@@ -424,23 +432,6 @@ def test_a_rule_less_array_refuses_a_removal_that_would_drop_a_note() -> None:
     # when & then — the removal of 80 would take its note, so the render refuses rather than dropping it
     with pytest.raises(ContentParseError):
         ADAPTER.render(tree_from_value({"editor.rulers": [79, 120]}), template)
-
-
-def test_a_rule_array_changes_a_binding_whose_when_changed_and_keeps_its_upper_note() -> None:
-    # given — the binding gains a `when`, so it is no longer the same binding; its note above stays, its inline one goes
-    template = (
-        '[\n    // upper note\n    { "key": "a", "command": "x" }, // inline note\n'
-        '    { "key": "c", "command": "z" }\n]'
-    )
-    gained_when = {"key": "a", "command": "x", "when": "editorFocus"}
-
-    # when
-    rendered = _render(template, [gained_when, _c("z")])
-
-    # then
-    assert "// upper note" in rendered
-    assert "// inline note" not in rendered
-    assert ADAPTER.parse(rendered) == tree_from_value([gained_when, _c("z")])
 
 
 def test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json() -> None:
@@ -488,17 +479,6 @@ def test_a_block_comment_note_refuses_a_rule_less_removal_that_would_take_it() -
     assert refused.value.reason == UNRULED_REMOVAL_REFUSED
 
 
-def test_a_rule_array_removal_keeps_the_block_note_above_the_removed_binding() -> None:
-    # given — a block note above `a`, which is removed; the note above it is a block the text cannot tie to `a` alone
-    template = '[\n    /* upper */\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
-
-    # when
-    rendered = _render(template, [_c("z")])
-
-    # then — the removal takes the binding's own lines and keeps the block above it
-    assert rendered == '[\n    /* upper */\n    { "key": "c", "command": "z" }\n]'
-
-
 def test_a_removal_between_two_blank_lines_leaves_exactly_one_blank_line() -> None:
     # given — bindings separated by blank lines
     template = (
@@ -543,6 +523,149 @@ def test_a_moved_binding_between_blank_lines_leaves_no_doubled_blank_line() -> N
     # then — it parses to the merged order, and no two blank lines sit side by side
     assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x"), _c("z")])
     assert _has_doubled_blank(rendered) is False
+
+
+def test_a_changed_binding_with_a_comment_inside_is_refused_with_its_fixed_reason() -> None:
+    # given — `a` has a comment inside it and gains an `args`, so the same binding is rewritten in its span
+    template = '[\n    { "key": "a", /* why */ "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when & then — the refusal names the cause with the adapter's fixed text, and no value
+    with pytest.raises(RenderRefused) as refused:
+        _render(template, [{"key": "a", "command": "x", "args": 1}, _c("z")])
+    assert refused.value.reason == CHANGED_WITH_NOTE_REFUSED
+    assert "x" not in CHANGED_WITH_NOTE_REFUSED.split()
+
+
+def test_a_line_note_above_a_removed_binding_goes_with_it() -> None:
+    # given — `// why x` documents x, and the merge removes x
+    template = '[\n    // why x\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [_c("z")])
+
+    # then — the note belongs to the removed binding, so it goes too
+    assert rendered == '[\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_a_block_note_above_a_removed_binding_goes_with_it() -> None:
+    # given — a one-line block note documents x, and x is removed
+    template = '[\n    /* why x */\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [_c("z")])
+
+    # then
+    assert rendered == '[\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_a_section_title_separated_by_a_blank_line_stays_when_the_binding_below_it_is_removed() -> None:
+    # given — the title belongs to no binding, because a blank line separates it from `a`
+    template = (
+        '[\n    // section\n\n    // note a\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_c("z")])
+
+    # then — the note goes with `a`; the section title stays
+    assert rendered == '[\n    // section\n\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_a_changed_binding_without_a_pair_takes_its_notes_with_it() -> None:
+    # given — `a` gains a `when`, so it is no longer the same binding: its notes go with the old one
+    template = (
+        '[\n    // upper note\n    { "key": "a", "command": "x" }, // inline note\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+    gained_when = {"key": "a", "command": "x", "when": "editorFocus"}
+
+    # when
+    rendered = _render(template, [gained_when, _c("z")])
+
+    # then — no note of the old binding is left, and the new one is in place
+    assert "upper note" not in rendered
+    assert "inline note" not in rendered
+    assert ADAPTER.parse(rendered) == tree_from_value([gained_when, _c("z")])
+
+
+def test_a_removed_bindings_note_does_not_follow_a_binding_that_moves() -> None:
+    # given — a is removed with its note; b keeps its note and moves
+    template = (
+        '[\n    // note on a\n    { "key": "a", "command": "x" },\n'
+        '    // note on b\n    { "key": "b", "command": "y" },\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when — the merged order is c, b
+    rendered = _render(template, [_c("z"), _b("y")])
+
+    # then — a's note is gone; b's note is still directly above b
+    assert rendered == (
+        '[\n    { "key": "c", "command": "z" },\n    // note on b\n    { "key": "b", "command": "y" }\n]'
+    )
+
+
+def test_a_blank_line_is_not_left_next_to_the_opening_bracket() -> None:
+    # given — `a` is first, with a blank line between it and `b`
+    template = '[\n    { "key": "a", "command": "x" },\n\n    { "key": "b", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y")])
+
+    # then — the blank line after the removed first binding does not survive as the first line of the array
+    assert rendered == '[\n    { "key": "b", "command": "y" }\n]'
+
+
+def test_a_blank_line_is_not_left_before_the_closing_bracket() -> None:
+    # given — `b` is last, with a blank line between it and `a`
+    template = '[\n    { "key": "a", "command": "x" },\n\n    { "key": "b", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template, [_a("x")])
+
+    # then — no blank line before `]`, and `a` loses the comma it no longer needs
+    assert rendered == '[\n    { "key": "a", "command": "x" }\n]'
+
+
+def test_two_blank_lines_the_user_put_between_untouched_bindings_both_stay() -> None:
+    # given — two blank lines between `a` and `b`, and one blank line before the removed `c`
+    template = (
+        '[\n    { "key": "a", "command": "x" },\n\n\n    { "key": "b", "command": "y" },\n\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_a("x"), _b("y")])
+
+    # then — the two blank lines between a and b are untouched; the blank line before `]` is not
+    assert rendered == '[\n    { "key": "a", "command": "x" },\n\n\n    { "key": "b", "command": "y" }\n]'
+
+
+def test_a_crlf_removal_next_to_a_blank_line_leaves_one_blank_line_and_keeps_crlf() -> None:
+    # given — CRLF line endings, a blank line between `a` and `b`, and `a` is removed
+    template = '[\r\n    { "key": "a", "command": "x" },\r\n\r\n    { "key": "b", "command": "y" }\r\n]'
+
+    # when
+    rendered = _render(template, [_b("y")])
+
+    # then
+    assert rendered == '[\r\n    { "key": "b", "command": "y" }\r\n]'
+
+
+def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> None:
+    # given — a binding under two thousand note lines, and the merge moves it below its neighbour
+    notes = "".join(f"    // note line {index}\n" for index in range(2000))
+    template = "[\n" + notes + '    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]\n'
+    started = time.perf_counter()
+
+    # when
+    rendered = _render(template, [_b("y"), _a("x")])
+
+    # then — the note block still sits directly above `a`; the bound is far above the expected time, so CI stays stable
+    assert rendered.index('{ "key": "b"') < rendered.index("// note line 0") < rendered.index('{ "key": "a"')
+    assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
+    assert rendered.count("// note line") == 2000
+    assert time.perf_counter() - started < 2.0
 
 
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------

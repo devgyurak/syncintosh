@@ -14,7 +14,8 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
 * **render** edits the *original* text at the spans that actually changed. A changed value
   rewrites only that value's span; an added key is inserted after the sibling the remote had
   before it; a removed key takes its line, comma, and same-line comment with it, leaving the
-  comment above it. Indentation, trailing-comma style, newline style, and a BOM are detected in
+  comment above it. A removed binding of a keyed array (see `_splice_array`) takes its notes with it
+  instead. Indentation, trailing-comma style, newline style, and a BOM are detected in
   the original and kept. An array is one value, so a change to it (or to an object inside it) is
   rendered by reserializing the whole array; an object that is not laid out member-per-line is
   reserialized whole too, because a one-line object has no per-member line to splice.
@@ -31,6 +32,7 @@ import re
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
@@ -531,7 +533,7 @@ class _Diff:
         conflict, which the caller surfaces rather than publishing a stripped file.
         """
         if self._comments.overlaps(node.span.start, node.span.end):
-            raise ContentParseError("cannot rewrite a value that contains a comment")
+            raise RenderRefused(CHANGED_WITH_NOTE_REFUSED)
         edits.append(_Edit(node.span.start, node.span.end, text))
 
     def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
@@ -542,11 +544,11 @@ class _Diff:
         key: its identity under the array's rule, or its exact value when there is no rule; then, within a group, the
         elements left on each side pair in order. The longest run of matches that keeps the order stays in place; every
         other matched binding moves with its notes. A changed binding is rewritten in its own span, which refuses when a
-        comment is inside that span. A removed binding goes with its lines, its comma, and the comments on those lines;
-        the block above it stays, since nothing says which binding those notes were about. Without a rule a removal
-        that would take any note is refused, because nothing can tell which binding the note belonged to. The comma
-        follows the final order, and a trailing comma is kept when the template had one. Returns False for a layout
-        this does not handle, so the caller rewrites the whole value.
+        comment is inside that span. A removed binding takes its own notes with it: the block directly above it, the
+        comments on its lines, and the comments inside it (`_owned_start`). A blank line ends the block, so a section
+        title stays. Without a rule a removal that would take any note is refused, because nothing can tell which
+        binding the note belonged to. The comma follows the final order, and a trailing comma is kept when the template
+        had one. Returns False for a layout this does not handle, so the caller rewrites the whole value.
         """
         if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
             return False
@@ -617,12 +619,12 @@ class _Diff:
 
         deletions: list[tuple[int, int]] = []
         for index in removed:
-            # The element's own lines go, with its comma and the comments on them. The comment lines directly above
-            # it stay: the text cannot say which element they documented, and a note is never guessed onto another.
+            # A removed element takes its own notes with it: the comment block directly above it, the comments on its
+            # lines and the comments inside it (`_owned_start`). A blank line ends the block, so a section title stays.
             element = node.elements[index]
-            start = _line_start(text, element.span.start)
+            start = _owned_start(text, self._comments, element.span.start)
             end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
-            if rule is None and self._comments.overlaps(_owned_start(text, self._comments, element.span.start), end):
+            if rule is None and self._comments.overlaps(start, end):
                 # Without a rule nothing says which binding a note belongs to, so a removal that would take one
                 # is refused rather than losing it.
                 raise RenderRefused(UNRULED_REMOVAL_REFUSED)
@@ -645,7 +647,7 @@ class _Diff:
             core = text[element.span.start : element.span.end]
         else:
             if self._comments.overlaps(element.span.start, element.span.end):
-                raise ContentParseError("cannot rewrite a value that contains a comment")
+                raise RenderRefused(CHANGED_WITH_NOTE_REFUSED)
             core = self._element_text(slot.replacement, indent, multiline, unit)
         start = _line_start(text, element.span.start)
         line_end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
@@ -957,8 +959,17 @@ class _Comments:
             return first.start
         return None
 
+    @cached_property
+    def _starts(self) -> tuple[int, ...]:
+        """The start of each comment span; the parser records them in text order, so this is sorted."""
+        return tuple(span.start for span in self.spans)
+
     def _span_at(self, position: int) -> _Span | None:
-        return next((span for span in self.spans if span.start <= position < span.end), None)
+        index = bisect.bisect_right(self._starts, position) - 1
+        if index < 0:
+            return None
+        span = self.spans[index]
+        return span if position < span.end else None
 
 
 def _line_start(text: str, pos: int) -> int:
@@ -998,7 +1009,7 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 
 
 def _widened_deletions(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The deletions with adjacent ones joined, each widened over the blank line after it when the line before is blank.
+    """The deletions with adjacent ones joined, each widened over the blank line that would otherwise be left beside it.
 
     Joining first matters: two deletions that touch would each see a single blank line beside them and both widen,
     leaving two blank lines side by side where the deletions met.
@@ -1009,23 +1020,32 @@ def _widened_deletions(text: str, spans: list[tuple[int, int]]) -> list[tuple[in
             joined[-1] = (joined[-1][0], max(joined[-1][1], end))
         else:
             joined.append((start, end))
-    return [(start, _without_doubled_blank(text, start, end)) for start, end in joined]
+    return [piece for start, end in joined for piece in _widen(text, start, end)]
 
 
-def _without_doubled_blank(text: str, start: int, end: int) -> int:
-    """`end`, widened over the blank line after a deletion when the line before the deletion is blank too.
+def _widen(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
-    Deleting an element that sits between two blank lines would otherwise leave two blank lines side by side, and every
-    sync after that would show the other machine a difference that is only whitespace.
+    A blank line that sits between two unaffected elements is left alone. A blank line is removed when the deletion
+    would put it right after the opening `[`, right before the closing `]`, or beside another blank line. A blank line
+    before the deletion is its own range, not part of it: an insertion may start at the deletion's first offset, and
+    a range that reached back over it would make the insertion skip silently. The lines are read from the text as it
+    stands, which is the text the deletion is made in.
     """
-    if start == 0 or end >= len(text):
-        return end
-    above = text[_line_start(text, start - 1) : start - 1]
-    below_end = _next_line_start(text, end)
-    below = text[end:below_end]
-    if above.strip() == "" and below and below.strip() == "":
-        return below_end
-    return end
+    before = text[_line_start(text, start - 1) : start - 1] if start > 0 else None
+    after_end = _next_line_start(text, end)
+    after = text[end:after_end] if end < len(text) else None
+    blank_before = before is not None and before.strip() == ""
+    blank_after = after is not None and after != "" and after.strip() == ""
+    opens = before is not None and before.rstrip().endswith("[")
+    closes = after is not None and after.strip().startswith("]")
+    pieces: list[tuple[int, int]] = []
+    if blank_before and closes:
+        pieces.append((_line_start(text, start - 1), start))
+    if blank_after and (blank_before or opens):
+        end = after_end
+    pieces.append((start, end))
+    return pieces
 
 
 def _comma_after(comments: _Comments, member: _MemberNode | _AstNode) -> int | None:
@@ -1046,6 +1066,11 @@ def _comma_at(comments: _Comments, end: int) -> int | None:
 
 
 # Refusals are fixed texts: a message that echoed a value or a key name would leak it into a conflict.
+# A changed binding is rewritten whole, so a comment inside it would be lost; the text names the cause, never a value.
+CHANGED_WITH_NOTE_REFUSED = (
+    "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
+)
+
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
 )
@@ -1168,7 +1193,7 @@ def _owned_start(text: str, comments: _Comments, element_start: int) -> int:
 
     This is the one rule that decides which binding a note belongs to. A blank line, or a line of code, ends the block,
     and a note past a blank line is a section title that belongs to no element. A `//` line and a `/* … */` block
-    both count, so a note written as a block moves, is refused, or stays with its element like any other.
+    both count, so a note written as a block moves with its element, goes with it when it is removed, or is refused.
     """
     position = _line_start(text, element_start)
     while position > 0:
