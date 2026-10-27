@@ -11,6 +11,7 @@ Pure: standard library only (``AGENTS.md`` §2.1).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -42,11 +43,32 @@ ConflictKind = Literal["key", "file", "add/add", "delete/modify", "modify/modify
 
 
 def digest_of(value: object) -> str:
-    """A stable digest of a plain value, so a fingerprint never carries the value itself.
+    """A stable digest of a value, so a fingerprint never carries the value itself.
 
-    ``repr`` is deterministic for the scalar, tuple and dataclass values the merge produces.
+    The digest covers every value and its kind, through a structural encoding, not through `repr`: a `repr` may
+    hide a value (a setting's text is kept out of it on purpose), and then two different conflicts would share one
+    fingerprint, and a pick made for one would settle the other.
     """
-    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+    return hashlib.sha256(repr(_canonical(value)).encode("utf-8")).hexdigest()
+
+
+def _canonical(value: object) -> object:
+    """A structural form of a value that keeps every field, every element and every kind."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__name__,
+            tuple((item.name, _canonical(getattr(value, item.name))) for item in dataclasses.fields(value)),
+        )
+    if isinstance(value, Mapping):
+        items = sorted(((repr(_canonical(key)), _canonical(item)) for key, item in value.items()), key=lambda p: p[0])
+        return ("map", tuple(items))
+    if isinstance(value, (tuple, list)):
+        return (type(value).__name__, tuple(_canonical(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted(repr(_canonical(item)) for item in value)))
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    return (type(value).__name__, repr(value))
 
 
 def fingerprint(file_id: str, key_path: KeyPath | None, base: str, local: str, remote: str) -> str:

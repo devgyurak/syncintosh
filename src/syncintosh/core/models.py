@@ -97,6 +97,8 @@ class ContentMerge:
     data: bytes = field(repr=False)
     conflicted: bool
     conflict_addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
+    # Why a structural merge refused (a fixed text from the adapter, never a value); empty when it did not.
+    reason: str = ""
 
 
 @dataclass(frozen=True)

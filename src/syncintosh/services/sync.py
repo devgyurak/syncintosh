@@ -823,7 +823,7 @@ def _collect_first_sight(
     state.collected.append(item.path)
 
 
-def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str) -> str:
+def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str, why: str = "") -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
     A binding is named by its `key` and `when` (its group): those are the structure a person picks by, while
@@ -835,9 +835,9 @@ def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str) -> str:
     an identified array names that binding too. The same label is what the `merge` command prints.
     """
     named = dict.fromkeys(path_label(path, element) for path, element in addresses)
-    if not named:
-        return reason
-    return f"{reason}: {', '.join(named)}"
+    detail = reason if not named else f"{reason}: {', '.join(named)}"
+    # A refusal the adapter gave (its fixed text) is said, so the person knows why no pick would settle it.
+    return f"{detail} ({why})" if why else detail
 
 
 # --------------------------------------------------------------------------- resolve
@@ -1151,7 +1151,7 @@ def _settle_content(
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
     views = _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses)
-    return _Settled(data=None, detail=_content_detail(merged.conflict_addresses, reason), views=views)
+    return _Settled(data=None, detail=_content_detail(merged.conflict_addresses, reason, merged.reason), views=views)
 
 
 def _record_fingerprint(conflict: RecordConflict) -> str:

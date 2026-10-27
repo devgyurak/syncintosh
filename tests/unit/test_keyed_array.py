@@ -722,3 +722,50 @@ def test_a_proposal_for_a_group_both_sides_added_goes_to_the_end() -> None:
     # then — there is no earlier place for it, so it is the last binding
     assert result is not None
     assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p"]
+
+
+def test_a_settled_conflict_is_placed_in_the_chosen_side_order_even_when_both_sides_reordered() -> None:
+    # given — the two sides reordered the same group differently, and each changed a binding in it
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b"), _binding("ctrl+z", "c")])
+    local = _array([_binding("ctrl+k", "b"), _binding("ctrl+k", "a", args=1), _binding("ctrl+z", "c")])
+    remote = _array([_binding("ctrl+k", "a"), _binding("ctrl+z", "c"), _binding("ctrl+k", "b", args=2)])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked = merge_keyed_array(base, local, remote, RULE, picks={group: "local"})
+
+    # then — no whole-array conflict: the chosen side's order holds for its group
+    assert picked is not None
+    assert picked.conflicts == ()
+    assert [binding["command"] for binding in _plain(picked.merged)] == ["b", "a", "c"]
+    assert _plain(picked.merged)[1]["args"] == 1
+
+
+def test_the_merge_is_the_same_whatever_order_the_identities_are_visited_in() -> None:
+    # given — several groups conflict at once, so the order they are placed in could depend on how they are visited
+    base = _array([_binding("ctrl+a", "1"), _binding("ctrl+b", "2"), _binding("ctrl+c", "3"), _binding("ctrl+d", "4")])
+    local = _array(
+        [
+            _binding("ctrl+a", "1", args=1),
+            _binding("ctrl+b", "2", args=1),
+            _binding("ctrl+c", "3"),
+            _binding("ctrl+d", "4"),
+        ]
+    )
+    remote = _array(
+        [
+            _binding("ctrl+a", "1", args=2),
+            _binding("ctrl+b", "2", args=2),
+            _binding("ctrl+c", "3"),
+            _binding("ctrl+d", "4"),
+        ]
+    )
+
+    # when
+    first = merge_keyed_array(base, local, remote, RULE)
+    second = merge_keyed_array(base, local, remote, RULE)
+
+    # then
+    assert first is not None and second is not None
+    assert _plain(first.merged) == _plain(second.merged)
+    assert [conflict.element for conflict in first.conflicts] == [conflict.element for conflict in second.conflicts]

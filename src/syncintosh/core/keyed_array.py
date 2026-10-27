@@ -26,7 +26,7 @@ Stdlib only, and no I/O (``AGENTS.md`` §2.1, §2.2).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from syncintosh.core.resolution import Side
@@ -120,11 +120,11 @@ def merge_keyed_array(
     remote_ids = [identity for identity, _ in remote_items]
     chosen: list[_Item] = []
     conflicts: list[GroupConflict] = []
-    unsettled: set[ElementId] = set()
-    # A settled group's bindings, with the order they had on the side the person chose, so the order is put back
-    # into that side's order inside the group's own places. A proposed group's replacement, with where the group held
-    # on each side, so the proposed bindings take its place.
-    constraints: list[tuple[frozenset[ElementId], list[ElementId]]] = []
+    # A conflicting group's bindings are set aside from the shared order: whether the conflict is settled decides their
+    # order, not the order the two sides shared. A settled group's bindings are placed from the side they were settled
+    # to; a proposed group's replacement takes the place the group held.
+    set_aside: set[ElementId] = set()
+    owners: dict[ElementId, str] = {}
     replacements: list[
         tuple[frozenset[ElementId], frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]
     ] = []
@@ -143,7 +143,7 @@ def merge_keyed_array(
             settled = _settle_group(group, pick, local_group, remote_group, rule)
             if settled is None:
                 picked = local_group
-                unsettled.update(identity for identity, _ in (*local_group, *remote_group))
+                set_aside.update(identity for identity, _ in (*local_group, *remote_group))
                 conflicts.append(
                     GroupConflict(
                         element=group,
@@ -155,19 +155,19 @@ def merge_keyed_array(
             else:
                 picked = settled
                 identities = [identity for identity, _ in settled]
-                local_members = frozenset(identity for identity, _ in local_group)
-                remote_members = frozenset(identity for identity, _ in remote_group)
-                if pick == "local":
-                    constraints.append((local_members, local_ids))
-                elif pick == "remote":
-                    constraints.append((remote_members, remote_ids))
+                set_aside.update(identity for identity, _ in (*local_group, *remote_group))
+                set_aside.update(identities)
+                if pick == "local" or pick == "remote":
+                    owners.update((identity, pick) for identity in identities)
                 else:
-                    constraints.append((frozenset(identities), identities))
+                    owners.update((identity, "proposal") for identity in identities)
+                    local_members = frozenset(identity for identity, _ in local_group)
+                    remote_members = frozenset(identity for identity, _ in remote_group)
                     base_members = frozenset(identity for identity, _ in base_group)
                     replacements.append((local_members, remote_members, base_members, tuple(identities)))
         chosen.extend(picked)
 
-    ordered = _ordered(base_ids, local_ids, remote_ids, chosen, constraints, replacements, frozenset(unsettled))
+    ordered = _ordered(base_ids, local_ids, remote_ids, chosen, owners, replacements, frozenset(set_aside))
     if ordered is None:
         return None
     return KeyedMerge(merged=Array(tuple(node for _, node in ordered)), conflicts=tuple(conflicts))
@@ -183,8 +183,8 @@ def element_identity(element: Node, rule: ArrayRule) -> ElementId | None:
 
 
 def element_group(identity: ElementId, rule: ArrayRule) -> ElementId:
-    """The group an identity falls in under `rule`."""
-    return tuple(pair for pair in identity if pair[0] in rule.group)
+    """The group an identity falls in under `rule`: the same helper the merge groups by, so the two cannot disagree."""
+    return _group_of(identity, rule)
 
 
 def _items(array: Array, rule: ArrayRule) -> list[_Item] | None:
@@ -316,24 +316,22 @@ def _ordered(
     local_ids: list[ElementId],
     remote_ids: list[ElementId],
     chosen: list[_Item],
-    constraints: list[tuple[frozenset[ElementId], list[ElementId]]],
+    owners: dict[ElementId, str],
     replacements: list[tuple[frozenset[ElementId], frozenset[ElementId], frozenset[ElementId], tuple[ElementId, ...]]],
-    unsettled: frozenset[ElementId],
+    set_aside: frozenset[ElementId],
 ) -> list[_Item] | None:
     """The merged elements in order, or ``None`` when the two sides reordered the shared ones differently.
 
-    The elements that survive and exist on all three sides ("anchors") carry the order, except the bindings of a
-    conflict nobody has settled: their order is decided once the conflict is, so they do not count here. A group
-    the person settled to one side is put into that side's order inside the places it already holds, so the choice
-    shows in the file exactly as it was seen. Each other element is placed after its nearest preceding sibling on the
-    side it came from.
+    The elements that survive, exist on all three sides, and are not set aside carry the order ("anchors"). A set-aside
+    binding is placed from the side its conflict was settled to (`owners`), in that side's order, and the rest follow
+    the local, then the remote, sequence. So settling a conflict never turns the array into a whole-array conflict.
     """
     node_of = dict(chosen)
     local_set, remote_set = set(local_ids), set(remote_ids)
     anchors = {
         identity
         for identity in base_ids
-        if identity in node_of and identity in local_set and identity in remote_set and identity not in unsettled
+        if identity in node_of and identity in local_set and identity in remote_set and identity not in set_aside
     }
 
     base_order = [identity for identity in base_ids if identity in anchors]
@@ -345,7 +343,6 @@ def _ordered(
         anchored = local_order
     else:
         return None
-    anchored = _within_settled(anchored, constraints, anchors)
 
     local_sequence, remote_sequence = list(local_ids), list(remote_ids)
     # The base as the replacements already made have changed it, so a later group is placed after an earlier
@@ -358,35 +355,20 @@ def _ordered(
 
     ordered = list(anchored)
     placed = set(ordered)
-    for sequence in (local_sequence, remote_sequence):
+
+    def place(sequence: list[ElementId], wanted: Callable[[ElementId], bool]) -> None:
         for position, identity in enumerate(sequence):
-            if identity not in node_of or identity in placed:
+            if identity not in node_of or identity in placed or not wanted(identity):
                 continue
             ordered.insert(_slot(sequence, position, ordered, placed), identity)
             placed.add(identity)
+
+    # Each side's own settled bindings first, in that side's order; a proposal is placed from the local sequence.
+    place(local_sequence, lambda identity: owners.get(identity) in ("local", "proposal"))
+    place(remote_sequence, lambda identity: owners.get(identity) == "remote")
+    place(local_sequence, lambda identity: True)
+    place(remote_sequence, lambda identity: True)
     return [(identity, node_of[identity]) for identity in ordered]
-
-
-def _within_settled(
-    anchored: list[ElementId],
-    constraints: list[tuple[frozenset[ElementId], list[ElementId]]],
-    anchors: set[ElementId],
-) -> list[ElementId]:
-    """The shared order, with each settled group's anchors put into the order of the side it was settled to.
-
-    The group keeps the places it holds in the shared order; only the order among those places changes, so the
-    rest of the array keeps its order. A group that does not hold the same anchors on both sides cannot be placed
-    this way, so it is left as the shared order gives it.
-    """
-    result = list(anchored)
-    for members, order in constraints:
-        # The places and the wanted order hold the same bindings: `anchored` holds every anchor, and both lists
-        # are the group's anchors. So the two lines up one for one.
-        places = [index for index, identity in enumerate(result) if identity in members]
-        wanted = [identity for identity in order if identity in members and identity in anchors]
-        for place, identity in zip(places, wanted, strict=True):
-            result[place] = identity
-    return result
 
 
 def _with_replacement(

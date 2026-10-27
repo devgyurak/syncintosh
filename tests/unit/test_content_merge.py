@@ -217,7 +217,9 @@ def test_a_render_that_does_not_round_trip_is_a_conflict() -> None:
     )
 
     # then
-    assert result == ContentMerge(data=b'{"a": 2, "b": 3}', conflicted=True)
+    assert result == ContentMerge(
+        data=b'{"a": 2, "b": 3}', conflicted=True, reason="the merged result does not render back to itself"
+    )
 
 
 def test_an_undecodable_both_sides_change_skips_the_adapter() -> None:

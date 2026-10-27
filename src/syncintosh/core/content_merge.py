@@ -78,11 +78,11 @@ def merge_content(
         return ContentMerge(data=local, conflicted=True)
     base_text, local_text, remote_text = decoded
     if adapter is not None:
-        merged_text, addresses = _merge_via_adapter(
+        merged_text, addresses, reason = _merge_via_adapter(
             adapter, base_text, local_text, remote_text, key_choices or {}, arrays or {}, element_picks or {}
         )
         if merged_text is None:
-            return ContentMerge(data=local, conflicted=True, conflict_addresses=addresses)
+            return ContentMerge(data=local, conflicted=True, conflict_addresses=addresses, reason=reason)
         return ContentMerge(data=merged_text.encode("utf-8"), conflicted=False)
     result = driver.merge(base_text, local_text, remote_text)
     return ContentMerge(data=result.text.encode("utf-8"), conflicted=result.conflicted)
@@ -116,13 +116,20 @@ def render_merged(
     treats `None` as a conflict rather than writing text that says it is the merge but is not.
     Shared by the byte-level content merge and the `merge` command so the two cannot drift.
     """
+    return _render_checked(adapter, merged, template, arrays)[0]
+
+
+def _render_checked(
+    adapter: ContentAdapter, merged: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None
+) -> tuple[str | None, str]:
+    """`render_merged`, with the adapter's own reason when it refuses (a fixed text, never a value)."""
     try:
         rendered = adapter.render(merged, template, arrays)
         if adapter.parse(rendered) != merged:
-            return None
-    except ContentParseError:
-        return None
-    return rendered
+            return None, "the merged result does not render back to itself"
+    except ContentParseError as exc:
+        return None, str(exc)
+    return rendered, ""
 
 
 def _settled_keys(
@@ -172,7 +179,7 @@ def _merge_via_adapter(
     key_choices: Mapping[KeyPath, Side | Proposal],
     arrays: Mapping[KeyPath, ArrayRule],
     element_picks: Mapping[tuple[KeyPath, ElementId], Side | Proposal],
-) -> tuple[str | None, tuple[ConflictAddress, ...]]:
+) -> tuple[str | None, tuple[ConflictAddress, ...], str]:
     """The adapter merge as ``(text, ())``, or ``(None, conflict paths)`` when it cannot be trusted.
 
     ``None`` the text covers three failures the caller treats identically: a side that does not
@@ -185,7 +192,7 @@ def _merge_via_adapter(
         local_tree = adapter.parse(local_text)
         remote_tree = adapter.parse(remote_text)
     except ContentParseError:
-        return None, ()
+        return None, (), ""
     result = merge_tree(
         base_tree,
         local_tree,
@@ -195,8 +202,8 @@ def _merge_via_adapter(
         element_picks=_settled_elements(adapter, element_picks),
     )
     if result.has_conflicts:
-        return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts))
-    rendered = render_merged(adapter, result.merged, local_text, arrays)
+        return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts)), ""
+    rendered, reason = _render_checked(adapter, result.merged, local_text, arrays)
     if rendered is None:
-        return None, ()
-    return rendered, ()
+        return None, (), reason
+    return rendered, (), ""
