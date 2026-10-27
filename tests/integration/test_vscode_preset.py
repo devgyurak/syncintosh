@@ -18,6 +18,7 @@ import pytest
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
+from syncintosh.core.advice import Advice
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.errors import SecretScanError
@@ -32,7 +33,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import KEYBINDINGS, SETTINGS, SNIPPETS_JSON
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.resolve import decision, take_chooser
+from syncintosh.services.resolve import advised_chooser, decision, proposal_problem, take_chooser
 from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
@@ -40,6 +41,7 @@ from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.lock import FileLock
+from syncintosh.system.masking import TextMasker
 from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
 from syncintosh.system.secret_scan import PatternSecretScanner
@@ -625,3 +627,48 @@ def test_a_snippet_from_another_machine_is_applied_under_the_glob(tmp_path, memo
     assert snippet in report.applied
     assert _read(b, snippet) == _read(a, snippet)
     assert report.deferred == ()
+
+
+class _ProposingAdvisor:
+    """A model stand-in that answers one binding with a proposed array, and records what it was asked."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+        self.asked: list[str] = []
+
+    def advise(self, index: int, *, path, key, base, local, remote):
+        self.asked.append(key.text)
+        return Advice(choice="proposal", value=self.value, rationale="the merged command")
+
+
+def test_a_model_proposal_for_one_binding_settles_only_that_binding(tmp_path, memory_key_store) -> None:
+    # given — A and B change the same binding differently; B also adds an unrelated binding
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    original = _fixture("vscode-keybindings.jsonc")
+    _write(a, KEYBINDINGS, original.replace(b"terminal.clear", b"terminal.clearAll"))
+    _run(a)
+    _write(b, KEYBINDINGS, _with_binding(original.replace(b"terminal.clear", b"terminal.kill"), "cmd+b", "b.added"))
+    assert _run(b).has_conflicts is True
+
+    # when — the model proposes one binding of that group; the person accepts it
+    advisor = _ProposingAdvisor('[{"key": "cmd+shift+k", "command": "terminal.both"}]')
+    catalog = BuiltinCatalog.default()
+    chooser = advised_chooser(
+        advisor=advisor,
+        masker=TextMasker(home=str(b.home), username="builder", internal_domains=()),
+        fallback=lambda view: "remote",
+        present=lambda suggestion: True,
+        auto_apply=lambda view: False,
+        check=lambda view, text: proposal_problem(
+            view, text, catalog=catalog, adapters={"jsonc": JsoncAdapter()}, validators={}
+        ),
+    )
+    _run(b, decide=decision(chooser), resolving=True)
+
+    # then — the binding is the model's; B's own addition survives; the model was told which binding
+    assert advisor.asked and "JSON array" in advisor.asked[0] and 'key="cmd+shift+k"' in advisor.asked[0]
+    assert b"terminal.both" in _read(b, KEYBINDINGS)
+    assert b"b.added" in _read(b, KEYBINDINGS)
+    assert b"terminal.clearAll" not in _read(b, KEYBINDINGS)
+    _run(a)
+    assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)

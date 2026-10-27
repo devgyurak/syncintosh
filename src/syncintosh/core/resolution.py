@@ -105,7 +105,7 @@ class ConflictView:
     diff: str = field(default="", repr=False)
     # Set when the conflict is one binding group of an identified array (`core/keyed_array.py`); `key_path`
     # names the array and this names the group. Its values are the group's bindings, never the whole array.
-    element: ElementId | None = None
+    element: ElementId | None = field(default=None, repr=False)
 
 
 # Called with every conflict the cycle currently finds, and the picks this run already made. It

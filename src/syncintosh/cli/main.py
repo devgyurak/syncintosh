@@ -452,7 +452,6 @@ def merge(
     from syncintosh.presets import BuiltinCatalog
     from syncintosh.services import merge_text
 
-    policy = None if path is None else BuiltinCatalog.default().policy_for(path)
     try:
         base_text = base.read_text(encoding="utf-8")
         local_text = local.read_text(encoding="utf-8")
@@ -462,7 +461,8 @@ def merge(
             local_text,
             remote_text,
             JsoncAdapter(),
-            arrays=None if policy is None else policy.array_rules,
+            catalog=BuiltinCatalog.default(),
+            path=path,
         )
     except (OSError, UnicodeDecodeError, ContentParseError) as exc:
         raise typer.BadParameter(f"cannot read JSONC from {base} / {local} / {remote}: {exc}") from exc

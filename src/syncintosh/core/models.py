@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree
+from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree, element_label
 
 # Where a structural conflict sits: a key path, and the element of an identified array when the conflict is
 # one binding under it (`None` for a conflict on the whole path).
@@ -49,7 +49,8 @@ class Conflict:
         # The sides are plaintext settings; a log or a traceback must not print them (§4). The
         # element identity is the field names and values that name it, never the array's content.
         return (
-            f"Conflict(path={self.path!r}, element={self.element!r}, base=<{_shape(self.base)}>, "
+            f"Conflict(path={self.path!r}, element={None if self.element is None else element_label(self.element)}, "
+            f"base=<{_shape(self.base)}>, "
             f"local=<{_shape(self.local)}>, remote=<{_shape(self.remote)}>)"
         )
 

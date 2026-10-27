@@ -10,9 +10,16 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from syncintosh.core.diff import changed_addresses
-from syncintosh.core.keyed_array import ArrayRule, accepts_group, group_ids, merge_keyed_array
+from syncintosh.core.keyed_array import (
+    ArrayRule,
+    accepts_group,
+    group_ids,
+    group_leaf,
+    group_leaves,
+    merge_keyed_array,
+)
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.tree import ABSENT, Array, Node, Tree, tree_from_value
+from syncintosh.core.tree import ABSENT, Array, Node, Tree, element_label, tree_from_value
 
 # The rule a VS Code `keybindings.json` declares: an element is its key, command and when; the key and
 # the command must be present; the group is the (key, when) pair a binding is bound under.
@@ -567,3 +574,89 @@ def test_changed_addresses_names_only_the_binding_that_changed() -> None:
 
     # then
     assert addresses == ((("keys",), (("key", "b"), ("when", None))),)
+
+
+def test_a_picked_group_whose_order_the_shared_order_contradicts_is_one_conflict() -> None:
+    # given — local edits the first binding's args; remote edits the same group and moves it after the other
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b")])
+    local = _array([_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")])
+    remote = _array([_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked_local = merge_keyed_array(base, local, remote, RULE, picks={group: "local"})
+
+    # then — local's order cannot be kept with remote's, so the whole array is a conflict instead
+    assert picked_local is None
+
+
+def test_a_pick_of_the_side_whose_order_is_kept_settles_without_a_conflict() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b")])
+    local = _array([_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")])
+    remote = _array([_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked_remote = merge_keyed_array(base, local, remote, RULE, picks={group: "remote"})
+
+    # then — remote's group, in remote's order
+    assert picked_remote is not None
+    assert _plain(picked_remote.merged) == [_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")]
+
+
+def test_a_proposed_binding_takes_the_place_of_the_group_it_replaces() -> None:
+    # given — the group for `ctrl+a` sits between `ctrl+b` and `ctrl+x`; the model proposes a new binding for it
+    base = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a"), _binding("ctrl+x", "b")])
+    local = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a", args=1), _binding("ctrl+x", "b")])
+    remote = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a", args=2), _binding("ctrl+x", "b")])
+    group = (("key", "ctrl+a"), ("when", None))
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: _array([_binding("ctrl+a", "p")])})
+
+    # then — it stays between its neighbours; it is not appended to the end
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["c", "p", "b"]
+
+
+def test_a_proposal_keeps_the_key_order_of_the_binding_it_replaces() -> None:
+    # given — a model that returns the keys sorted; the user's own binding has `key` first
+    base = _array([_binding("ctrl+a", "a", args=1)])
+    local = _array([_binding("ctrl+a", "a2", args=1)])
+    remote = _array([_binding("ctrl+a", "a3", args=1)])
+    group = (("key", "ctrl+a"), ("when", None))
+    sorted_proposal = _array([{"args": 1, "command": "p", "key": "ctrl+a"}])
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: sorted_proposal})
+
+    # then
+    assert result is not None
+    assert list(_plain(result.merged)[0]) == ["key", "command", "args"]
+
+
+def test_a_when_clause_is_labelled_by_a_digest_so_its_text_is_not_printed() -> None:
+    # given
+    element = (("key", "ctrl+k"), ("when", "resourcePath =~ /corp\\.internal/"))
+
+    # when
+    label = element_label(element)
+
+    # then
+    assert "corp" not in label
+    assert label.startswith('[key="ctrl+k", when=sha256:')
+
+
+def test_group_leaves_indexes_each_group_once_and_matches_group_leaf() -> None:
+    # given
+    array = _array([_binding("a", "1"), _binding("a", "2"), _binding("b", "3", when="p")])
+    group = (("key", "a"), ("when", None))
+
+    # when
+    leaves = group_leaves(array, RULE)
+
+    # then
+    assert leaves is not None
+    assert leaves[group] == group_leaf(array, RULE, group)
+    assert set(leaves) == set(group_ids(array, RULE) or ())

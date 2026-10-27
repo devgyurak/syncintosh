@@ -901,7 +901,7 @@ def _subtree_text(subtree: dict[KeyPath, Node]) -> str:
     """A subtree as a person reads it: its JSON value, or a marker when the side has nothing there."""
     if not subtree:
         return "(absent)"
-    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, default=str)
 
 
 def _subtree_digest(subtree: dict[KeyPath, Node]) -> str:
@@ -989,7 +989,7 @@ def _group_text(leaf: Leaf) -> str:
     """A group's bindings as a person reads them: their JSON, or a marker when the side has none."""
     if isinstance(leaf, Absent):
         return "(absent)"
-    return json.dumps(Tree.create({(): leaf}).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(Tree.create({(): leaf}).to_value(), ensure_ascii=False, default=str)
 
 
 def _element_view(

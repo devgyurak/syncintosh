@@ -24,6 +24,7 @@ Three shapes keep a flat map honest:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -214,17 +215,22 @@ def path_label(path: KeyPath, element: ElementId | None = None) -> str:
 
 
 def element_label(element: ElementId) -> str:
-    """An array element's identity as `[key="…", when=(missing)]`.
+    """An array element's identity as `[key="…", when=sha256:…]`.
 
-    A missing optional field prints as `(missing)`, which is not the same as `""`, so the two cannot
-    be confused in a prompt.
+    A `when` clause is shown as a short digest, not its text: it can name an internal project or host, and a
+    conflict prints in logs and pending state. The digest still tells two bindings under one key apart. A missing
+    optional field prints as `(missing)`, which is not the same as `""`, so the two cannot be confused in a prompt.
     """
-    shown = [f"{field}={_value_text(value)}" for field, value in element]
+    shown = [f"{field}={_value_text(field, value)}" for field, value in element]
     return f"[{', '.join(shown)}]"
 
 
-def _value_text(value: str | None) -> str:
-    return "(missing)" if value is None else json.dumps(value, ensure_ascii=False)
+def _value_text(field: str, value: str | None) -> str:
+    if value is None:
+        return "(missing)"
+    if field == "when":
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _path_text(path: KeyPath) -> str:

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from syncintosh.core.keyed_array import ArrayRule, group_ids, group_leaf
+from syncintosh.core.keyed_array import ArrayRule, group_leaves
 from syncintosh.core.models import ConflictAddress
-from syncintosh.core.tree import ElementId, KeyPath, Leaf, Tree
+from syncintosh.core.tree import ABSENT, ElementId, KeyPath, Leaf, Tree
 
 
 def changed_addresses(
@@ -38,12 +38,12 @@ def changed_addresses(
 
 def _changed_groups(left: Leaf, right: Leaf, rule: ArrayRule) -> tuple[ElementId, ...] | None:
     """The groups whose bindings differ between two arrays, or `None` when either cannot be identified."""
-    left_ids = group_ids(left, rule)
-    right_ids = group_ids(right, rule)
-    if left_ids is None or right_ids is None:
+    left_leaves = group_leaves(left, rule)
+    right_leaves = group_leaves(right, rule)
+    if left_leaves is None or right_leaves is None:
         return None
-    groups = tuple(dict.fromkeys((*left_ids, *right_ids)))
-    return tuple(group for group in groups if group_leaf(left, rule, group) != group_leaf(right, rule, group))
+    groups = tuple(dict.fromkeys((*left_leaves, *right_leaves)))
+    return tuple(group for group in groups if left_leaves.get(group, ABSENT) != right_leaves.get(group, ABSENT))
 
 
 def changed_paths(left: Tree, right: Tree) -> tuple[KeyPath, ...]:
