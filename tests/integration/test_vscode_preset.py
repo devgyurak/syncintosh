@@ -16,12 +16,11 @@ from typing import Any
 
 import pytest
 
-from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.adapters.jsonc import UNRULED_REMOVAL_REFUSED, JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.advice import Advice
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
-from syncintosh.core.content_merge import RENDER_REFUSED
 from syncintosh.core.errors import SecretScanError
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
@@ -768,7 +767,7 @@ def test_a_removed_note_bearing_element_of_a_rule_less_array_stays_a_conflict_wi
     # when
     report = _run(b)
 
-    # then — a conflict, and the reason is said; nothing is published over B's file
+    # then — a conflict, and the adapter's fixed reason is said; nothing is published over B's file
     assert report.has_conflicts is True
-    assert RENDER_REFUSED in report.conflicts[0].detail
+    assert UNRULED_REMOVAL_REFUSED in report.conflicts[0].detail
     assert b"pep8" in _read(b, SETTINGS)

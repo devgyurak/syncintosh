@@ -401,18 +401,18 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     except DomainError as exc:
         _fail(exc)
         return
-    _render_diff(report, values=values)
+    _render_diff(report, values=values, when_tag=_machine_when_tag())
 
 
-def _when_tag() -> WhenTag | None:
-    """This machine's keyed tag for a `when` clause, or `None` when no key exists yet (it is never created here)."""
+def _machine_when_tag() -> WhenTag:
+    """This machine's tagger for `when` clauses. It reads the scan key and never creates the allowlist."""
     from syncintosh.system.paths import MachinePaths
-    from syncintosh.system.scan_allow import keyed_when_tag
+    from syncintosh.system.scan_allow import machine_when_tag
 
-    return keyed_when_tag(MachinePaths.default().scan_allow_file)
+    return machine_when_tag(MachinePaths.default().scan_allow_file)
 
 
-def _render_diff(report, *, values: bool) -> None:
+def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
     """Render a `DiffReport`; nothing here decides *what* differs (``AGENTS.md`` §2.3)."""
     import difflib
 
@@ -421,7 +421,7 @@ def _render_diff(report, *, values: bool) -> None:
         return
     _say(report.source)
     for entry in report.entries:
-        keys = ", ".join(path_label(path, element, when_tag=_when_tag()) for path, element in entry.addresses)
+        keys = ", ".join(path_label(path, element, when_tag=when_tag) for path, element in entry.addresses)
         suffix = f" [{keys}]" if keys else ""
         _say(f"{entry.status}: {entry.path}{suffix}")
     if not values:
@@ -477,10 +477,11 @@ def merge(
         raise typer.BadParameter(f"cannot read JSONC from {base} / {local} / {remote}: {exc}") from exc
     typer.echo(result.text, nl=False)
     if result.has_conflicts:
+        when_tag = _machine_when_tag()
         for conflict in result.conflicts:
             # The same label the pending-conflict detail uses; an array at the root —
             # `keybindings.json` — is compared whole, so the document itself is the conflict.
-            typer.echo(f"conflict: {path_label(conflict.path, conflict.element, when_tag=_when_tag())}", err=True)
+            typer.echo(f"conflict: {path_label(conflict.path, conflict.element, when_tag=when_tag)}", err=True)
         if result.reason:
             # The render refused: say why, so a person knows what would have to change to merge this file.
             typer.echo(f"not merged: {result.reason}", err=True)
@@ -609,14 +610,17 @@ def resolve(
         raise typer.BadParameter("--take settles every conflict; drop --local/--remote, or drop --take")
     if llm and (take is not None or scoped):
         raise typer.BadParameter("--llm chooses for you; drop --take/--local/--remote to use it")
+    from functools import partial
+
     machine = MachinePaths.default()
-    approve = None if yes else _confirm_resolution
     try:
         config = load_config(machine.config_file)
         if llm and yes and config.llm.auto_apply:
             # --yes skips the approval screen, the only place an auto-applied proposal is seen.
             raise typer.BadParameter("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
         ports = _sync_ports(config, machine)
+        when_tag = ports["when_tag"]
+        approve = None if yes else partial(_confirm_resolution, when_tag=when_tag)
         if take is not None:
             choose = take_chooser(take)
         elif scoped:
@@ -624,7 +628,7 @@ def resolve(
         elif llm:
             choose = _assisted_choice(config, machine, ports)
         else:
-            choose = _ask_choice
+            choose = partial(_ask_choice, when_tag=when_tag)
         report = sync_service(**ports, resolving=True, decide=decision(choose, approve=approve))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -643,6 +647,7 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     The endpoint is confirmed before the first call when it is not a loopback or private-network address,
     because the conflicting values leave the machine. Nothing is sent before that answer.
     """
+    from functools import partial
     from getpass import getuser
 
     from syncintosh.core.advice import is_public_endpoint
@@ -673,8 +678,8 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
             OpenAIChatTransport(base_url=llm.base_url, model=llm.model, api_key=llm_api_key(), timeout=60.0)
         ),
         masker=TextMasker(home=str(machine.home), username=getuser(), internal_domains=llm.internal_domains),
-        fallback=_ask_choice,
-        present=_present_suggestion,
+        fallback=partial(_ask_choice, when_tag=ports["when_tag"]),
+        present=partial(_present_suggestion, when_tag=ports["when_tag"]),
         auto_apply=auto_apply_for(catalog, frozenset(llm.auto_apply)),
         check=lambda view, text: proposal_problem(
             view, text, catalog=catalog, adapters=adapters, validators=validators
@@ -682,7 +687,7 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     )
 
 
-def _present_suggestion(suggestion: Suggestion) -> bool:
+def _present_suggestion(suggestion: Suggestion, *, when_tag: WhenTag) -> bool:
     """Show a model's suggestion with its rationale, the change it would make, and any new URL; read the accept.
 
     A refused suggestion is shown with the reason and declined without asking. A URL the proposal
@@ -698,7 +703,7 @@ def _present_suggestion(suggestion: Suggestion) -> bool:
     console = Console()
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=_when_tag()))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=when_tag))}"
     console.print(heading)
     console.print(f"  model: {escape(suggestion.rationale)}")
     if suggestion.refused is not None:
@@ -717,7 +722,7 @@ def _present_suggestion(suggestion: Suggestion) -> bool:
     return typer.confirm("  accept this suggestion?", default=False)
 
 
-def _ask_choice(view: ConflictView) -> Choice:
+def _ask_choice(view: ConflictView, *, when_tag: WhenTag) -> Choice:
     """Show one conflict with its values and read the operator's choice for it.
 
     Values are shown by default: resolving a conflict means comparing the two sides, and the values
@@ -725,7 +730,7 @@ def _ask_choice(view: ConflictView) -> Choice:
     """
     from syncintosh.services.resolve import options_for
 
-    _show_conflict(Console(), view)
+    _show_conflict(Console(), view, when_tag=when_tag)
     options = options_for(view)
     by_name: dict[str, NamedChoice] = {option: option for option in options}
     answer = typer.prompt(f"  choose {' / '.join(options)}")
@@ -734,13 +739,13 @@ def _ask_choice(view: ConflictView) -> Choice:
     return by_name[answer]
 
 
-def _show_conflict(console: Console, view: ConflictView) -> None:
+def _show_conflict(console: Console, view: ConflictView, *, when_tag: WhenTag) -> None:
     """Print one conflict's place and its values. Every value is escaped, so file text is never markup."""
     from rich.markup import escape
 
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=_when_tag()))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=when_tag))}"
     console.print(heading)
     if view.kind == "key":
         console.print(f"  base    {escape(view.base_text)}")
@@ -757,7 +762,7 @@ def _show_conflict(console: Console, view: ConflictView) -> None:
             console.print(f"  {escape(view.diff)}")
 
 
-def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks) -> bool:
+def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks, *, when_tag: WhenTag) -> bool:
     """Show what will be published, in full, and ask before anything is written to the remote.
 
     A value a model proposed is shown as its text, never as the repr of its carrier, and every control
@@ -765,12 +770,12 @@ def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks) -> bool:
     """
     for view in views:
         if view.fingerprint in picks:
-            for line in _pick_lines(view, picks[view.fingerprint]):
+            for line in _pick_lines(view, picks[view.fingerprint], when_tag=when_tag):
                 typer.echo(line)
     return typer.confirm("Publish these choices?", default=False)
 
 
-def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
+def _pick_lines(view: ConflictView, pick: Choice, *, when_tag: WhenTag) -> list[str]:
     """One pick as the lines a person reads before publishing: its place, then the change it makes."""
     from difflib import unified_diff
 
@@ -779,7 +784,7 @@ def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
 
     place = f"  {view.path}  {view.kind}"
     if view.key_path is not None:
-        place += f"  key {path_label(view.key_path, view.element, when_tag=_when_tag())}"
+        place += f"  key {path_label(view.key_path, view.element, when_tag=when_tag)}"
     if not isinstance(pick, Proposal):
         return [f"{place}  ->  {pick}"]
     if view.kind == "file":
@@ -808,7 +813,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.lock import FileLock
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.repo_files import FileRepo
-    from syncintosh.system.scan_allow import keyed_when_tag, load_scan_allow
+    from syncintosh.system.scan_allow import load_scan_allow, when_tag_for
     from syncintosh.system.secret_scan import PatternSecretScanner
     from syncintosh.vcs.git import GitCLITransport
 
@@ -817,6 +822,9 @@ def _sync_ports(config, paths) -> dict:
     # One object is both the `Cipher` and the `GenerationWrap`: the fetch absorbs a distributed
     # generation through the same ring the objects are opened with.
     cipher = EnvelopeCipher(store)
+    # Loaded once, before the dict: a corrupt allowlist fails here, and the `when` tagger is keyed by the same key the
+    # scanner uses rather than a second read of the file.
+    allow = load_scan_allow(paths.scan_allow_file)
     return {
         "transport": transport,
         "files": FileRepo(paths.repo_dir),
@@ -824,7 +832,7 @@ def _sync_ports(config, paths) -> dict:
         "wrapper": cipher,
         # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it lives
         # outside the repo, so it never leaves this machine.
-        "scanner": PatternSecretScanner(load_scan_allow(paths.scan_allow_file)),
+        "scanner": PatternSecretScanner(allow),
         "store": store,
         "codec": KeyMaterial(),
         "driver": TextMergeDriver(),
@@ -841,7 +849,7 @@ def _sync_ports(config, paths) -> dict:
         "config": config,
         "home": str(paths.home),
         "branch": transport.branch() or BRANCH,
-        "when_tag": keyed_when_tag(paths.scan_allow_file),
+        "when_tag": when_tag_for(allow.key),
     }
 
 

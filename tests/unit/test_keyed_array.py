@@ -848,11 +848,15 @@ def test_settled_groups_read_in_their_chosen_side_order_with_several_groups(data
         _group(key): data.draw(st.sampled_from(("local", "remote"))) for key in keys
     }
 
+    # A whole-array order conflict — both sides reordered the bindings that did not change, relative to each other — is
+    # not settled by any group pick, and it is the same with or without picks (the anchors do not depend on them), so
+    # it is the one case this property leaves out. Every other case must settle, never return `None`.
+    assume(merge_keyed_array(base, local, remote, RULE) is not None)
+
     # when
     result = merge_keyed_array(base, local, remote, RULE, picks=picks)
 
-    # then — no conflict is left, and each group both sides changed reads in the order of its picked side
-    assume(result is not None)
+    # then — each group both sides changed reads in its picked side's order, and no conflict is left
     assert result is not None
     merged = _plain(result.merged)
     assert result.conflicts == ()

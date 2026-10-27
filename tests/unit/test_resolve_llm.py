@@ -21,6 +21,11 @@ from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposa
 from syncintosh.system.masking import TextMasker
 
 
+def _tag(text: str) -> str:
+    """A fixed tagger: these tests check the layout, not the tag."""
+    return f"<{len(text)}>"
+
+
 def _plain(output: str) -> str:
     """The CLI output as a reader sees it: no color codes, no box edges, words separated by one space.
 
@@ -273,7 +278,7 @@ def test_a_refused_suggestion_is_shown_and_never_prompted(monkeypatch, capsys) -
     suggestion = Suggestion(view=_view(), choice=None, rationale="it is a merge", refused="does not parse")
 
     # when
-    accepted = _present_suggestion(suggestion)
+    accepted = _present_suggestion(suggestion, when_tag=_tag)
 
     # then
     assert accepted is False
@@ -297,7 +302,7 @@ def test_a_suggestion_with_a_new_url_shows_it_as_untrusted_before_the_accept_pro
     )
 
     # when
-    accepted = _present_suggestion(suggestion)
+    accepted = _present_suggestion(suggestion, when_tag=_tag)
 
     # then
     assert accepted is False
@@ -383,7 +388,7 @@ def test_the_approval_screen_shows_a_proposed_value_in_full() -> None:
     from syncintosh.cli.main import _pick_lines
 
     # when
-    lines = _pick_lines(_view(), Proposal('{"a": "x\u202ey"}'))
+    lines = _pick_lines(_view(), Proposal('{"a": "x\u202ey"}'), when_tag=_tag)
 
     # then — shown as its text, marked as the model's, with the override escaped
     assert "proposed by the model" in lines[0]
@@ -398,7 +403,7 @@ def test_a_file_proposal_is_shown_as_a_diff_on_the_approval_screen() -> None:
     view = _view(kind="file")
 
     # when
-    lines = _pick_lines(view, Proposal('{"a": 3}\n'))
+    lines = _pick_lines(view, Proposal('{"a": 3}\n'), when_tag=_tag)
 
     # then
     assert any(line.strip().startswith("-") or line.strip().startswith("+") for line in lines[1:])

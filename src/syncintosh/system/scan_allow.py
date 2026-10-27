@@ -192,20 +192,16 @@ def _parse_entry(raw: object, where: str) -> ScanAllowEntry:
     return ScanAllowEntry(path=path, label=label, fingerprint=digest)
 
 
-def load_scan_allow(path: Path) -> ScanAllow:
-    """Read the allowlist, creating it with a fresh key when it does not exist yet.
+def read_scan_allow(path: Path) -> ScanAllow | None:
+    """The allowlist as stored, or `None` when the file does not exist. Never creates the file.
 
-    The key has to be persisted the first time it is needed — a fingerprint only means something
-    if the same key produced it — so a missing file is written here rather than answered with an
-    ephemeral key that would change on the next run and leave the fingerprint meaningless. Lines
-    like this are why the loader is a factory rather than a constructor (``AGENTS.md`` §2.6).
+    A command that only shows something (a diff, a file merge) reads through here, so showing a difference cannot write
+    the allowlist. A file that is there but unreadable, or does not parse, raises `ScanAllowCorrupt`.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        allow = new_scan_allow()
-        save_scan_allow(allow, path)
-        return allow
+        return None
     except OSError as exc:
         raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
     try:
@@ -232,6 +228,21 @@ def load_scan_allow(path: Path) -> ScanAllow:
     return ScanAllow(key=key, entries=entries)
 
 
+def load_scan_allow(path: Path) -> ScanAllow:
+    """Read the allowlist, creating it with a fresh key when it does not exist yet.
+
+    The key has to be persisted the first time it is needed — a fingerprint only means something
+    if the same key produced it — so a missing file is written here rather than answered with an
+    ephemeral key that would change on the next run and leave the fingerprint meaningless. Lines
+    like this are why the loader is a factory rather than a constructor (``AGENTS.md`` §2.6).
+    """
+    allow = read_scan_allow(path)
+    if allow is None:
+        allow = new_scan_allow()
+        save_scan_allow(allow, path)
+    return allow
+
+
 __all__ = [
     "ALLOWABLE_LABELS",
     "ALLOW_VERSION",
@@ -244,23 +255,21 @@ __all__ = [
     "ScanAllow",
     "ScanAllowEntry",
     "fingerprint",
-    "keyed_when_tag",
     "load_scan_allow",
+    "machine_when_tag",
     "new_scan_allow",
+    "read_scan_allow",
     "save_scan_allow",
+    "when_tag_for",
 ]
 
 
-def keyed_when_tag(path: Path) -> WhenTag | None:
-    """A tagger for `when` clauses, keyed with this machine's scan key, or `None` when no key exists yet.
+def when_tag_for(key: bytes) -> WhenTag:
+    """A tagger for `when` clauses under `key`: an HMAC under a domain label, cut to `WHEN_TAG_HEX_LEN` hex digits.
 
-    The key is read but never created here: a caller that only shows a diff must not write the allowlist. Without a key
-    there is nothing to tag with, so the caller falls back to the hidden form. The tag is an HMAC under a domain label,
-    so it cannot be confused with a scan fingerprint, and without the key it is not a guessable digest of the text.
+    The domain label keeps the tag apart from a scan fingerprint, and without the key the tag is not a guessable digest
+    of the text, so a dictionary of likely `when` clauses cannot be checked against it.
     """
-    key = _read_key(path)
-    if key is None:
-        return None
 
     def tag(text: str) -> str:
         return hmac.new(key, b"when\x00" + text.encode("utf-8"), hashlib.sha256).hexdigest()[:WHEN_TAG_HEX_LEN]
@@ -268,26 +277,15 @@ def keyed_when_tag(path: Path) -> WhenTag | None:
     return tag
 
 
-def _read_key(path: Path) -> bytes | None:
-    """The stored per-machine key, or `None` when the allowlist does not exist yet. Never creates the file."""
+def machine_when_tag(path: Path) -> WhenTag:
+    """This machine's tagger for `when` clauses, keyed with its stored scan key. Never creates the allowlist.
+
+    When the allowlist is missing or unreadable, this run uses a fresh random key: the tags still tell two
+    `when` clauses apart within one output, and nothing about that key is stored. A corrupt allowlist fails the
+    commands that write (sync loads it through `load_scan_allow`); a display must not fail on it.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
-    try:
-        parsed: Any = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ScanAllowCorrupt(f"the scan allowlist {path} is not valid JSON: {exc}") from exc
-    key_raw = parsed.get("key") if isinstance(parsed, dict) else None
-    if not isinstance(key_raw, str):
-        raise ScanAllowCorrupt(f"the scan allowlist {path} has no key")
-    try:
-        key = bytes.fromhex(key_raw)
-    except ValueError as exc:
-        raise ScanAllowCorrupt(f"the scan allowlist {path} has a malformed key") from exc
-    # The same length the loader enforces: a shorter key would make the tag a guessable digest, not a keyed one.
-    if len(key) != KEY_BYTES:
-        raise ScanAllowCorrupt(f"the scan allowlist {path} key must be {KEY_BYTES} bytes")
-    return key
+        allow = read_scan_allow(path)
+    except ScanAllowCorrupt:
+        allow = None
+    return when_tag_for(os.urandom(KEY_BYTES) if allow is None else allow.key)

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from syncintosh.core.errors import ContentParseError
+from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.models import ConflictAddress, ContentMerge
@@ -128,11 +128,17 @@ ROUND_TRIP_REFUSED = "the merged result does not render back to itself"
 def render_checked(
     adapter: ContentAdapter, merged: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None
 ) -> tuple[str | None, str]:
-    """`render_merged`, with a fixed reason when it refuses (never the adapter's own message)."""
+    """`render_merged`, with a fixed reason when it refuses.
+
+    An adapter that names its refusal (`RenderRefused`) passes its own fixed text through, so the person learns what
+    would have to change; any other refusal gets the generic text. Neither ever carries a value.
+    """
     try:
         rendered = adapter.render(merged, template, arrays)
         if adapter.parse(rendered) != merged:
             return None, ROUND_TRIP_REFUSED
+    except RenderRefused as exc:
+        return None, exc.reason
     except ContentParseError:
         return None, RENDER_REFUSED
     return rendered, ""

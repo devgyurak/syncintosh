@@ -390,6 +390,8 @@ def _in_chosen_order(
         places = [index for index, identity in enumerate(result) if identity in members]
         wanted = [identity for identity in sequence if identity in members]
         if len(places) != len(wanted):
+            # Placement puts every settled binding into its side's sequence, so the counts agree; the property test
+            # asserts that a fully settled merge never reaches this return.
             return None
         for place, identity in zip(places, wanted, strict=True):
             result[place] = identity
