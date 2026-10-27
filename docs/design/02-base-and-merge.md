@@ -37,6 +37,16 @@ synced, so a live file appears under a record this machine has never written —
 suppressed file comes back. It is resolved as adopt-local / adopt-remote, never by overwriting
 ([01-sync-model.md](01-sync-model.md)).
 
+**An identified array merges by element, not as one value.** A preset may declare an `ArrayRule`
+(`core/keyed_array.py`) for an array inside a file. The rule names the identity fields of an element and
+the group they fall in. The three-way decision is then made per group, with the same rule a key path gets:
+a group one side changed takes that side; a group both sides changed to the same contents is taken once;
+a group both sides changed differently is a conflict on that group alone. Local order is kept, and an
+addition goes after its nearest predecessor on its own side. Both sides reordering the shared elements
+differently is a whole-array conflict. An array the rule cannot read falls back to the whole-array compare.
+Each conflicting group is one choice (its fingerprint covers that group's bindings only), and a proposed
+value for a group must be an array whose every element belongs to that group.
+
 **The choice replaces the whole file and does not go through the content merge.** A first-sight
 record has no usable `base`: with `base = ∅` every key would look changed on both sides and
 conflict, and with a stale baseline the app's fresh defaults would win — the very outcome the

@@ -9,7 +9,8 @@ import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
-from syncintosh.core.keyed_array import ArrayRule, merge_keyed_array
+from syncintosh.core.diff import changed_addresses
+from syncintosh.core.keyed_array import ArrayRule, accepts_group, group_ids, merge_keyed_array
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.tree import ABSENT, Array, Node, Tree, tree_from_value
 
@@ -480,3 +481,89 @@ def test_the_same_change_on_both_sides_is_taken_once_without_a_conflict(base, lo
 def _group_of(groups: dict[tuple[object, ...], list[dict[str, object]]], key: object, when: object) -> list[object]:
     """A group's elements as plain values, or an empty list, for comparing one group across sides."""
     return [dict(element) for element in groups.get((key, when), [])]
+
+
+# --- picks: a conflicting group settled by one side, or by a proposed array of its own bindings ------------
+
+
+def test_a_side_pick_settles_a_conflicting_group_to_that_side() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: "remote"})
+
+    # then
+    assert result is not None
+    assert result.conflicts == ()
+    assert _plain(result.merged) == [_binding("ctrl+k", "remote")]
+
+
+def test_a_proposed_array_of_the_same_group_settles_that_group() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+    proposal = _array([_binding("ctrl+k", "both")])
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: proposal})
+
+    # then
+    assert result is not None
+    assert result.conflicts == ()
+    assert _plain(result.merged) == [_binding("ctrl+k", "both")]
+
+
+def test_a_proposal_naming_another_group_stays_a_conflict() -> None:
+    # given — the proposal tries to move a binding into a group other than the one being settled
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+    proposal = _array([_binding("ctrl+k", "ok"), _binding("ctrl+x", "moved")])
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: proposal})
+
+    # then
+    assert result is not None
+    assert [conflict.element for conflict in result.conflicts] == [group]
+
+
+def test_accepts_group_refuses_a_non_array_and_admits_an_empty_one() -> None:
+    # given
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when & then
+    assert accepts_group(_array([]), RULE, group) is True
+    assert accepts_group(_array([_binding("ctrl+k", "a")]), RULE, group) is True
+    assert accepts_group(_array([_binding("ctrl+x", "a")]), RULE, group) is False
+    assert accepts_group(tree_from_value("scalar").value(()), RULE, group) is False
+
+
+def test_group_ids_lists_each_group_once_in_order() -> None:
+    # given
+    array = _array([_binding("a", "1"), _binding("a", "2"), _binding("b", "3", when="p")])
+
+    # when
+    groups = group_ids(array, RULE)
+
+    # then
+    assert groups == ((("key", "a"), ("when", None)), (("key", "b"), ("when", "p")))
+
+
+def test_changed_addresses_names_only_the_binding_that_changed() -> None:
+    # given
+    left = tree_from_value({"keys": [_binding("a", "1"), _binding("b", "2")]})
+    right = tree_from_value({"keys": [_binding("a", "1"), _binding("b", "9")]})
+
+    # when
+    addresses = changed_addresses(left, right, {("keys",): RULE})
+
+    # then
+    assert addresses == ((("keys",), (("key", "b"), ("when", None))),)

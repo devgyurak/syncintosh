@@ -1044,7 +1044,7 @@ def test_diff_reports_a_local_change_without_exposing_it_through_key_paths(tmp_p
     # then — reported as changed, with no key paths for a whole-file (text) format
     entry = next(entry for entry in report.entries if entry.path == ZSH)
     assert entry.status == "changed"
-    assert entry.key_paths == ()
+    assert entry.addresses == ()
 
 
 def test_diff_compares_the_live_file_with_the_fetched_remote_tip(tmp_path, memory_key_store) -> None:

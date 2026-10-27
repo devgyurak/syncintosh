@@ -26,7 +26,7 @@ from collections.abc import Iterable, Mapping
 from syncintosh.core.keyed_array import ArrayRule, merge_keyed_array
 from syncintosh.core.models import Conflict, TreeMerge
 from syncintosh.core.resolution import Side
-from syncintosh.core.tree import ABSENT, Absent, Array, EmptyObject, KeyPath, Leaf, Node, Scalar, Tree
+from syncintosh.core.tree import ABSENT, Absent, Array, ElementId, EmptyObject, KeyPath, Leaf, Node, Scalar, Tree
 
 # The paths a merge must never decide — noise keys the collector knows are machine-specific.
 IgnorePaths = frozenset[KeyPath]
@@ -40,6 +40,7 @@ def merge_tree(
     ignore: IgnorePaths = frozenset(),
     choices: Mapping[KeyPath, Side | Tree] | None = None,
     keyed: Mapping[KeyPath, ArrayRule] | None = None,
+    element_picks: Mapping[tuple[KeyPath, ElementId], Side | Array] | None = None,
 ) -> TreeMerge:
     """Merge three typed trees; conflicts are returned, not raised.
 
@@ -53,11 +54,15 @@ def merge_tree(
     is consulted only once it is a both-sides conflict; a conflict in one of its groups is recorded
     with that group's identity, and the rest of the array merges. An array the rule cannot read keeps
     the whole-array conflict it would have had without the rule.
+
+    ``element_picks`` settles one group of a keyed array, by ``(path, group identity)``, to a side or to
+    a proposed array (`core/keyed_array.py`). It is consulted only for a group that still conflicts.
     """
     base_entries = base.entries
     local_entries = local.entries
     remote_entries = remote.entries
     rules = keyed or {}
+    group_picks = element_picks or {}
 
     merged: dict[KeyPath, Node] = {}
     conflicts: list[Conflict] = []
@@ -73,7 +78,15 @@ def merge_tree(
         chosen, conflicted = _resolve(base_value, local_value, remote_value)
         if conflicted:
             element_merge = (
-                merge_keyed_array(base_value, local_value, remote_value, rules[path]) if path in rules else None
+                merge_keyed_array(
+                    base_value,
+                    local_value,
+                    remote_value,
+                    rules[path],
+                    picks={element: pick for (at, element), pick in group_picks.items() if at == path},
+                )
+                if path in rules
+                else None
             )
             if element_merge is not None:
                 merged[path] = element_merge.merged

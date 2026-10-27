@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from syncintosh.core.advice import Advice, MaskedText, new_host_tokens, rationale_for_display
 from syncintosh.core.errors import ConflictsNotCovered, ContentParseError, SyntaxInvalid
+from syncintosh.core.keyed_array import accepts_group
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import ConflictAdvisor, ContentAdapter, Masker, PresetCatalog, SyntaxValidator
@@ -199,7 +200,10 @@ def advised_chooser(
             return fallback(view)
         # The key path goes with the texts: a model choosing among `14`, `16` and `13` with no name for the
         # setting would be guessing, and an auto-applied guess is the worst outcome.
-        key = "" if view.key_path is None else path_label(view.key_path)
+        key = "" if view.key_path is None else path_label(view.key_path, view.element)
+        if view.element is not None:
+            # One binding group of an array: the answer is an array of that group's bindings, not one value.
+            key += " (a JSON array of this group's bindings)"
         path, key_text, base, local, remote = masker.mask(
             view.path, key, view.base_text, view.local_text, view.remote_text
         )
@@ -275,6 +279,15 @@ def proposal_problem(
             adapter.parse(text)
         except ContentParseError:
             return f"the proposed value does not parse as {policy.format}"
+    if view.element is not None and view.key_path is not None and adapter is not None:
+        # A binding group takes only bindings of that group; a proposal that names another group would move one.
+        rule = policy.array_rules.get(view.key_path)
+        try:
+            tree = adapter.parse(text)
+        except ContentParseError:
+            tree = None
+        if rule is None or tree is None or not accepts_group(tree.value(()), rule, view.element):
+            return "the proposed value is not an array of this binding's group"
     validator = validators.get(policy.validator) if policy.validator is not None else None
     if view.kind == "file" and validator is not None:
         try:

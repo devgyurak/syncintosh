@@ -45,10 +45,11 @@ from syncintosh.core.errors import (
     ProjectionError,
     SyntaxInvalid,
 )
+from syncintosh.core.keyed_array import ArrayRule, group_leaf
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.models import LedgerEntry, PendingState, Scope
+from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import (
@@ -96,7 +97,7 @@ from syncintosh.core.resolution import (
     digest_of,
     fingerprint,
 )
-from syncintosh.core.tree import KeyPath, Node, Tree, path_label
+from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
@@ -822,15 +823,18 @@ def _collect_first_sight(
     state.collected.append(item.path)
 
 
-def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
+def _content_detail(addresses: tuple[ConflictAddress, ...], reason: str) -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
+    A binding is named by its `key` and `when` (its group): those are the structure a person picks by, while
+    a binding's `command` and `args` are never named here.
+
     `path_label` renders each path the way a person reads the file, so a whole-document conflict —
-    an array like `keybindings.json`, compared as one value — prints `(document)` rather than
-    nothing, and two paths that differ (`"a.b"` as one key against `a` → `b`) do not print the same
-    string. The same label is what the `merge` command prints.
+    an array compared as one value — prints `(document)` rather than nothing, and two paths that differ
+    (`"a.b"` as one key against `a` → `b`) do not print the same string. A conflict on one binding of
+    an identified array names that binding too. The same label is what the `merge` command prints.
     """
-    named = dict.fromkeys(path_label(path) for path in paths)
+    named = dict.fromkeys(path_label(path, element) for path, element in addresses)
     if not named:
         return reason
     return f"{reason}: {', '.join(named)}"
@@ -976,6 +980,51 @@ def _key_view(
     )
 
 
+def _element_step(element: ElementId) -> str:
+    """An array element's identity as one key-path step, so its fingerprint can never match a key's."""
+    return "\x00element:" + json.dumps([list(pair) for pair in element], ensure_ascii=False)
+
+
+def _group_text(leaf: Leaf) -> str:
+    """A group's bindings as a person reads them: their JSON, or a marker when the side has none."""
+    if isinstance(leaf, Absent):
+        return "(absent)"
+    return json.dumps(Tree.create({(): leaf}).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _element_view(
+    file_id: str,
+    path: str,
+    key_path: KeyPath,
+    element: ElementId,
+    rule: ArrayRule,
+    base_tree: Tree,
+    local_tree: Tree,
+    remote_tree: Tree,
+) -> ConflictView:
+    """One binding group of an identified array as a choice. Its digests cover the group's bindings only."""
+    base_part = group_leaf(base_tree.value(key_path), rule, element)
+    local_part = group_leaf(local_tree.value(key_path), rule, element)
+    remote_part = group_leaf(remote_tree.value(key_path), rule, element)
+    return ConflictView(
+        kind="key",
+        file_id=file_id,
+        path=path,
+        key_path=key_path,
+        element=element,
+        fingerprint=fingerprint(
+            file_id,
+            (*key_path, _element_step(element)),
+            digest_of(base_part),
+            digest_of(local_part),
+            digest_of(remote_part),
+        ),
+        base_text=_group_text(base_part),
+        local_text=_group_text(local_part),
+        remote_text=_group_text(remote_part),
+    )
+
+
 def _content_views(
     file_id: str,
     path: str,
@@ -984,14 +1033,22 @@ def _content_views(
     local: bytes,
     remote: bytes,
     adapter: ContentAdapter | None,
-    key_paths: tuple[KeyPath, ...],
+    arrays: Mapping[KeyPath, ArrayRule],
+    addresses: tuple[ConflictAddress, ...],
 ) -> tuple[ConflictView, ...]:
-    """The choices for one content conflict: one per conflicted key, or the whole file."""
-    trees = _parsed(adapter, base, local, remote) if adapter is not None and key_paths else None
+    """The choices for one content conflict: one per conflicted key or binding group, or the whole file."""
+    trees = _parsed(adapter, base, local, remote) if adapter is not None and addresses else None
     if trees is None:
         return (_whole_view(file_id, path, fmt, base, local, remote),)
     base_tree, local_tree, remote_tree = trees
-    return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
+    views: list[ConflictView] = []
+    for key_path, element in dict.fromkeys(addresses):
+        if element is None:
+            views.append(_key_view(file_id, path, key_path, base_tree, local_tree, remote_tree))
+        else:
+            rule = arrays[key_path]
+            views.append(_element_view(file_id, path, key_path, element, rule, base_tree, local_tree, remote_tree))
+    return tuple(views)
 
 
 def _content_pick(pick: Choice | None) -> Side | Proposal | None:
@@ -1033,6 +1090,8 @@ def _settle_content(
     however it was settled, goes through the syntax check.
     """
     adapter = presets.adapter_for(fmt)
+    policy = presets.policy_for(path)
+    arrays = policy.array_rules if policy is not None else {}
     whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
     if isinstance(whole, Proposal) and not _is_text(fmt, base, local, remote):
         # A text proposal cannot settle a binary file: it would replace the bytes with a string.
@@ -1041,19 +1100,38 @@ def _settle_content(
         settled = merge_content(base, local, remote, driver, adapter, choice=whole)
         if not settled.conflicted:
             return _checked(presets, settled.data, path, file_id, fmt, base, local, remote)
-    first = merge_content(base, local, remote, driver, adapter)
+    first = merge_content(base, local, remote, driver, adapter, arrays=arrays)
     if not first.conflicted:
         return _checked(presets, first.data, path, file_id, fmt, base, local, remote)
     key_choices: dict[KeyPath, Side | Proposal] = {}
-    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, first.conflict_paths):
-        key_pick = _content_pick(picks.get(view.fingerprint))
-        if view.key_path is not None and key_pick is not None:
-            key_choices[view.key_path] = key_pick
-    merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
+    element_picks: dict[tuple[KeyPath, ElementId], Side | Proposal] = {}
+    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, first.conflict_addresses):
+        pick = _content_pick(picks.get(view.fingerprint))
+        if view.key_path is None or pick is None:
+            continue
+        if view.element is None:
+            key_choices[view.key_path] = pick
+        else:
+            element_picks[(view.key_path, view.element)] = pick
+    settled_any = bool(key_choices or element_picks)
+    merged = (
+        merge_content(
+            base,
+            local,
+            remote,
+            driver,
+            adapter,
+            key_choices=key_choices,
+            arrays=arrays,
+            element_picks=element_picks,
+        )
+        if settled_any
+        else first
+    )
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
-    views = _content_views(file_id, path, fmt, base, local, remote, adapter, merged.conflict_paths)
-    return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
+    views = _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses)
+    return _Settled(data=None, detail=_content_detail(merged.conflict_addresses, reason), views=views)
 
 
 def _record_fingerprint(conflict: RecordConflict) -> str:

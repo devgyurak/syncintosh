@@ -16,6 +16,7 @@ from syncintosh.core.advice import Advice
 from syncintosh.core.errors import SyntaxInvalid
 from syncintosh.core.resolution import ConflictKind, ConflictView, Proposal
 from syncintosh.presets import BuiltinCatalog
+from syncintosh.presets.vscode import KEYBINDINGS
 from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
 from syncintosh.system.masking import TextMasker
 
@@ -497,3 +498,46 @@ def test_resolve_llm_with_yes_and_auto_apply_is_refused_before_anything_is_publi
     # then
     assert result.exit_code == 2
     assert "unseen" in result.output
+
+
+def _binding_view(text: str = "[]") -> ConflictView:
+    """A conflict on one binding group of the VS Code keybindings array: `key` `ctrl+k`, no `when`."""
+    return ConflictView(
+        kind="key",
+        file_id="f" * 32,
+        path=KEYBINDINGS,
+        key_path=(),
+        fingerprint="y" * 64,
+        base_text=text,
+        local_text=text,
+        remote_text=text,
+        element=(("key", "ctrl+k"), ("when", None)),
+    )
+
+
+def test_a_binding_proposal_naming_another_group_is_refused() -> None:
+    # when
+    problem = proposal_problem(
+        _binding_view(),
+        '[{"key": "ctrl+x", "command": "a"}]',
+        catalog=BuiltinCatalog.default(),
+        adapters={"jsonc": JsoncAdapter()},
+        validators={},
+    )
+
+    # then
+    assert problem == "the proposed value is not an array of this binding's group"
+
+
+def test_a_binding_proposal_of_its_own_group_may_be_offered() -> None:
+    # when & then
+    assert (
+        proposal_problem(
+            _binding_view(),
+            '[{"key": "ctrl+k", "command": "a"}]',
+            catalog=BuiltinCatalog.default(),
+            adapters={"jsonc": JsoncAdapter()},
+            validators={},
+        )
+        is None
+    )

@@ -10,7 +10,7 @@ documentation rather than from a local file:
 App:       Visual Studio Code (stable)
 Bundle ID: com.microsoft.VSCode        (the Homebrew cask's zap paths)
 Paths:     ~/Library/Application Support/Code/User/settings.json    (JSONC object)
-           ~/Library/Application Support/Code/User/keybindings.json (JSONC array, compared whole)
+           ~/Library/Application Support/Code/User/keybindings.json (JSONC array, merged per binding)
            ~/Library/Application Support/Code/User/snippets/*.json          (language snippets)
            ~/Library/Application Support/Code/User/snippets/*.code-snippets (global snippets)
 Format:    JSONC (comments and trailing commas; `setProperty` edits preserve both)
@@ -30,6 +30,13 @@ Sources:
   (`setProperty` rewrites only the value's span, so comments survive) and
   `src/vs/platform/files/node/diskFileSystemProvider.ts` (an atomic `.vsctmp` + rename save, so a
   copy-based collect never reads a half-written file).
+- `microsoft/vscode` `src/vs/platform/userDataSync/common/keybindingsMerge.ts` at commit
+  `6b924c51528e663dda5091a1493229a361676aca` (the file's upstream history, read for issue #21). Its
+  conflict unit is the **key**: two machines that bind different commands to one key conflict there,
+  where this preset merges per `key` + `when` group. Its `-command` removals match by command name alone,
+  where this preset keeps a removal as an element identified by `key`, `command` and `when`. Its key parser
+  lowercases keys, where this preset compares them exactly. These three are deliberate differences, and the
+  preset's `array_identity` rule records them; the design docs carry the reasoning.
 - `code.visualstudio.com/docs/configure/settings` and `brew info --cask visual-studio-code`.
 - `code.visualstudio.com/docs/editor/userdefinedsnippets` — "Create your own snippets": user
   snippets live under `Code/User/snippets/`, a language snippet file is `javascript.json`, the files
@@ -72,6 +79,7 @@ with this preset.
 
 from __future__ import annotations
 
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.tree import KeyPath
 
@@ -121,11 +129,22 @@ VSCODE = Preset.create(
     name="vscode",
     files=(
         PresetFile.create(path=SETTINGS, format="jsonc", noise=NOISE, excluded=EXCLUDED),
-        # No strip list: an array is compared whole by the merge engine, so there is no key to cut.
-        # A change to the same binding on both machines is therefore a whole-file conflict, which
-        # is correct — the array's order carries meaning (a later entry overrides an earlier one),
-        # so identifying entries by key would silently change behaviour (decision V6).
-        PresetFile.create(path=KEYBINDINGS, format="jsonc"),
+        # No strip list, but the bindings merge one at a time. The array's order carries meaning (a later
+        # entry overrides an earlier one), so the merge keeps local's order and places each addition after
+        # its predecessor on its own side, and it never reorders across sides silently. Two bindings are
+        # the same group when they share `key` and `when`; a group both machines changed differently is a
+        # conflict, and only that binding is asked about. The conflict names a binding by its key and when
+        # (structure, not values); its command and args are never printed. `key` is compared exactly, so `Ctrl+A` and
+        # `ctrl+a` are two groups even though VS Code reads them as one (decision V6, issue #21).
+        PresetFile.create(
+            path=KEYBINDINGS,
+            format="jsonc",
+            array_identity={
+                (): ArrayRule.create(
+                    identity=("key", "command", "when"), required=("key", "command"), group=("key", "when")
+                ),
+            },
+        ),
         # User snippets: a **directory** of per-machine files, so a glob rather than an exact path.
         # The two patterns do not overlap — one file is either a language `.json` snippet or a global
         # `.code-snippets` one — and a file the other machine created is written here only because

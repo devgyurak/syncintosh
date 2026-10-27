@@ -23,11 +23,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from syncintosh.core.errors import ContentParseError
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.models import ContentMerge
+from syncintosh.core.models import ConflictAddress, ContentMerge
 from syncintosh.core.ports import ContentAdapter, MergeDriver
 from syncintosh.core.resolution import Proposal, Side
-from syncintosh.core.tree import KeyPath, Tree
+from syncintosh.core.tree import Array, ElementId, KeyPath, Tree
 
 
 def _decode_all(base: bytes, local: bytes, remote: bytes) -> tuple[str, str, str] | None:
@@ -47,6 +48,8 @@ def merge_content(
     *,
     choice: Side | Proposal | None = None,
     key_choices: Mapping[KeyPath, Side | Proposal] | None = None,
+    arrays: Mapping[KeyPath, ArrayRule] | None = None,
+    element_picks: Mapping[tuple[KeyPath, ElementId], Side | Proposal] | None = None,
 ) -> ContentMerge:
     """Three-way merge one record's plaintext bytes.
 
@@ -75,9 +78,11 @@ def merge_content(
         return ContentMerge(data=local, conflicted=True)
     base_text, local_text, remote_text = decoded
     if adapter is not None:
-        merged_text, conflict_paths = _merge_via_adapter(adapter, base_text, local_text, remote_text, key_choices or {})
+        merged_text, addresses = _merge_via_adapter(
+            adapter, base_text, local_text, remote_text, key_choices or {}, arrays or {}, element_picks or {}
+        )
         if merged_text is None:
-            return ContentMerge(data=local, conflicted=True, conflict_paths=conflict_paths)
+            return ContentMerge(data=local, conflicted=True, conflict_addresses=addresses)
         return ContentMerge(data=merged_text.encode("utf-8"), conflicted=False)
     result = driver.merge(base_text, local_text, remote_text)
     return ContentMerge(data=result.text.encode("utf-8"), conflicted=result.conflicted)
@@ -137,13 +142,35 @@ def _settled_keys(
     return settled
 
 
+def _settled_elements(
+    adapter: ContentAdapter, element_picks: Mapping[tuple[KeyPath, ElementId], Side | Proposal]
+) -> dict[tuple[KeyPath, ElementId], Side | Array]:
+    """Each element pick as a value the merge can take: a proposed array must parse, or the pick is dropped.
+
+    The merge checks the rest (every element belongs to its group), so a proposal that parses but names the
+    wrong group still stays a conflict.
+    """
+    settled: dict[tuple[KeyPath, ElementId], Side | Array] = {}
+    for address, pick in element_picks.items():
+        if not isinstance(pick, Proposal):
+            settled[address] = pick
+            continue
+        parsed = _parsed_or_none(adapter, pick.text)
+        root = parsed.value(()) if parsed is not None else None
+        if isinstance(root, Array):
+            settled[address] = root
+    return settled
+
+
 def _merge_via_adapter(
     adapter: ContentAdapter,
     base_text: str,
     local_text: str,
     remote_text: str,
     key_choices: Mapping[KeyPath, Side | Proposal],
-) -> tuple[str | None, tuple[KeyPath, ...]]:
+    arrays: Mapping[KeyPath, ArrayRule],
+    element_picks: Mapping[tuple[KeyPath, ElementId], Side | Proposal],
+) -> tuple[str | None, tuple[ConflictAddress, ...]]:
     """The adapter merge as ``(text, ())``, or ``(None, conflict paths)`` when it cannot be trusted.
 
     ``None`` the text covers three failures the caller treats identically: a side that does not
@@ -157,9 +184,16 @@ def _merge_via_adapter(
         remote_tree = adapter.parse(remote_text)
     except ContentParseError:
         return None, ()
-    result = merge_tree(base_tree, local_tree, remote_tree, choices=_settled_keys(adapter, key_choices))
+    result = merge_tree(
+        base_tree,
+        local_tree,
+        remote_tree,
+        choices=_settled_keys(adapter, key_choices),
+        keyed=arrays,
+        element_picks=_settled_elements(adapter, element_picks),
+    )
     if result.has_conflicts:
-        return None, tuple(conflict.path for conflict in result.conflicts)
+        return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts))
     rendered = render_merged(adapter, result.merged, local_text)
     if rendered is None:
         return None, ()

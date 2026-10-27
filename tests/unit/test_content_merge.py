@@ -200,7 +200,7 @@ def test_a_both_sides_conflict_on_one_key_is_a_conflict() -> None:
     # then — the colliding path is reported (never its values) and the local side is the candidate
     assert result.data == b'{"a": 2}'
     assert result.conflicted is True
-    assert result.conflict_paths == (("a",),)
+    assert result.conflict_addresses == (((("a",), None),))
 
 
 def test_a_render_that_does_not_round_trip_is_a_conflict() -> None:
@@ -262,7 +262,7 @@ def test_a_key_proposal_that_does_not_parse_leaves_its_key_in_conflict() -> None
 
     # then
     assert result.conflicted is True
-    assert result.conflict_paths == (("a",),)
+    assert result.conflict_addresses == (((("a",), None),))
 
 
 def test_a_whole_file_proposal_that_does_not_parse_is_a_conflict() -> None:

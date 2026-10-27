@@ -24,6 +24,7 @@ from syncintosh.core.errors import SecretScanError
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
 from syncintosh.core.repo import COMMITMENTS_PATH
+from syncintosh.core.resolution import Decide
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -31,6 +32,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import KEYBINDINGS, SETTINGS, SNIPPETS_JSON
 from syncintosh.services.keys import import_ring, init_new_repo
+from syncintosh.services.resolve import decision, take_chooser
 from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
@@ -147,7 +149,14 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
-def _run(machine: Machine, *, adopt: AdoptChoice | None = None, apps: AppDetector | None = None) -> SyncReport:
+def _run(
+    machine: Machine,
+    *,
+    adopt: AdoptChoice | None = None,
+    apps: AppDetector | None = None,
+    decide: Decide | None = None,
+    resolving: bool = False,
+) -> SyncReport:
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     return sync(
@@ -170,6 +179,8 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None, apps: AppDetecto
         source=SecureFileIdSource(),
         config=load_config(machine.config_file),
         home=str(machine.home),
+        decide=decide,
+        resolving=resolving,
         branch=active.branch() or BRANCH,
         adopt=adopt,
     )
@@ -343,22 +354,107 @@ def test_a_proxy_url_with_a_password_is_refused_by_the_secret_scan(tmp_path, mem
 # --------------------------------------------------------------------------- keybindings
 
 
-def test_a_both_sides_keybindings_change_is_a_whole_file_conflict(tmp_path, memory_key_store) -> None:
-    # given — the array is compared whole, because its order carries meaning
+def _with_binding(text: bytes, key: str, command: str) -> bytes:
+    """The keybindings fixture with one binding appended to its array (the fixture ends `}\\n]`)."""
+    return text.replace(b"\n]", f',\n  {{"key": "{key}", "command": "{command}"}}\n]'.encode())
+
+
+def test_bindings_added_on_each_machine_are_both_kept(tmp_path, memory_key_store) -> None:
+    # given — each machine adds a different binding, on a different key
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    _write(a, KEYBINDINGS, _with_binding(_fixture("vscode-keybindings.jsonc"), "cmd+k", "a.added"))
+    _run(a)
+    _write(b, KEYBINDINGS, _with_binding(_fixture("vscode-keybindings.jsonc"), "cmd+b", "b.added"))
+
+    # when
+    report = _run(b)
+
+    # then — no conflict, and B's file holds both additions; A picks up the merge on its next sync
+    assert report.has_conflicts is False
+    assert b"a.added" in _read(b, KEYBINDINGS) and b"b.added" in _read(b, KEYBINDINGS)
+    _run(a)
+    assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
+
+
+def test_the_same_binding_changed_on_both_sides_is_a_conflict_on_that_binding_only(tmp_path, memory_key_store) -> None:
+    # given — A and B change the first binding to different commands; B also adds an unrelated binding
     a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
     original = _fixture("vscode-keybindings.jsonc")
     _write(a, KEYBINDINGS, original.replace(b"terminal.clear", b"terminal.clearAll"))
+    _run(a)
+    edited_b = _with_binding(original.replace(b"terminal.clear", b"terminal.kill"), "cmd+b", "b.added")
+    _write(b, KEYBINDINGS, edited_b)
+
+    # when
+    report = _run(b)
+
+    # then — the conflict names that binding; B's file is untouched until a pick settles it
+    assert report.has_conflicts is True
+    assert report.conflicts[0].path == KEYBINDINGS
+    assert '[key="cmd+shift+k", when=(missing)]' in report.conflicts[0].detail
+    assert _read(b, KEYBINDINGS) == edited_b
+
+    # when — pick A's version of that one binding; B's own addition is kept
+    _run(b, decide=decision(take_chooser("remote")), resolving=True)
+
+    # then
+    assert b"terminal.clearAll" in _read(b, KEYBINDINGS)
+    assert b"terminal.kill" not in _read(b, KEYBINDINGS)
+    assert b"b.added" in _read(b, KEYBINDINGS)
+
+
+def test_a_removal_that_overlaps_an_edit_of_the_same_binding_conflicts(tmp_path, memory_key_store) -> None:
+    # given — A removes the first binding; B edits that same binding
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    original = _fixture("vscode-keybindings.jsonc")
+    removed = original.replace(
+        b'  {\n    "key": "cmd+shift+k",\n    "command": "workbench.action.terminal.clear"\n  },\n', b""
+    )
+    assert removed != original
+    _write(a, KEYBINDINGS, removed)
     _run(a)
     _write(b, KEYBINDINGS, original.replace(b"terminal.clear", b"terminal.kill"))
 
     # when
     report = _run(b)
 
-    # then — one conflict for the document, and B's file is untouched
+    # then
     assert report.has_conflicts is True
-    assert report.conflicts[0].path == KEYBINDINGS
+    assert '[key="cmd+shift+k", when=(missing)]' in report.conflicts[0].detail
+
+
+def test_a_non_object_element_on_one_side_falls_back_to_a_whole_array_conflict(tmp_path, memory_key_store) -> None:
+    # given — A adds a string where a binding belongs, which the rule cannot identify; B edits a binding
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    original = _fixture("vscode-keybindings.jsonc")
+    _write(a, KEYBINDINGS, original.replace(b"\n]", b',\n  "not a binding"\n]'))
+    _run(a)
+    _write(b, KEYBINDINGS, original.replace(b"terminal.clear", b"terminal.kill"))
+
+    # when
+    report = _run(b)
+
+    # then — the array is one conflict, as it was before the rule existed
+    assert report.has_conflicts is True
     assert report.conflicts[0].detail == "the same region changed on both sides: (document)"
     assert _read(b, KEYBINDINGS) == original.replace(b"terminal.clear", b"terminal.kill")
+
+
+def test_a_credential_in_a_binding_is_refused_before_anything_is_published(tmp_path, memory_key_store) -> None:
+    # given — B adds a binding whose args carry a credential-bearing URL
+    _a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    leaked = _with_binding(_fixture("vscode-keybindings.jsonc"), "cmd+u", "x.open")
+    leaked = leaked.replace(
+        b'"command": "x.open"}',
+        b'"command": "x.open", "args": {"url": "https://builder:PROXY-PASSWORD@proxy.example.test"}}',
+    )
+    _write(b, KEYBINDINGS, leaked)
+
+    # when & then — refused at the encrypt boundary, naming the location only
+    with pytest.raises(SecretScanError) as refusal:
+        _run(b)
+    assert KEYBINDINGS in str(refusal.value)
+    assert "PROXY-PASSWORD" not in str(refusal.value)
 
 
 def test_a_one_sided_keybindings_change_keeps_the_order(tmp_path, memory_key_store) -> None:

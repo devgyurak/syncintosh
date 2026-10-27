@@ -7,12 +7,15 @@ free of use-case concerns.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from syncintosh.core.content_merge import render_merged
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.merge import IgnorePaths, merge_tree
 from syncintosh.core.models import Conflict
 from syncintosh.core.ports import ContentAdapter
+from syncintosh.core.tree import KeyPath
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ def merge_text(
     adapter: ContentAdapter,
     *,
     ignore: IgnorePaths = frozenset(),
+    arrays: Mapping[KeyPath, ArrayRule] | None = None,
 ) -> RenderedMerge:
     """Parse three documents as `adapter`'s format, merge, and render against the local text.
 
@@ -53,7 +57,7 @@ def merge_text(
     base = adapter.parse(base_text)
     local = adapter.parse(local_text)
     remote = adapter.parse(remote_text)
-    result = merge_tree(base, local, remote, ignore=ignore)
+    result = merge_tree(base, local, remote, ignore=ignore, keyed=arrays)
     if result.has_conflicts:
         rendered = render_merged(adapter, result.merged, local_text)
         return RenderedMerge(text=local_text if rendered is None else rendered, conflicts=result.conflicts)

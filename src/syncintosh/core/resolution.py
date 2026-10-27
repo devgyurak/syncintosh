@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from syncintosh.core.models import Scope
-from syncintosh.core.tree import KeyPath
+from syncintosh.core.tree import ElementId, KeyPath
 
 # A fingerprint is never stored or sent outside the run that made it. It is an unsalted digest of
 # the conflict's values, so writing it to disk or to a network would let anyone with a short value
@@ -103,6 +103,9 @@ class ConflictView:
     local_text: str = field(default="", repr=False)
     remote_text: str = field(default="", repr=False)
     diff: str = field(default="", repr=False)
+    # Set when the conflict is one binding group of an identified array (`core/keyed_array.py`); `key_path`
+    # names the array and this names the group. Its values are the group's bindings, never the whole array.
+    element: ElementId | None = None
 
 
 # Called with every conflict the cycle currently finds, and the picks this run already made. It

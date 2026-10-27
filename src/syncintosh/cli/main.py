@@ -412,7 +412,7 @@ def _render_diff(report, *, values: bool) -> None:
         return
     _say(report.source)
     for entry in report.entries:
-        keys = ", ".join(path_label(path) for path in entry.key_paths)
+        keys = ", ".join(path_label(path, element) for path, element in entry.addresses)
         suffix = f" [{keys}]" if keys else ""
         _say(f"{entry.status}: {entry.path}{suffix}")
     if not values:
@@ -431,22 +431,39 @@ def _render_diff(report, *, values: bool) -> None:
 
 
 @app.command()
-def merge(base: Path, local: Path, remote: Path) -> None:
+def merge(
+    base: Path,
+    local: Path,
+    remote: Path,
+    path: str | None = typer.Option(
+        None, "--path", help="the record path of the preset file, so its array rules (per binding) apply"
+    ),
+) -> None:
     """Three-way merge of three JSONC files, preserving comments. Exits 1 on conflicts.
 
     The merged tree is rendered against the local file, so comments, a trailing comma, and the
-    key order survive and only a changed value's span is rewritten. The adapter stays a lazy
-    import so CLI startup does not pay for JSONC parsing (``AGENTS.md`` §4).
+    key order survive and an unchanged element is left as it was. `--path` names the preset file the
+    three come from; its arrays (`keybindings.json`) then merge one binding at a time. The rules come
+    from the built-in catalog, never from the files. The adapter stays a lazy import so CLI startup
+    does not pay for JSONC parsing (``AGENTS.md`` §4).
     """
     from syncintosh.adapters.jsonc import JsoncAdapter
     from syncintosh.core.errors import ContentParseError
+    from syncintosh.presets import BuiltinCatalog
     from syncintosh.services import merge_text
 
+    policy = None if path is None else BuiltinCatalog.default().policy_for(path)
     try:
         base_text = base.read_text(encoding="utf-8")
         local_text = local.read_text(encoding="utf-8")
         remote_text = remote.read_text(encoding="utf-8")
-        result = merge_text(base_text, local_text, remote_text, JsoncAdapter())
+        result = merge_text(
+            base_text,
+            local_text,
+            remote_text,
+            JsoncAdapter(),
+            arrays=None if policy is None else policy.array_rules,
+        )
     except (OSError, UnicodeDecodeError, ContentParseError) as exc:
         raise typer.BadParameter(f"cannot read JSONC from {base} / {local} / {remote}: {exc}") from exc
     typer.echo(result.text, nl=False)
@@ -454,7 +471,7 @@ def merge(base: Path, local: Path, remote: Path) -> None:
         for conflict in result.conflicts:
             # The same label the pending-conflict detail uses; an array at the root —
             # `keybindings.json` — is compared whole, so the document itself is the conflict.
-            typer.echo(f"conflict: {path_label(conflict.path)}", err=True)
+            typer.echo(f"conflict: {path_label(conflict.path, conflict.element)}", err=True)
         raise typer.Exit(code=1)
 
 
@@ -669,7 +686,7 @@ def _present_suggestion(suggestion: Suggestion) -> bool:
     console = Console()
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element))}"
     console.print(heading)
     console.print(f"  model: {escape(suggestion.rationale)}")
     if suggestion.refused is not None:
@@ -711,7 +728,7 @@ def _show_conflict(console: Console, view: ConflictView) -> None:
 
     heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
     if view.key_path is not None:
-        heading += f"  key {escape(path_label(view.key_path))}"
+        heading += f"  key {escape(path_label(view.key_path, view.element))}"
     console.print(heading)
     if view.kind == "key":
         console.print(f"  base    {escape(view.base_text)}")
@@ -750,7 +767,7 @@ def _pick_lines(view: ConflictView, pick: Choice) -> list[str]:
 
     place = f"  {view.path}  {view.kind}"
     if view.key_path is not None:
-        place += f"  key {path_label(view.key_path)}"
+        place += f"  key {path_label(view.key_path, view.element)}"
     if not isinstance(pick, Proposal):
         return [f"{place}  ->  {pick}"]
     if view.kind == "file":

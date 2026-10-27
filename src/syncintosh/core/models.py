@@ -12,6 +12,10 @@ from typing import Literal
 
 from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree
 
+# Where a structural conflict sits: a key path, and the element of an identified array when the conflict is
+# one binding under it (`None` for a conflict on the whole path).
+ConflictAddress = tuple[KeyPath, ElementId | None]
+
 # Whether a value applies to every machine or only to the current one.
 Scope = Literal["common", "machine"]
 
@@ -81,14 +85,15 @@ class ContentMerge:
     """The outcome of a byte-level content merge for one record.
 
     `data` is the merged bytes when `conflicted` is False, and the local side (an unresolved
-    candidate) when it is True. `conflict_paths` names the key paths a structural merge found in
-    conflict — never their values — so a pending report can say what collided; it is empty for a
-    whole-file conflict (an undecodable, unparseable, or text merge).
+    candidate) when it is True. `conflict_addresses` names where a structural merge found a conflict —
+    a key path, and the element of an identified array when the conflict is one binding — never their
+    values, so a pending report can say what collided. It is empty for a whole-file conflict (an
+    undecodable, unparseable, or text merge).
     """
 
     data: bytes
     conflicted: bool
-    conflict_paths: tuple[KeyPath, ...] = ()
+    conflict_addresses: tuple[ConflictAddress, ...] = ()
 
 
 @dataclass(frozen=True)
