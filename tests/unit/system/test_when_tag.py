@@ -90,3 +90,15 @@ def test_an_unusable_allowlist_gives_the_display_a_run_key_and_is_left_as_it_was
     assert allow.read_text(encoding="utf-8") == text
     with pytest.raises(ScanAllowCorrupt):
         load_scan_allow(allow)
+
+
+def test_a_non_utf8_allowlist_is_corrupt_for_the_writer_and_gives_the_display_a_run_key(tmp_path: Path) -> None:
+    # given — a binary or garbled file where the allowlist should be
+    allow = tmp_path / "allow.json"
+    allow.write_bytes(b"\xff\xfe\x00 not text")
+
+    # when & then — the display still gets a tagger, the file is untouched, and the writer fails with the domain error
+    assert machine_when_tag(allow)("editorTextFocus") != machine_when_tag(allow)("editorTextFocus")
+    assert allow.read_bytes() == b"\xff\xfe\x00 not text"
+    with pytest.raises(ScanAllowCorrupt):
+        load_scan_allow(allow)

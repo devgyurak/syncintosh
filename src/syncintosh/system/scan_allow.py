@@ -45,7 +45,7 @@ from syncintosh.core.ports import WhenTag
 ALLOW_VERSION: Final = 1
 
 # How much of an HMAC tag of a `when` clause is shown: enough to tell two bindings under one key apart.
-WHEN_TAG_HEX_LEN = 12
+WHEN_TAG_HEX_LEN: Final = 12
 
 # 128 bits of HMAC-SHA256 as lowercase hex. The value is copied from a refusal message into
 # `scan allow`, so it is kept short; a collision inside one machine's list is negligible and would
@@ -202,7 +202,7 @@ def read_scan_allow(path: Path) -> ScanAllow | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
     try:
         parsed: Any = json.loads(text)
@@ -252,6 +252,7 @@ __all__ = [
     "FINGERPRINT_HEX_LEN",
     "KEY_BYTES",
     "URL_CREDENTIALS_LABEL",
+    "WHEN_TAG_HEX_LEN",
     "ScanAllow",
     "ScanAllowEntry",
     "fingerprint",
