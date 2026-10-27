@@ -32,7 +32,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from syncintosh.core.errors import ContentParseError
+from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
 from syncintosh.core.tree import Array, ElementId, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
 
@@ -615,6 +615,7 @@ class _Diff:
                 start = _past_block_comment(self._comments, end, _next_line_start(text, end))
             edits.append(_Edit(start, start, "".join(pending)))
 
+        deletions: list[tuple[int, int]] = []
         for index in removed:
             # The element's own lines go, with its comma and the comments on them. The comment lines directly above
             # it stay: the text cannot say which element they documented, and a note is never guessed onto another.
@@ -624,13 +625,15 @@ class _Diff:
             if rule is None and self._comments.overlaps(_owned_start(text, self._comments, element.span.start), end):
                 # Without a rule nothing says which binding a note belongs to, so a removal that would take one
                 # is refused rather than losing it.
-                raise ContentParseError(UNRULED_REMOVAL_REFUSED)
-            edits.append(_Edit(start, end, ""))
+                raise RenderRefused(UNRULED_REMOVAL_REFUSED)
+            deletions.append((start, end))
         for index in moved:
             # A moved element carries the block of comment lines directly above it, so its notes move with it.
             element = node.elements[index]
             start = _owned_start(text, self._comments, element.span.start)
             end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            deletions.append((start, end))
+        for start, end in _widened_deletions(text, deletions):
             edits.append(_Edit(start, end, ""))
         return True
 
@@ -935,20 +938,27 @@ class _Comments:
         pieces.append(self.text[cursor:end])
         return "".join(pieces)
 
-    def is_own_line_comment(self, line_start: int, line_end: int) -> bool:
-        """True when the line holds nothing but whitespace and a `//` comment that ends it.
+    def own_comment_start(self, line_start: int, line_end: int) -> int | None:
+        """Where the comment that makes a line comment-only starts, or `None` when the line holds code or is blank.
 
-        The comment has to *start* the line. A line can be the inside of a block comment and still
-        look like one — `/* fuzz` above, `still */ // note` here — and stepping the insertion over it
-        would put the new member inside the comment, where it parses as nothing.
+        Every character that is not a space must lie inside a comment. The comment may be a `//` line or a `/* … */`
+        block that opens on this line or on an earlier one, so a block spread over lines counts as one note. A block
+        that opens after code on an earlier line does not count: the code on that line would be taken with it.
         """
-        first = line_start
-        while first < line_end and self.text[first] in _SPACES:
-            first += 1
-        return any(
-            span.start == first and span.end >= line_end - 1 and self.text.startswith("//", span.start)
-            for span in self.spans
-        )
+        content = [i for i in range(line_start, line_end) if self.text[i] not in _SPACES and self.text[i] != "\r"]
+        if not content:
+            return None
+        covering = [self._span_at(i) for i in content]
+        first = covering[0]
+        if first is None or any(span is None for span in covering):
+            return None
+        before_block = self.text[_line_start(self.text, first.start) : first.start]
+        if first.start >= line_start or before_block.strip(" \t") == "":
+            return first.start
+        return None
+
+    def _span_at(self, position: int) -> _Span | None:
+        return next((span for span in self.spans if span.start <= position < span.end), None)
 
 
 def _line_start(text: str, pos: int) -> int:
@@ -985,6 +995,37 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
         if closing is None:
             return limit
         limit = _next_line_start(comments.text, closing)
+
+
+def _widened_deletions(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The deletions with adjacent ones joined, each widened over the blank line after it when the line before is blank.
+
+    Joining first matters: two deletions that touch would each see a single blank line beside them and both widen,
+    leaving two blank lines side by side where the deletions met.
+    """
+    joined: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if joined and start <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], end))
+        else:
+            joined.append((start, end))
+    return [(start, _without_doubled_blank(text, start, end)) for start, end in joined]
+
+
+def _without_doubled_blank(text: str, start: int, end: int) -> int:
+    """`end`, widened over the blank line after a deletion when the line before the deletion is blank too.
+
+    Deleting an element that sits between two blank lines would otherwise leave two blank lines side by side, and every
+    sync after that would show the other machine a difference that is only whitespace.
+    """
+    if start == 0 or end >= len(text):
+        return end
+    above = text[_line_start(text, start - 1) : start - 1]
+    below_end = _next_line_start(text, end)
+    below = text[end:below_end]
+    if above.strip() == "" and below and below.strip() == "":
+        return below_end
+    return end
 
 
 def _comma_after(comments: _Comments, member: _MemberNode | _AstNode) -> int | None:
@@ -1125,24 +1166,26 @@ def _comma_stays_on_its_line(text: str, comments: _Comments, element: _AstNode) 
 def _owned_start(text: str, comments: _Comments, element_start: int) -> int:
     """Where an element's own notes begin: the block of comment lines directly above it, with no blank line between.
 
-    A blank line, or any other line, ends the block; a note past one is a section title that belongs to no element.
+    This is the one rule that decides which binding a note belongs to. A blank line, or a line of code, ends the block,
+    and a note past a blank line is a section title that belongs to no element. A `//` line and a `/* … */` block
+    both count, so a note written as a block moves, is refused, or stays with its element like any other.
     """
-    return _open_block_position(text, comments, element_start)
+    position = _line_start(text, element_start)
+    while position > 0:
+        start = comments.own_comment_start(_line_start(text, position - 1), position - 1)
+        if start is None:
+            break
+        position = _line_start(text, start)
+    return position
 
 
 def _open_block_position(text: str, comments: _Comments, start: int) -> int:
-    """Where a block placed before the element starting at `start` goes: above that element's own comments.
+    """Where a block inserted before the element starting at `start` goes: above that element's own notes.
 
-    The same walk `_open_position` makes for an object member: a comment on the line above documents the
-    element below it, so the block must not separate them.
+    Inserting between a note and its element would hand the note to the new element, so the insertion point is the
+    start of the element's notes, given by the same ownership rule (`_owned_start`).
     """
-    position = _line_start(text, start)
-    while position > 0:
-        previous = _line_start(text, position - 1)
-        if not comments.is_own_line_comment(previous, position - 1):
-            break
-        position = previous
-    return position
+    return _owned_start(text, comments, start)
 
 
 def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:

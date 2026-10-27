@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import subprocess
 import sys
 
@@ -12,8 +13,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.core.errors import ContentParseError
+from syncintosh.adapters.jsonc import UNRULED_REMOVAL_REFUSED, JsoncAdapter
+from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.tree import tree_from_value
 
@@ -453,6 +454,97 @@ def test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json() -> None
     assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x")])
 
 
+def _has_doubled_blank(text: str) -> bool:
+    """True when two blank lines sit side by side, a whitespace-only difference every sync would show."""
+    return re.search(r"\n[ \t]*\n[ \t]*\n", text) is not None
+
+
+def test_a_block_comment_note_moves_with_its_binding_and_stays_directly_above_it() -> None:
+    # given — a note written as a block comment sits directly above `a`, a line note above `b`
+    template = (
+        '[\n    /* note on a */\n    { "key": "a", "command": "x" },\n'
+        '    // note on b\n    { "key": "b", "command": "y" },\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when — the merged order is b, a, c
+    rendered = _render(template, [_b("y"), _a("x"), _c("z")])
+
+    # then — each note, block or line, sits directly above its own binding
+    assert rendered == (
+        '[\n    // note on b\n    { "key": "b", "command": "y" },\n'
+        '    /* note on a */\n    { "key": "a", "command": "x" },\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+
+def test_a_block_comment_note_refuses_a_rule_less_removal_that_would_take_it() -> None:
+    # given — the `editor.rulers` array has no rule, and a block note sits above the 80 that is removed
+    template = '{\n  "editor.rulers": [\n    /* why 80 */\n    80,\n    120\n  ]\n}'
+
+    # when & then — the refusal carries the adapter's fixed reason, not a value
+    with pytest.raises(RenderRefused) as refused:
+        ADAPTER.render(tree_from_value({"editor.rulers": [120]}), template)
+    assert refused.value.reason == UNRULED_REMOVAL_REFUSED
+
+
+def test_a_rule_array_removal_keeps_the_block_note_above_the_removed_binding() -> None:
+    # given — a block note above `a`, which is removed; the note above it is a block the text cannot tie to `a` alone
+    template = '[\n    /* upper */\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [_c("z")])
+
+    # then — the removal takes the binding's own lines and keeps the block above it
+    assert rendered == '[\n    /* upper */\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_a_removal_between_two_blank_lines_leaves_exactly_one_blank_line() -> None:
+    # given — bindings separated by blank lines
+    template = (
+        '[\n    { "key": "a", "command": "x" },\n\n'
+        '    { "key": "b", "command": "y" },\n\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when — `b` is removed
+    rendered = _render(template, [_a("x"), _c("z")])
+
+    # then — one blank line is left between `a` and `c`, not two
+    assert rendered == '[\n    { "key": "a", "command": "x" },\n\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_two_adjacent_removals_between_blank_lines_leave_one_blank_line_not_two() -> None:
+    # given — `b` and `c` sit together between two blank lines; each alone would see one blank line beside it
+    template = (
+        '[\n    { "key": "a", "command": "x" },\n\n'
+        '    { "key": "b", "command": "y" },\n    { "key": "c", "command": "z" },\n\n'
+        '    { "key": "d", "command": "w" }\n]'
+    )
+
+    # when — both are removed
+    rendered = _render(template, [_a("x"), {"key": "d", "command": "w"}])
+
+    # then — exactly one blank line separates `a` from `d`
+    assert rendered == '[\n    { "key": "a", "command": "x" },\n\n    { "key": "d", "command": "w" }\n]'
+
+
+def test_a_moved_binding_between_blank_lines_leaves_no_doubled_blank_line() -> None:
+    # given — bindings separated by blank lines
+    template = (
+        '[\n    { "key": "a", "command": "x" },\n\n'
+        '    { "key": "b", "command": "y" },\n\n'
+        '    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when — the merged order is b, a, c
+    rendered = _render(template, [_b("y"), _a("x"), _c("z")])
+
+    # then — it parses to the merged order, and no two blank lines sit side by side
+    assert ADAPTER.parse(rendered) == tree_from_value([_b("y"), _a("x"), _c("z")])
+    assert _has_doubled_blank(rendered) is False
+
+
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
 
 
@@ -492,16 +584,24 @@ def _rich_case(draw: st.DrawFn) -> tuple[str, list[dict[str, object]], list[str]
 
     kept = draw(st.lists(st.integers(min_value=0, max_value=len(base) - 1), unique=True, max_size=len(base)))
     order = draw(st.permutations(kept))
-    changed = draw(st.lists(st.booleans(), min_size=len(order), max_size=len(order)))
+    kinds = draw(st.lists(st.sampled_from(("keep", "args", "when")), min_size=len(order), max_size=len(order)))
     value: list[dict[str, object]] = []
     unchanged: list[int] = []
-    for index, change in zip(order, changed, strict=True):
+    for index, kind in zip(order, kinds, strict=True):
         item = dict(bindings[index])
-        if change:
+        if kind == "args":
             item["args"] = 1
+        elif kind == "when":
+            # A gained or changed `when` is a different binding: its note still belongs to it, but it is not unchanged.
+            item["when"] = f"w{index}x"
         else:
             unchanged.append(index)
         value.append(item)
+    # Bindings the template never had are added at drawn positions, so additions land among the kept ones.
+    available = [pair for pair in _POOL if pair not in base]
+    added = draw(st.lists(st.sampled_from(available), unique=True, max_size=2))
+    value.extend({"key": key, "command": command} for key, command in added)
+    value = draw(st.permutations(value))
     return template, bindings, fragments, unchanged, value
 
 
@@ -513,8 +613,8 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     # when
     rendered = _try_render(template, value)
 
-    # then
-    assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(value)
+    # then — a render parses back to the merged value, and never leaves two blank lines side by side
+    assert rendered is None or (ADAPTER.parse(rendered) == tree_from_value(value) and not _has_doubled_blank(rendered))
 
 
 @settings(max_examples=400, deadline=None)
@@ -593,7 +693,13 @@ def test_a_rule_less_render_never_drops_a_note_when_it_succeeds(case: st.DataObj
     # when
     rendered = _try_plain_render(template, target)
 
-    # then
+    # then — no note is dropped, and each kept value still has its own note directly above its line
     text = "" if rendered is None else rendered
     dropped = [index for index in range(len(values)) if rendered is not None and f"// note {index}" not in text]
+    misplaced = [
+        f"// note {values.index(value)}\n    {value}"
+        for value in target
+        if rendered is not None and f"// note {values.index(value)}\n    {value}" not in text
+    ]
     assert dropped == []
+    assert misplaced == []
