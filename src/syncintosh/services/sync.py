@@ -90,6 +90,7 @@ from syncintosh.core.resolution import (
     ConflictView,
     Decide,
     Picks,
+    Proposal,
     RecordChoice,
     Side,
     digest_of,
@@ -954,10 +955,10 @@ def _content_views(
     return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
 
 
-def _side_pick(pick: Choice | None) -> Side | None:
-    """The side a pick names for a whole file or a key, or `None` for a pick that names no side."""
+def _content_pick(pick: Choice | None) -> Side | Proposal | None:
+    """The side or the proposed value a pick names, or `None` for a pick that names neither."""
     match pick:
-        case "local" | "remote":
+        case "local" | "remote" | Proposal():
             return pick
         case _:
             return None
@@ -993,18 +994,19 @@ def _settle_content(
     however it was settled, goes through the syntax check.
     """
     adapter = presets.adapter_for(fmt)
-    side = _side_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
-    if side is not None:
-        merged = merge_content(base, local, remote, driver, adapter, choice=side)
-        return _checked(presets, merged.data, path, file_id, base, local, remote)
+    whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
+    if whole is not None:
+        settled = merge_content(base, local, remote, driver, adapter, choice=whole)
+        if not settled.conflicted:
+            return _checked(presets, settled.data, path, file_id, base, local, remote)
     first = merge_content(base, local, remote, driver, adapter)
     if not first.conflicted:
         return _checked(presets, first.data, path, file_id, base, local, remote)
-    key_choices: dict[KeyPath, Side] = {}
+    key_choices: dict[KeyPath, Side | Proposal] = {}
     for view in _content_views(file_id, path, base, local, remote, adapter, first.conflict_paths):
-        key_side = _side_pick(picks.get(view.fingerprint))
-        if view.key_path is not None and key_side is not None:
-            key_choices[view.key_path] = key_side
+        key_pick = _content_pick(picks.get(view.fingerprint))
+        if view.key_path is not None and key_pick is not None:
+            key_choices[view.key_path] = key_pick
     merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, base, local, remote)

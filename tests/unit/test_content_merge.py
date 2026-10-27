@@ -12,6 +12,7 @@ import json
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.models import ContentMerge, TextMerge
+from syncintosh.core.resolution import Proposal
 from syncintosh.core.tree import Tree, tree_from_value
 
 
@@ -232,3 +233,72 @@ def test_an_undecodable_both_sides_change_skips_the_adapter() -> None:
     # then
     assert result == ContentMerge(data=local, conflicted=True)
     assert adapter.parse_calls == 0
+
+
+def test_a_key_proposal_settles_its_key_to_the_proposed_value() -> None:
+    # given
+    driver = RecordingDriver(TextMerge(text="unused", conflicted=True))
+
+    # when
+    result = merge_content(
+        b'{"a": 1}', b'{"a": 2}', b'{"a": 3}', driver, JsonAdapter(), key_choices={("a",): Proposal("4")}
+    )
+
+    # then
+    assert result == ContentMerge(data=b'{"a": 4}', conflicted=False)
+    assert driver.calls == []
+
+
+def test_a_key_proposal_that_does_not_parse_leaves_its_key_in_conflict() -> None:
+    # when
+    result = merge_content(
+        b'{"a": 1}',
+        b'{"a": 2}',
+        b'{"a": 3}',
+        RecordingDriver(TextMerge(text="unused", conflicted=True)),
+        JsonAdapter(),
+        key_choices={("a",): Proposal("{")},
+    )
+
+    # then
+    assert result.conflicted is True
+    assert result.conflict_paths == (("a",),)
+
+
+def test_a_whole_file_proposal_that_does_not_parse_is_a_conflict() -> None:
+    # when
+    result = merge_content(
+        b'{"a": 1}',
+        b'{"a": 2}',
+        b'{"a": 3}',
+        RecordingDriver(TextMerge(text="unused", conflicted=True)),
+        JsonAdapter(),
+        choice=Proposal("{"),
+    )
+
+    # then
+    assert result == ContentMerge(data=b'{"a": 2}', conflicted=True)
+
+
+def test_a_whole_file_proposal_is_taken_verbatim_when_there_is_no_adapter() -> None:
+    # given
+    driver = RecordingDriver(TextMerge(text="unused", conflicted=True))
+
+    # when
+    result = merge_content(b"base\n", b"local\n", b"remote\n", driver, choice=Proposal("typed\n"))
+
+    # then
+    assert result == ContentMerge(data=b"typed\n", conflicted=False)
+    assert driver.calls == []
+
+
+def test_a_proposal_that_cannot_be_encoded_is_a_conflict() -> None:
+    # given — a lone surrogate is a str that UTF-8 cannot hold
+    driver = RecordingDriver(TextMerge(text="unused", conflicted=True))
+
+    # when
+    result = merge_content(b"base\n", b"local\n", b"remote\n", driver, choice=Proposal("\ud800"))
+
+    # then
+    assert result == ContentMerge(data=b"local\n", conflicted=True)
+    assert driver.calls == []

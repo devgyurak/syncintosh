@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
@@ -27,12 +27,13 @@ from syncintosh.core.resolution import (
     CollisionChoice,
     CollisionKey,
     ConflictView,
+    Proposal,
     RecordChoice,
     Side,
     digest_of,
     fingerprint,
 )
-from syncintosh.core.tree import EmptyObject, KeyPath, Node, tree_from_value
+from syncintosh.core.tree import EmptyObject, KeyPath, Node, Tree, tree_from_value
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -427,3 +428,60 @@ def test_a_conflict_view_repr_never_prints_its_plaintext_sides() -> None:
     rendered = repr(view)
     # then
     assert secret not in rendered
+
+
+def _subtree(tree: Tree, path: KeyPath) -> Tree:
+    """The entries at or beneath `path`, keyed relative to it: the shape a proposal for `path` takes."""
+    return Tree.create({key[len(path) :]: node for key, node in tree.entries.items() if key[: len(path)] == path})
+
+
+def test_a_proposal_repr_never_shows_its_text() -> None:
+    # when & then — the proposed text is the user's plaintext, so a log or a traceback must not print it
+    assert "hunter2" not in repr(Proposal("hunter2"))
+
+
+@given(base=_trees, local=_trees, remote=_trees, proposal=_trees)
+def test_a_proposal_settles_its_own_path_and_no_other(base, local, remote, proposal) -> None:
+    # given
+    plain = merge_tree(base, local, remote)
+    assume(plain.conflicts)
+    target = plain.conflicts[0].path
+
+    # when
+    chosen = merge_tree(base, local, remote, choices={target: proposal})
+
+    # then — every path outside the target keeps the value the plain merge gives it
+    outside = {path for path in {*plain.merged, *chosen.merged} if path[: len(target)] != target}
+    changed = [path for path in outside if chosen.merged.value(path) != plain.merged.value(path)]
+    assert changed == []
+
+
+@given(base=_trees, local=_trees, remote=_trees)
+def test_a_proposal_equal_to_the_local_subtree_matches_the_local_pick(base, local, remote) -> None:
+    # given
+    plain = merge_tree(base, local, remote)
+    local_picks: dict[KeyPath, Side] = {conflict.path: "local" for conflict in plain.conflicts}
+    proposals = {path: _subtree(local, path) for path in local_picks}
+
+    # when
+    by_side = merge_tree(base, local, remote, choices=local_picks)
+    by_proposal = merge_tree(base, local, remote, choices=proposals)
+
+    # then
+    assert by_proposal.merged == by_side.merged
+    assert by_proposal.conflicts == by_side.conflicts
+
+
+@given(base=_trees, local=_trees, remote=_trees, proposal=_trees)
+def test_a_settled_result_is_a_no_op_when_merged_again(base, local, remote, proposal) -> None:
+    # given
+    plain = merge_tree(base, local, remote)
+    assume(plain.conflicts)
+    settled = merge_tree(base, local, remote, choices={plain.conflicts[0].path: proposal}).merged
+
+    # when
+    again = merge_tree(settled, settled, settled)
+
+    # then
+    assert again.merged == settled
+    assert again.conflicts == ()

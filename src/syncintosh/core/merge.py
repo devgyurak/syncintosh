@@ -37,14 +37,15 @@ def merge_tree(
     remote: Tree,
     *,
     ignore: IgnorePaths = frozenset(),
-    choices: Mapping[KeyPath, Side] | None = None,
+    choices: Mapping[KeyPath, Side | Tree] | None = None,
 ) -> TreeMerge:
     """Merge three typed trees; conflicts are returned, not raised.
 
     ``base`` is the common ancestor; ``local`` wins a both-sides change. A path under ``ignore``
     keeps the local value and is never a conflict. ``choices`` settles a conflicted path to the
-    side an operator picked; a choice on a path that is not a conflict is ignored, and a
-    conflict with no choice stays in the result.
+    side an operator picked, or to a proposed subtree: a `Tree` whose keys are relative to that
+    path, so a proposed scalar is the tree with one root entry. A choice on a path that is not a
+    conflict is ignored, and a conflict with no choice stays in the result.
     """
     base_entries = base.entries
     local_entries = local.entries
@@ -81,13 +82,13 @@ def merge_tree(
 
 def _apply_choices(
     conflicts: list[Conflict],
-    choices: Mapping[KeyPath, Side],
+    choices: Mapping[KeyPath, Side | Tree],
     merged: dict[KeyPath, Node],
     local_entries: Mapping[KeyPath, Node],
     remote_entries: Mapping[KeyPath, Node],
     ignore: IgnorePaths,
 ) -> list[Conflict]:
-    """Settle each chosen conflict to the side the operator picked; the rest stay conflicts.
+    """Settle each chosen conflict to the side or proposal given; the rest stay conflicts.
 
     Only a path that is still a conflict is consulted, so a choice on a path that never conflicted
     changes nothing. Conflicts are subsumed under their shallowest path, so no chosen path sits
@@ -95,12 +96,21 @@ def _apply_choices(
     """
     unchosen: list[Conflict] = []
     for conflict in conflicts:
-        side = choices.get(conflict.path)
-        if side is None:
+        pick = choices.get(conflict.path)
+        if pick is None:
             unchosen.append(conflict)
             continue
-        _choose_side(conflict.path, side, merged, local_entries, remote_entries, ignore)
+        if isinstance(pick, Tree):
+            chosen = _rebased(conflict.path, pick)
+        else:
+            chosen = remote_entries if pick == "remote" else local_entries
+        _choose_entries(conflict.path, chosen, merged, local_entries, ignore)
     return unchosen
+
+
+def _rebased(path: KeyPath, subtree: Tree) -> Mapping[KeyPath, Node]:
+    """A proposed subtree with its relative keys placed under `path`."""
+    return {(*path, *relative): node for relative, node in subtree.entries.items()}
 
 
 def _resolve(base_value: Leaf, local_value: Leaf, remote_value: Leaf) -> tuple[Leaf, bool]:
@@ -172,7 +182,7 @@ def _fold_structure(
                     remote=remote_entries.get(path, ABSENT),
                 )
             )
-            _choose_side(path, "local", merged, local_entries, remote_entries, ignore)
+            _choose_entries(path, local_entries, merged, local_entries, ignore)
         elif _is_terminal(merged.get(path)) and _keeps_local_subtree(path, ignore, local_entries):
             # A local key under this path is ignored, so local's subtree must survive; the
             # terminal that won here gives way instead of erasing the ignored key. Every other
@@ -204,24 +214,22 @@ def _drop_emptied(merged: dict[KeyPath, Node]) -> None:
         del merged[path]
 
 
-def _choose_side(
+def _choose_entries(
     path: KeyPath,
-    side: Side,
+    chosen_entries: Mapping[KeyPath, Node],
     merged: dict[KeyPath, Node],
     local_entries: Mapping[KeyPath, Node],
-    remote_entries: Mapping[KeyPath, Node],
     ignore: IgnorePaths,
 ) -> None:
-    """Make `merged` take `side`'s shape at `path`, the same way for either side.
+    """Make `merged` take `chosen_entries`' shape at `path`, the same way for a side or a proposal.
 
-    The chosen side's leaf replaces whatever sat beneath `path`; a chosen deletion leaves nothing
-    there, and the chosen side's subtree is restored whole (a path the per-path pass deleted must
-    come back). Ignored paths are never taken from the remote side: local keeps them, as always.
+    The chosen value's leaf replaces whatever sat beneath `path`; a chosen deletion leaves nothing
+    there, and the chosen subtree is restored whole (a path the per-path pass deleted must come
+    back). Ignored paths are never taken from the chosen value: local keeps them, as always.
     A terminal that would sit above local's ignored keys gives way, as `_fold_structure` does. The
     conflict is settled either way, so this only fixes the candidate value a resolver starts from
     (``AGENTS.md`` §5.3).
     """
-    chosen_entries = remote_entries if side == "remote" else local_entries
     for deeper in [candidate for candidate in merged if _strictly_under(candidate, path)]:
         del merged[deeper]
     chosen_leaf = chosen_entries.get(path, ABSENT)

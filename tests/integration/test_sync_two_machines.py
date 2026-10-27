@@ -39,7 +39,7 @@ from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import LiveFiles, PresetCatalog, PushOutcome, SyntaxValidator
 from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
-from syncintosh.core.resolution import Decide
+from syncintosh.core.resolution import Decide, Proposal
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -1760,6 +1760,87 @@ def test_a_key_pick_that_fails_the_syntax_check_is_settled_at_file_level(tmp_pat
     report = _run(b, catalog=catalog, validators=validators, resolving=True, decide=counting)
 
     # then — the key pick is refused by the check, the file is offered next, and its local side publishes
+    assert asked == [["key"], ["file"]]
+    assert report.has_conflicts is False
+    assert json.loads((b.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
+    _run(a, catalog=catalog, validators=validators)
+    assert json.loads((a.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
+
+
+def test_a_proposed_file_settles_the_conflict_and_both_machines_converge(tmp_path, memory_key_store) -> None:
+    # given — B's edit to the same line as A's is pending
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _run(b)
+
+    # when — the proposal is a line neither machine wrote
+    report = _run(b, resolving=True, decide=decision(lambda view: Proposal("one\nMERGED\nthree\n")))
+
+    # then
+    assert report.has_conflicts is False
+    assert _read_live(b) == b"one\nMERGED\nthree\n"
+    assert DirectoryPendingStore(b.pending).is_pending() is False
+    assert _run(a).has_conflicts is False
+    assert _read_live(a) == b"one\nMERGED\nthree\n"
+
+
+def test_a_proposed_key_value_settles_the_conflict_and_both_machines_converge(tmp_path, memory_key_store) -> None:
+    # given — A and B changed the same key to different values
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "14"), encoding="utf-8")
+    _run(b)
+
+    # when — a value neither machine wrote, proposed for the conflicted key
+    report = _run(b, resolving=True, decide=decision(lambda view: Proposal("16") if view.kind == "key" else None))
+
+    # then — the comments and key order survive, and both machines hold the proposed value
+    assert report.has_conflicts is False
+    assert _read_jsonc(b) == JSONC_BASE.replace("13", "16")
+    assert _run(a).has_conflicts is False
+    assert _read_jsonc(a) == JSONC_BASE.replace("13", "16")
+
+
+def test_a_proposed_key_value_that_does_not_parse_leaves_the_conflict_pending(tmp_path, memory_key_store) -> None:
+    # given
+    a, b, _ = _pair(tmp_path, memory_key_store, JSONC_BASE.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text(JSONC_BASE.replace("13", "15"), encoding="utf-8")
+    _run(a)
+    (b.home / JSONC).write_text(JSONC_BASE.replace("13", "14"), encoding="utf-8")
+    _run(b)
+
+    # when — an unclosed string is not a value this format can hold
+    report = _run(b, resolving=True, decide=decision(lambda view: Proposal('"unclosed')))
+
+    # then — the proposal is refused, the conflict stays pending, and B's file is untouched
+    assert report.has_conflicts is True
+    assert DirectoryPendingStore(b.pending).is_pending() is True
+    assert _read_jsonc(b) == JSONC_BASE.replace("13", "14")
+
+
+def test_a_proposed_key_value_that_fails_the_syntax_check_is_settled_at_file_level(tmp_path, memory_key_store) -> None:
+    # given — the same cross-key setup as the key pick that fails the syntax check
+    catalog = _ValidatedCatalog(VALIDATED_POLICY)
+    validators: dict[ValidatorName, SyntaxValidator] = {"json": _CrossKeyValidator()}
+    a, b, _ = _pair(tmp_path, memory_key_store, BASE_JSON.encode("utf-8"), path=JSONC, fmt="jsonc")
+    (a.home / JSONC).write_text('{"a": "R", "b": "0"}\n', encoding="utf-8")
+    _run(a, catalog=catalog, validators=validators)
+    (b.home / JSONC).write_text('{"a": "L", "b": "B"}\n', encoding="utf-8")
+    _run(b, catalog=catalog, validators=validators)
+    asked: list[list[str]] = []
+    propose_then_file = decision(lambda view: Proposal('"R"') if view.kind == "key" else "local")
+
+    def counting(views, answered):
+        asked.append(sorted(view.kind for view in views if view.fingerprint not in answered))
+        return propose_then_file(views, answered)
+
+    # when
+    report = _run(b, catalog=catalog, validators=validators, resolving=True, decide=counting)
+
+    # then — the proposed value is refused by the check, the file is offered next, and its local side publishes
     assert asked == [["key"], ["file"]]
     assert report.has_conflicts is False
     assert json.loads((b.home / JSONC).read_text(encoding="utf-8")) == {"a": "L", "b": "B"}
