@@ -176,3 +176,47 @@ def test_an_element_level_render_always_parses_back_to_the_merged_tree(case: tup
 
     # then
     assert ADAPTER.parse(rendered) == tree_from_value(target)
+
+
+def test_a_comment_above_a_removed_element_goes_with_it_and_not_onto_its_replacement() -> None:
+    # given — `// why x` documents x; the merge removes x and puts a different binding y in its place
+    template = '[\n    // why x\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y"), _c("z")])
+
+    # then — the note left with x, and y is not carrying it
+    assert rendered == '[\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
+
+
+def test_an_inline_comment_on_a_removed_element_does_not_move_onto_its_replacement() -> None:
+    # given
+    template = '[\n    { "key": "a", "command": "x" }, // inline why\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y"), _c("z")])
+
+    # then
+    assert "inline why" not in rendered
+
+
+def test_a_changed_binding_keeps_its_inline_comment() -> None:
+    # given — the same binding (same key and command), with one field added: a change, not a replacement
+    template = '[\n    { "key": "a", "command": "x" }, // keep me\n    { "key": "c", "command": "z" }\n]'
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "x", "args": 1}, _c("z")])
+
+    # then
+    assert "// keep me" in rendered
+
+
+def test_a_new_multiline_element_takes_the_indent_step_of_the_arrays_own_elements() -> None:
+    # given — a four-space file of multi-line bindings; the root is an array, so it has no members to read a step from
+    template = '[\n    {\n        "key": "a",\n        "command": "x"\n    }\n]'
+
+    # when
+    rendered = _render(template, [_a("x"), _c("z")])
+
+    # then — the added binding's members sit eight spaces in, as the existing ones do
+    assert '\n        "key": "c",\n        "command": "z"\n    }' in rendered

@@ -497,24 +497,12 @@ class _Diff:
         """Where a block that opens the object goes: above the first member's own comment.
 
         A comment on the line directly above the first member documents *that* member, so inserting
-        between the two would move the comment onto the inserted key. Walking up over `//` lines
-        keeps it attached to what it describes. A blank line, or any other line, stops the walk —
-        and so does a block comment, which the walk cannot count lines within: splicing inside one
-        would produce a file that does not parse, and refusing the insert is worse than leaving the
-        layout alone.
+        between the two would move the comment onto the inserted key. The walk is `_open_block_position`,
+        shared with the array splice, so the two cannot drift apart.
         """
         if not node.members:
             return _line_start(self._source, node.span.end - 1)
-        position = _line_start(self._source, node.members[0].span.start)
-        while position > 0:
-            previous = _line_start(self._source, position - 1)
-            # A comment on its own line above the member documents that member, so the block goes
-            # above the comment. `is_own_line_comment` answers from the parse rather than by reading
-            # the line, which would call a `/*` inside a `//` comment a block comment and stop early.
-            if not self._comments.is_own_line_comment(previous, position - 1):
-                break
-            position = previous
-        return position
+        return _open_block_position(self._source, self._comments, node.members[0].span.start)
 
     def _rewrite(self, node: _AstNode, text: str, edits: list[_Edit]) -> None:
         """Replace a whole value, refusing when that would silently drop a comment.
@@ -547,10 +535,13 @@ class _Diff:
             if tag == "equal":
                 slots.extend(_Kept(index, None) for index in range(i1, i2))
                 continue
-            pairs = min(i2 - i1, j2 - j1)
-            slots.extend(_Kept(i1 + offset, wanted[j1 + offset]) for offset in range(pairs))
-            deleted.extend(range(i1 + pairs, i2))
-            slots.extend(_Added(wanted[j]) for j in range(j1 + pairs, j2))
+            for old_offset, new_offset in _pair_block(template[i1:i2], wanted[j1:j2]):
+                if old_offset is None and new_offset is not None:
+                    slots.append(_Added(wanted[j1 + new_offset]))
+                elif old_offset is not None and new_offset is None:
+                    deleted.append(i1 + old_offset)
+                elif old_offset is not None and new_offset is not None:
+                    slots.append(_Kept(i1 + old_offset, wanted[j1 + new_offset]))
 
         trailing = _comma_after(self._comments, node.elements[-1]) is not None
         indent = text[_line_start(text, node.elements[0].span.start) : node.elements[0].span.start]
@@ -558,11 +549,14 @@ class _Diff:
             isinstance(element, _ObjectNode) and "\n" in text[element.span.start : element.span.end]
             for element in node.elements
         )
+        unit = _array_unit(text, node, indent) or self._indent
         last = len(slots) - 1
         for position, slot in enumerate(slots):
             if isinstance(slot, _Kept) and slot.replacement is not None:
                 # A changed element keeps its span; a comment inside it refuses the rewrite (a conflict).
-                self._rewrite(node.elements[slot.index], self._element_text(slot.replacement, indent, multiline), edits)
+                self._rewrite(
+                    node.elements[slot.index], self._element_text(slot.replacement, indent, multiline, unit), edits
+                )
             wants = position < last or trailing
             if isinstance(slot, _Kept):
                 element = node.elements[slot.index]
@@ -579,7 +573,10 @@ class _Diff:
             if isinstance(slot, _Added):
                 wants = position < last or trailing
                 pending.append(
-                    indent + self._element_text(slot.value, indent, multiline) + ("," if wants else "") + self._newline
+                    indent
+                    + self._element_text(slot.value, indent, multiline, unit)
+                    + ("," if wants else "")
+                    + self._newline
                 )
                 continue
             if pending:
@@ -597,17 +594,19 @@ class _Diff:
 
         for index in deleted:
             element = node.elements[index]
-            start = _line_start(text, element.span.start)
+            # The comment lines directly above an element document it, so they go with it, as they do for an
+            # added element (which lands above them).
+            start = _open_block_position(text, self._comments, element.span.start)
             end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
             edits.append(_Edit(start, end, ""))
         return True
 
-    def _element_text(self, node: Node, indent: str, multiline: bool) -> str:
-        """An array element's text: an object spread over lines when the array's own objects are."""
+    def _element_text(self, node: Node, indent: str, multiline: bool, unit: str) -> str:
+        """An array element's text: an object spread over lines, indented in the array's own unit."""
         if multiline and isinstance(node, Object) and node.entries:
-            inner = indent + self._indent
+            inner = indent + unit
             members = [
-                inner + json.dumps(key, ensure_ascii=False) + ": " + self._element_text(value, inner, True)
+                inner + json.dumps(key, ensure_ascii=False) + ": " + self._element_text(value, inner, True, unit)
                 for key, value in node.entries
             ]
             return "{" + self._newline + ("," + self._newline).join(members) + self._newline + indent + "}"
@@ -1001,6 +1000,61 @@ def _open_block_position(text: str, comments: _Comments, start: int) -> int:
             break
         position = previous
     return position
+
+
+# How alike two array elements must be before the splice rewrites one in place rather than deleting the old
+# and inserting the new. Half the key/value pairs of the larger element.
+_PAIR_THRESHOLD = 0.5
+
+
+def _similarity(old: Node, new: Node) -> float:
+    """How much of `new` is `old` again, as the share of key/value pairs both objects hold (0 for other values)."""
+    if isinstance(old, Object) and isinstance(new, Object):
+        if not old.entries and not new.entries:
+            return 1.0
+        shared = len(set(old.entries) & set(new.entries))
+        return shared / max(len(old.entries), len(new.entries))
+    return 1.0 if old == new else 0.0
+
+
+def _pair_block(old: list[Node], new: list[Node]) -> list[tuple[int | None, int | None]]:
+    """Pair a replaced run in order: `(old, new)` pairs, `(old, None)` deletions and `(None, new)` additions.
+
+    An old element is paired only with a later new element it resembles, so a binding removed and a different one
+    put in its place are a deletion and an addition, not one rewrite that would carry the old element's comments onto
+    the new one.
+    """
+    result: list[tuple[int | None, int | None]] = []
+    cursor = 0
+    for old_offset, element in enumerate(old):
+        match = next(
+            (offset for offset in range(cursor, len(new)) if _similarity(element, new[offset]) >= _PAIR_THRESHOLD),
+            None,
+        )
+        if match is None:
+            result.append((old_offset, None))
+            continue
+        result.extend((None, offset) for offset in range(cursor, match))
+        result.append((old_offset, match))
+        cursor = match + 1
+    result.extend((None, offset) for offset in range(cursor, len(new)))
+    return result
+
+
+def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:
+    """The indent step the array's own multi-line objects use, read from their first member line.
+
+    A root array has no members of its own to read the step from, so the step comes from the elements: the
+    difference between an element's line and its first member's line. `None` when no element shows one.
+    """
+    for element in node.elements:
+        if not isinstance(element, _ObjectNode) or not element.members:
+            continue
+        first = element.members[0].span.start
+        member_indent = text[_line_start(text, first) : first]
+        if member_indent.startswith(indent) and len(member_indent) > len(indent):
+            return member_indent[len(indent) :]
+    return None
 
 
 def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
