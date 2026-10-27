@@ -380,30 +380,30 @@ def test_a_kept_binding_keeps_its_notes_a_removed_one_loses_them_and_section_tit
     # when
     rendered = _try_render(template, value)
 
-    # then — checked as text: a kept binding's note sits directly above its own line, a removed binding's notes are
-    # gone, a section title stays, and the render never leaves two blank lines side by side
-    if rendered is None:
-        return
+    # then — checked as text, and only for a render that happened: a kept binding's note sits directly above its own
+    # line, a removed binding's notes are gone, a section title stays, and no two blank lines sit side by side
+    text = "" if rendered is None else rendered
     kept = {f"{binding['key']}/{binding['command']}" for binding in value}
     removed_notes = [
         index
         for index, (key, command) in enumerate(base)
-        if f"{key}/{command}" not in kept and f"// note {index}" in rendered
+        if rendered is not None and f"{key}/{command}" not in kept and f"// note {index}" in text
     ]
     not_directly_above = [
         index
         for index, (key, command) in enumerate(base)
-        if f"{key}/{command}" in kept and f'// note {index}\n    {{"key": "{key}"' not in rendered
+        if rendered is not None and f"{key}/{command}" in kept and f'// note {index}\n    {{"key": "{key}"' not in text
     ]
     sections_lost = [
         index
         for index in range(len(base))
-        if f"// section {index}" in template and f"// section {index}" not in rendered
+        if rendered is not None and f"// section {index}" in template and f"// section {index}" not in text
     ]
+    doubled = rendered is not None and _has_doubled_blank(text)
     assert removed_notes == []
     assert not_directly_above == []
     assert sections_lost == []
-    assert not _has_doubled_blank(rendered)
+    assert doubled is False
 
 
 def test_moved_bindings_take_their_own_notes_to_their_new_place() -> None:
