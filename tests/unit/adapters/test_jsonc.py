@@ -586,9 +586,8 @@ def test_emptying_a_single_line_object_leaves_a_valid_object(template, expected)
     assert JsoncAdapter().parse(rendered) == tree_from_value({})
 
 
-def test_a_block_comment_whose_last_line_starts_with_slashes_stops_the_walk() -> None:
-    # given — a block comment whose closing line starts with `//`, and a tree that adds a member
-    # before the commented member
+def test_a_block_comment_whose_last_line_starts_with_slashes_moves_as_one_note_with_its_member() -> None:
+    # given — a block comment documents `a`; its closing line starts with `//`, and a tree adds `b` before `a`
     adapter = JsoncAdapter()
     text = '{\n  /* note\n  // still inside */\n  "a": 1\n}\n'
     tree = tree_from_value({"b": 2, "a": 1})
@@ -596,9 +595,9 @@ def test_a_block_comment_whose_last_line_starts_with_slashes_stops_the_walk() ->
     # when
     rendered = adapter.render(tree, text)
 
-    # then — the new member goes after the block comment, not inside it (where it would parse as
-    # part of the comment and the render would not match the tree)
-    assert rendered == '{\n  /* note\n  // still inside */\n  "b": 2,\n  "a": 1\n}\n'
+    # then — `b` goes above the whole block, so the note stays directly above `a` and is not handed to `b`;
+    # the new member is never placed inside the comment, where it would parse as nothing
+    assert rendered == '{\n  "b": 2,\n  /* note\n  // still inside */\n  "a": 1\n}\n'
     assert adapter.parse(rendered) == tree
 
 
