@@ -114,12 +114,12 @@ def test_appending_to_an_array_with_a_trailing_comma_keeps_that_style() -> None:
 
 
 def test_a_comment_inside_a_changed_element_refuses_the_rewrite_instead_of_dropping_it() -> None:
-    # given
-    template = '[\n    { "key": "a", /* why */ "command": "x" },\n    { "key": "b", "command": "y" }\n]'
+    # given — a binding changed in place (two of its three fields kept), with a comment inside it
+    template = '[\n    { "key": "a", /* why */ "command": "x", "args": 1 },\n    { "key": "b", "command": "y" }\n]'
 
     # when & then — the comment would be lost with the span, so the render refuses; a conflict, not a loss
     with pytest.raises(ContentParseError):
-        _render(template, [_a("x2"), _b("y")])
+        _render(template, [{"key": "a", "command": "x", "args": 2}, _b("y")])
 
 
 def test_an_inline_array_is_rewritten_whole_as_before() -> None:
@@ -178,15 +178,15 @@ def test_an_element_level_render_always_parses_back_to_the_merged_tree(case: tup
     assert ADAPTER.parse(rendered) == tree_from_value(target)
 
 
-def test_a_comment_above_a_removed_element_goes_with_it_and_not_onto_its_replacement() -> None:
-    # given — `// why x` documents x; the merge removes x and puts a different binding y in its place
+def test_a_comment_above_a_removed_element_stays_where_it_is() -> None:
+    # given — `// why x` sits above x; the merge removes x and puts a different binding y in its place
     template = '[\n    // why x\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
 
     # when
     rendered = _render(template, [_b("y"), _c("z")])
 
-    # then — the note left with x, and y is not carrying it
-    assert rendered == '[\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
+    # then — the note is not deleted: it stays above the line that follows, rather than being guessed onto y
+    assert rendered == '[\n    // why x\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
 
 
 def test_an_inline_comment_on_a_removed_element_does_not_move_onto_its_replacement() -> None:
@@ -220,3 +220,15 @@ def test_a_new_multiline_element_takes_the_indent_step_of_the_arrays_own_element
 
     # then — the added binding's members sit eight spaces in, as the existing ones do
     assert '\n        "key": "c",\n        "command": "z"\n    }' in rendered
+
+
+def test_a_binding_added_to_a_file_that_mixes_one_line_and_multi_line_bindings_renders_valid_json() -> None:
+    # given — a one-line binding, then a multi-line one; the one-line binding's `{ ` is no indent step
+    template = '[\n  { "key": "a", "command": "x" },\n  {\n    "key": "b",\n    "command": "y"\n  }\n]'
+
+    # when
+    rendered = _render(template, [_a("x"), {"key": "b", "command": "y"}, _c("z")])
+
+    # then — it parses back to the merged tree, so the merge is not a whole-file conflict
+    assert ADAPTER.parse(rendered) == tree_from_value([_a("x"), {"key": "b", "command": "y"}, _c("z")])
+    assert "{ " not in rendered.split("\n")[-3]
