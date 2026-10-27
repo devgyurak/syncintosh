@@ -593,10 +593,11 @@ class _Diff:
             edits.append(_Edit(start, start, "".join(pending)))
 
         for index in deleted:
+            # Only the element's own line goes (with its comma and a same-line comment). The comment lines above it
+            # stay where they are: which element they documented cannot be known from the text alone, and silently
+            # deleting a note is worse than leaving it attached to the element below.
             element = node.elements[index]
-            # The comment lines directly above an element document it, so they go with it, as they do for an
-            # added element (which lands above them).
-            start = _open_block_position(text, self._comments, element.span.start)
+            start = _line_start(text, element.span.start)
             end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
             edits.append(_Edit(start, end, ""))
         return True
@@ -1003,7 +1004,8 @@ def _open_block_position(text: str, comments: _Comments, start: int) -> int:
 
 
 # How alike two array elements must be before the splice rewrites one in place rather than deleting the old
-# and inserting the new. Half the key/value pairs of the larger element.
+# and inserting the new: strictly more than half of the larger element's key/value pairs. A two-field binding
+# that shares only its command, or only its key, is not the same binding.
 _PAIR_THRESHOLD = 0.5
 
 
@@ -1027,11 +1029,11 @@ def _pair_block(old: list[Node], new: list[Node]) -> list[tuple[int | None, int 
     result: list[tuple[int | None, int | None]] = []
     cursor = 0
     for old_offset, element in enumerate(old):
-        match = next(
-            (offset for offset in range(cursor, len(new)) if _similarity(element, new[offset]) >= _PAIR_THRESHOLD),
-            None,
-        )
-        if match is None:
+        # The most alike later candidate, not the first one that clears the bar: a first match can take a binding
+        # that a better one should have, and its comment would land on the wrong binding.
+        scored = [(_similarity(element, new[offset]), offset) for offset in range(cursor, len(new))]
+        best_score, match = max(scored, key=lambda item: (item[0], -item[1]), default=(0.0, None))
+        if match is None or best_score <= _PAIR_THRESHOLD:
             result.append((old_offset, None))
             continue
         result.extend((None, offset) for offset in range(cursor, match))
@@ -1052,7 +1054,8 @@ def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:
             continue
         first = element.members[0].span.start
         member_indent = text[_line_start(text, first) : first]
-        if member_indent.startswith(indent) and len(member_indent) > len(indent):
+        # A one-line element puts `{ ` before its first member; that is not an indent step, so it is skipped.
+        if member_indent.strip() == "" and member_indent.startswith(indent) and len(member_indent) > len(indent):
             return member_indent[len(indent) :]
     return None
 
