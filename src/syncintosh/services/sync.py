@@ -1096,6 +1096,10 @@ def _checked(
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
+# A content conflict settles in a few rounds: each round applies at least one new pick or stops.
+_MAX_SETTLE_ROUNDS = 8
+
+
 def _settle_content(
     *,
     presets: _Presets,
@@ -1126,22 +1130,30 @@ def _settle_content(
         settled = merge_content(base, local, remote, driver, adapter, choice=whole)
         if not settled.conflicted:
             return _checked(presets, settled.data, path, file_id, fmt, base, local, remote)
-    first = merge_content(base, local, remote, driver, adapter, arrays=arrays)
-    if not first.conflicted:
-        return _checked(presets, first.data, path, file_id, fmt, base, local, remote)
+    merged = merge_content(base, local, remote, driver, adapter, arrays=arrays)
     key_choices: dict[KeyPath, Side | Proposal] = {}
     element_picks: dict[tuple[KeyPath, ElementId], Side | Proposal] = {}
-    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, first.conflict_addresses):
-        pick = _content_pick(picks.get(view.fingerprint))
-        if view.key_path is None or pick is None:
-            continue
-        if view.element is None:
-            key_choices[view.key_path] = pick
-        else:
-            element_picks[(view.key_path, view.element)] = pick
-    settled_any = bool(key_choices or element_picks)
-    merged = (
-        merge_content(
+    applied: set[str] = set()
+    # A pick can settle a conflict and expose another one the first merge did not show, so the views are read again
+    # from each merge until a round applies no new pick. Each round either applies a pick or stops, so the loop is
+    # bounded by the picks it can apply; the cap is a guard on top of that.
+    for _ in range(_MAX_SETTLE_ROUNDS):
+        if not merged.conflicted:
+            return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
+        new_picks = False
+        for view in _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses):
+            pick = _content_pick(picks.get(view.fingerprint))
+            if view.key_path is None or pick is None or view.fingerprint in applied:
+                continue
+            applied.add(view.fingerprint)
+            new_picks = True
+            if view.element is None:
+                key_choices[view.key_path] = pick
+            else:
+                element_picks[(view.key_path, view.element)] = pick
+        if not new_picks:
+            break
+        merged = merge_content(
             base,
             local,
             remote,
@@ -1151,9 +1163,6 @@ def _settle_content(
             arrays=arrays,
             element_picks=element_picks,
         )
-        if settled_any
-        else first
-    )
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
     views = _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses)
