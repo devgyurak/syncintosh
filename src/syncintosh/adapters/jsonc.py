@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError
+from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
 from syncintosh.core.tree import Array, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
 
 # Whitespace the scanner skips; a BOM is treated as leading trivia so spans stay absolute.
@@ -298,25 +300,37 @@ class JsoncAdapter:
             # malformed input for this format, not a crash the caller has to know about.
             raise ContentParseError(str(exc)) from exc
 
-    def render(self, tree: Tree, template: str) -> str:
-        """Render `tree` by editing `template`; unchanged content returns the bytes verbatim."""
+    def render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None) -> str:
+        """Render `tree` by editing `template`; unchanged content returns the bytes verbatim.
+
+        `arrays` names the arrays that pair an element by its identity when it is rewritten (`core/keyed_array.py`);
+        an array without a rule pairs nothing, so a changed element there is removed and re-added.
+        """
         try:
-            return self._render(tree, template)
+            return self._render(tree, template, arrays or {})
         except (ValueError, RecursionError) as exc:
             raise ContentParseError(str(exc)) from exc
 
-    def _render(self, tree: Tree, template: str) -> str:
+    def _render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule]) -> str:
         parser = _Parser(template)
         root = parser.parse()
         if _tree_of(root) == tree:
             return template
-        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments))).apply()
+        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays).apply()
 
 
 class _Diff:
     """Computes the minimal edits that turn the template's AST into the merged tree."""
 
-    def __init__(self, tree: Tree, root: _AstNode, text: str, comments: _Comments) -> None:
+    def __init__(
+        self,
+        tree: Tree,
+        root: _AstNode,
+        text: str,
+        comments: _Comments,
+        arrays: Mapping[KeyPath, ArrayRule],
+    ) -> None:
+        self._arrays = arrays
         self._source = text
         self._comments = comments
         self._root = root
@@ -353,7 +367,11 @@ class _Diff:
                     return
                 if self._splice_inline(node, path, edits):
                     return
-            if isinstance(leaf, Array) and isinstance(node, _ArrayNode) and self._splice_array(node, leaf, edits):
+            if (
+                isinstance(leaf, Array)
+                and isinstance(node, _ArrayNode)
+                and self._splice_array(node, leaf, edits, self._arrays.get(path))
+            ):
                 return
             if leaf is not None:
                 self._rewrite(node, _leaf_text(leaf), edits)
@@ -515,7 +533,7 @@ class _Diff:
             raise ContentParseError("cannot rewrite a value that contains a comment")
         edits.append(_Edit(node.span.start, node.span.end, text))
 
-    def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit]) -> bool:
+    def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
         """Edit a one-element-per-line array by element, so untouched elements keep their comments.
 
         Elements the merge kept are left as they are (or, when the merge changed their value, only their
@@ -535,7 +553,7 @@ class _Diff:
             if tag == "equal":
                 slots.extend(_Kept(index, None) for index in range(i1, i2))
                 continue
-            for old_offset, new_offset in _pair_block(template[i1:i2], wanted[j1:j2]):
+            for old_offset, new_offset in _pair_block(template[i1:i2], wanted[j1:j2], rule):
                 if old_offset is None and new_offset is not None:
                     slots.append(_Added(wanted[j1 + new_offset]))
                 elif old_offset is not None and new_offset is None:
@@ -598,7 +616,12 @@ class _Diff:
             # deleting a note is worse than leaving it attached to the element below.
             element = node.elements[index]
             start = _line_start(text, element.span.start)
-            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            end = _next_line_start(text, element.span.end)
+            # A comment on the element's own lines is a note on it, and deleting the lines would drop it silently;
+            # refusing makes the merge a conflict instead.
+            if self._comments.overlaps(start, end):
+                raise ContentParseError("cannot remove a binding that carries a comment")
+            end = _line_end_outside_comment(self._comments, start, end)
             edits.append(_Edit(start, end, ""))
         return True
 
@@ -1003,43 +1026,53 @@ def _open_block_position(text: str, comments: _Comments, start: int) -> int:
     return position
 
 
-# How alike two array elements must be before the splice rewrites one in place rather than deleting the old
-# and inserting the new: strictly more than half of the larger element's key/value pairs. A two-field binding
-# that shares only its command, or only its key, is not the same binding.
-_PAIR_THRESHOLD = 0.5
+def _pair_block(old: list[Node], new: list[Node], rule: ArrayRule | None) -> list[tuple[int | None, int | None]]:
+    """Pair a replaced run by declared identity: `(old, new)` pairs, `(old, None)` removals, `(None, new)` additions.
 
-
-def _similarity(old: Node, new: Node) -> float:
-    """How much of `new` is `old` again, as the share of key/value pairs both objects hold (0 for other values)."""
-    if isinstance(old, Object) and isinstance(new, Object):
-        if not old.entries and not new.entries:
-            return 1.0
-        shared = len(set(old.entries) & set(new.entries))
-        return shared / max(len(old.entries), len(new.entries))
-    return 1.0 if old == new else 0.0
-
-
-def _pair_block(old: list[Node], new: list[Node]) -> list[tuple[int | None, int | None]]:
-    """Pair a replaced run in order: `(old, new)` pairs, `(old, None)` deletions and `(None, new)` additions.
-
-    An old element is paired only with a later new element it resembles, so a binding removed and a different one
-    put in its place are a deletion and an addition, not one rewrite that would carry the old element's comments onto
-    the new one.
+    Two elements pair when they have the same identity, or when they are the only pair of their group on each side.
+    Anything else is a removal and an addition. Pairs keep their order, so the output keeps the array's order. With no
+    rule nothing pairs, so an array whose elements cannot be told apart is never rewritten in place.
     """
-    result: list[tuple[int | None, int | None]] = []
-    cursor = 0
-    for old_offset, element in enumerate(old):
-        # The most alike later candidate, not the first one that clears the bar: a first match can take a binding
-        # that a better one should have, and its comment would land on the wrong binding.
-        scored = [(_similarity(element, new[offset]), offset) for offset in range(cursor, len(new))]
-        best_score, match = max(scored, key=lambda item: (item[0], -item[1]), default=(0.0, None))
-        if match is None or best_score <= _PAIR_THRESHOLD:
-            result.append((old_offset, None))
+    if rule is None:
+        return [*((i, None) for i in range(len(old))), *((None, k) for k in range(len(new)))]
+    old_ids = [element_identity(element, rule) for element in old]
+    new_ids = [element_identity(element, rule) for element in new]
+    pairs: dict[int, int] = {}
+
+    def fits(i: int, j: int) -> bool:
+        return all((k < i) == (pairs[k] < j) and pairs[k] != j for k in pairs)
+
+    for i, identity in enumerate(old_ids):
+        if identity is None:
             continue
-        result.extend((None, offset) for offset in range(cursor, match))
-        result.append((old_offset, match))
-        cursor = match + 1
-    result.extend((None, offset) for offset in range(cursor, len(new)))
+        j = next((j for j, other in enumerate(new_ids) if other == identity and j not in pairs.values()), None)
+        if j is not None and fits(i, j):
+            pairs[i] = j
+    for group in {element_group(identity, rule) for identity in old_ids if identity is not None}:
+        old_left = [
+            i
+            for i, identity in enumerate(old_ids)
+            if identity is not None and i not in pairs and element_group(identity, rule) == group
+        ]
+        new_left = [
+            j
+            for j, identity in enumerate(new_ids)
+            if identity is not None and j not in pairs.values() and element_group(identity, rule) == group
+        ]
+        if len(old_left) == 1 and len(new_left) == 1 and fits(old_left[0], new_left[0]):
+            pairs[old_left[0]] = new_left[0]
+
+    result: list[tuple[int | None, int | None]] = []
+    new_cursor = 0
+    for i in range(len(old)):
+        if i not in pairs:
+            result.append((i, None))
+            continue
+        j = pairs[i]
+        result.extend((None, k) for k in range(new_cursor, j))
+        result.append((i, j))
+        new_cursor = j + 1
+    result.extend((None, k) for k in range(new_cursor, len(new)))
     return result
 
 

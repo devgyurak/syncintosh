@@ -9,14 +9,18 @@ from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ContentParseError
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.tree import tree_from_value
 
 ADAPTER = JsoncAdapter()
 
 
+RULE = ArrayRule.create(identity=("key", "command", "when"), required=("key", "command"), group=("key", "when"))
+
+
 def _render(template: str, value: object) -> str:
-    """Render `value` (the merged array, as plain JSON) into `template`."""
-    return ADAPTER.render(tree_from_value(value), template)
+    """Render `value` (a keybindings-shaped array, as plain JSON) into `template`, pairing by the binding rule."""
+    return ADAPTER.render(tree_from_value(value), template, {(): RULE})
 
 
 def _a(command: str) -> dict[str, object]:
@@ -52,18 +56,16 @@ def test_an_added_element_goes_after_the_kept_ones_and_their_comments_stay() -> 
     )
 
 
-def test_a_removed_element_takes_its_line_and_its_same_line_comment() -> None:
-    # given
+def test_removing_a_binding_that_carries_a_same_line_comment_is_refused() -> None:
+    # given — the `// drop me` note is on the removed binding's own line
     template = (
         '[\n    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }, // drop me\n'
         '    { "key": "c", "command": "z" }\n]'
     )
 
-    # when
-    rendered = _render(template, [_a("x"), _c("z")])
-
-    # then
-    assert rendered == '[\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+    # when & then — a comment is never deleted silently; the merge becomes a conflict
+    with pytest.raises(ContentParseError):
+        _render(template, [_a("x"), _c("z")])
 
 
 def test_removing_the_last_element_drops_the_comma_its_predecessor_was_left_with() -> None:
@@ -172,7 +174,7 @@ def test_an_element_level_render_always_parses_back_to_the_merged_tree(case: tup
     template, target = case
 
     # when
-    rendered = _render(template, target)
+    rendered = ADAPTER.render(tree_from_value(target), template)
 
     # then
     assert ADAPTER.parse(rendered) == tree_from_value(target)
@@ -189,15 +191,13 @@ def test_a_comment_above_a_removed_element_stays_where_it_is() -> None:
     assert rendered == '[\n    // why x\n    {"key": "b", "command": "y"},\n    { "key": "c", "command": "z" }\n]'
 
 
-def test_an_inline_comment_on_a_removed_element_does_not_move_onto_its_replacement() -> None:
+def test_an_inline_comment_on_a_removed_element_refuses_rather_than_moving_onto_its_replacement() -> None:
     # given
     template = '[\n    { "key": "a", "command": "x" }, // inline why\n    { "key": "c", "command": "z" }\n]'
 
-    # when
-    rendered = _render(template, [_b("y"), _c("z")])
-
-    # then
-    assert "inline why" not in rendered
+    # when & then
+    with pytest.raises(ContentParseError):
+        _render(template, [_b("y"), _c("z")])
 
 
 def test_a_changed_binding_keeps_its_inline_comment() -> None:
@@ -232,3 +232,12 @@ def test_a_binding_added_to_a_file_that_mixes_one_line_and_multi_line_bindings_r
     # then — it parses back to the merged tree, so the merge is not a whole-file conflict
     assert ADAPTER.parse(rendered) == tree_from_value([_a("x"), {"key": "b", "command": "y"}, _c("z")])
     assert "{ " not in rendered.split("\n")[-3]
+
+
+def test_a_two_field_binding_whose_command_changes_keeps_a_comment_inside_it_as_a_refused_rewrite() -> None:
+    # given — the only binding of its group on each side, with a comment inside it; its command changes
+    template = '[\n    { "key": "a", /* why */ "command": "x" },\n    { "key": "b", "command": "y" }\n]'
+
+    # when & then — the same group pairs them, the span holds the comment, so the rewrite is refused, not silent
+    with pytest.raises(ContentParseError):
+        _render(template, [_a("x2"), _b("y")])

@@ -132,6 +132,20 @@ def merge_keyed_array(base: Leaf, local: Leaf, remote: Leaf, rule: ArrayRule) ->
     return KeyedMerge(merged=Array(tuple(node for _, node in ordered)), conflicts=tuple(conflicts))
 
 
+def element_identity(element: Node, rule: ArrayRule) -> ElementId | None:
+    """An element's identity under `rule`, or ``None`` when it cannot be identified.
+
+    The adapter pairs a rewritten element with its replacement by this identity, so the pairing is the one the
+    merge decides, not a guess from how the two look.
+    """
+    return _identity(element, rule)
+
+
+def element_group(identity: ElementId, rule: ArrayRule) -> ElementId:
+    """The group an identity falls in under `rule`."""
+    return tuple(pair for pair in identity if pair[0] in rule.group)
+
+
 def _items(array: Array, rule: ArrayRule) -> list[_Item] | None:
     """Each element with its identity, or ``None`` when one cannot be identified or two share one."""
     items: list[_Item] = []
