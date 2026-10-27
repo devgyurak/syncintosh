@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -241,3 +245,108 @@ def test_a_two_field_binding_whose_command_changes_keeps_a_comment_inside_it_as_
     # when & then — the same group pairs them, the span holds the comment, so the rewrite is refused, not silent
     with pytest.raises(ContentParseError):
         _render(template, [_a("x2"), _b("y")])
+
+
+def test_a_group_with_several_bindings_on_each_side_pairs_them_in_order() -> None:
+    # given — two bindings under one key on each side; both commands change, and a note sits above the first
+    template = '[\n    // note on the first\n    { "key": "a", "command": "x" },\n    { "key": "a", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "x2"}, {"key": "a", "command": "y2"}])
+
+    # then — each binding is rewritten where it stood, and the note stays on the first
+    assert rendered == (
+        '[\n    // note on the first\n    {"key": "a", "command": "x2"},\n    {"key": "a", "command": "y2"}\n]'
+    )
+
+
+def test_the_rendered_bytes_do_not_depend_on_the_hash_seed() -> None:
+    # given — several groups change in one array, so the order groups are visited in could show
+    script = (
+        "from syncintosh.adapters.jsonc import JsoncAdapter\n"
+        "from syncintosh.core.keyed_array import ArrayRule\n"
+        "from syncintosh.core.tree import tree_from_value\n"
+        "rule = ArrayRule.create(identity=('key','command','when'), required=('key','command'), group=('key','when'))\n"
+        'template = \'[\\n  {"key": "a", "command": "x"},\\n  {"key": "b", "command": "y"},\\n\''
+        ' \'  {"key": "c", "command": "z"},\\n  {"key": "d", "command": "w"}\\n]\'\n'
+        "value = [{'key': 'd', 'command': 'w2'}, {'key': 'a', 'command': 'x2'}, {'key': 'c', 'command': 'z2'},"
+        " {'key': 'b', 'command': 'y2'}]\n"
+        "print(JsoncAdapter().render(tree_from_value(value), template, {(): rule}))\n"
+    )
+    outputs = {
+        seed: subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in range(8)
+    }
+
+    # when & then — the same input renders to the same bytes under every seed
+    assert len(set(outputs.values())) == 1
+
+
+# --- property: on the identity path, a render parses back exactly or refuses, and no note is ever dropped ----------
+
+_POOL = [("a", "x"), ("a", "y"), ("b", "x"), ("c", "z"), ("d", "w"), ("e", "v")]
+
+
+@st.composite
+def _binding_case(draw: st.DrawFn) -> tuple[str, list[tuple[str, str]], list[dict[str, object]]]:
+    """A keybindings-shaped template, each binding under its own note, and a random merged target over the same pool."""
+    base = draw(st.lists(st.sampled_from(_POOL), unique=True, min_size=1, max_size=5))
+    target = draw(
+        st.lists(
+            st.tuples(st.sampled_from(_POOL), st.sampled_from([None, 1])),
+            unique_by=lambda item: item[0],
+            max_size=5,
+        )
+    )
+    lines = ["["]
+    for index, (key, command) in enumerate(base):
+        lines.append(f"    // note {index}")
+        comma = "," if index < len(base) - 1 else ""
+        lines.append(f'    {{"key": "{key}", "command": "{command}"}}{comma}')
+    lines.append("]")
+    value: list[dict[str, object]] = []
+    for (key, command), args in target:
+        binding: dict[str, object] = {"key": key, "command": command}
+        if args is not None:
+            binding["args"] = args
+        value.append(binding)
+    return "\n".join(lines), base, value
+
+
+def _try_render(template: str, value: list[dict[str, object]]) -> str | None:
+    """The render, or `None` when the adapter refuses it (a conflict, which is allowed; a silent wrong file is not)."""
+    try:
+        return _render(template, value)
+    except ContentParseError:
+        return None
+
+
+@given(case=_binding_case())
+def test_a_keyed_render_parses_back_exactly_or_refuses(case: tuple[str, list[tuple[str, str]], list[dict]]) -> None:
+    # given
+    template, _, value = case
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then
+    assert rendered is None or ADAPTER.parse(rendered) == tree_from_value(value)
+
+
+@given(case=_binding_case())
+def test_a_keyed_render_never_drops_a_note_above_a_binding(case: tuple[str, list[tuple[str, str]], list[dict]]) -> None:
+    # given
+    template, base, value = case
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then — a note stays with the array, whichever binding it sat above; nothing is removed silently
+    missing = [index for index in range(len(base)) if rendered is not None and f"// note {index}" not in rendered]
+    assert missing == []

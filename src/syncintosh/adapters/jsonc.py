@@ -25,10 +25,11 @@ takes one back, and the engine decides what changed (``core/merge.py``).
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError
@@ -61,7 +62,7 @@ class _Span:
 @dataclass(frozen=True)
 class _ScalarNode:
     kind: ScalarKind
-    value: str | int | float | bool | None
+    value: str | int | float | bool | None = field(repr=False)
     span: _Span
 
 
@@ -285,7 +286,7 @@ class _Edit:
 
     start: int
     end: int
-    text: str
+    text: str = field(repr=False)
 
 
 class JsoncAdapter:
@@ -537,10 +538,10 @@ class _Diff:
         """Edit a one-element-per-line array by element, so untouched elements keep their comments.
 
         Elements the merge kept are left as they are (or, when the merge changed their value, only their
-        own span is rewritten); a removed element goes with its line, its comma and a same-line comment; an
-        added element goes above the next kept element's own comments. A comma is set from the final order:
-        every element but the last gets one, and the last gets one only when the template had a trailing
-        comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
+        own span is rewritten); a removed element goes with its line and its comma, and a removal is refused when
+        a comment sits on those lines; an added element goes above the next kept element's own comments. A comma is
+        set from the final order: every element but the last gets one, and the last gets one only when the template
+        had a trailing comma. Returns False for a layout this does not handle, so the caller rewrites the whole value.
         """
         if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
             return False
@@ -611,7 +612,7 @@ class _Diff:
             edits.append(_Edit(start, start, "".join(pending)))
 
         for index in deleted:
-            # Only the element's own line goes (with its comma and a same-line comment). The comment lines above it
+            # Only the element's own line goes (with its comma). The comment lines above it
             # stay where they are: which element they documented cannot be known from the text alone, and silently
             # deleting a note is worse than leaving it attached to the element below.
             element = node.elements[index]
@@ -869,7 +870,7 @@ class _Comments:
     and a settings file documents path globs in its comments.
     """
 
-    text: str
+    text: str = field(repr=False)
     spans: tuple[_Span, ...]
 
     def overlaps(self, start: int, end: int) -> bool:
@@ -1029,39 +1030,52 @@ def _open_block_position(text: str, comments: _Comments, start: int) -> int:
 def _pair_block(old: list[Node], new: list[Node], rule: ArrayRule | None) -> list[tuple[int | None, int | None]]:
     """Pair a replaced run by declared identity: `(old, new)` pairs, `(old, None)` removals, `(None, new)` additions.
 
-    Two elements pair when they have the same identity, or when they are the only pair of their group on each side.
-    Anything else is a removal and an addition. Pairs keep their order, so the output keeps the array's order. With no
-    rule nothing pairs, so an array whose elements cannot be told apart is never rewritten in place.
+    Two elements pair when they have the same identity; then, within each group, the elements left on each side pair
+    in order. A pair must keep the array's order, so each new pair is placed between its neighbours. Anything else is a
+    removal and an addition. With no rule nothing pairs, so an array whose elements cannot be told apart is never
+    rewritten in place. The result does not depend on hashing: groups are visited in the order they first appear.
     """
     if rule is None:
         return [*((i, None) for i in range(len(old))), *((None, k) for k in range(len(new)))]
     old_ids = [element_identity(element, rule) for element in old]
     new_ids = [element_identity(element, rule) for element in new]
-    pairs: dict[int, int] = {}
+    olds: list[int] = []  # the paired old indexes, ascending
+    news: list[int] = []  # their new indexes, ascending as well
+    used: set[int] = set()
 
     def fits(i: int, j: int) -> bool:
-        return all((k < i) == (pairs[k] < j) and pairs[k] != j for k in pairs)
+        k = bisect.bisect_left(olds, i)
+        return (k == 0 or news[k - 1] < j) and (k == len(olds) or news[k] > j) and j not in used
+
+    def pair(i: int, j: int) -> None:
+        k = bisect.bisect_left(olds, i)
+        olds.insert(k, i)
+        news.insert(k, j)
+        used.add(j)
 
     for i, identity in enumerate(old_ids):
         if identity is None:
             continue
-        j = next((j for j, other in enumerate(new_ids) if other == identity and j not in pairs.values()), None)
+        j = next((j for j, other in enumerate(new_ids) if other == identity and j not in used), None)
         if j is not None and fits(i, j):
-            pairs[i] = j
-    for group in {element_group(identity, rule) for identity in old_ids if identity is not None}:
+            pair(i, j)
+    groups = dict.fromkeys(element_group(identity, rule) for identity in old_ids if identity is not None)
+    for group in groups:
         old_left = [
             i
             for i, identity in enumerate(old_ids)
-            if identity is not None and i not in pairs and element_group(identity, rule) == group
+            if identity is not None and i not in olds and element_group(identity, rule) == group
         ]
         new_left = [
             j
             for j, identity in enumerate(new_ids)
-            if identity is not None and j not in pairs.values() and element_group(identity, rule) == group
+            if identity is not None and j not in used and element_group(identity, rule) == group
         ]
-        if len(old_left) == 1 and len(new_left) == 1 and fits(old_left[0], new_left[0]):
-            pairs[old_left[0]] = new_left[0]
+        for i, j in zip(old_left, new_left, strict=False):
+            if fits(i, j):
+                pair(i, j)
 
+    pairs = dict(zip(olds, news, strict=True))
     result: list[tuple[int | None, int | None]] = []
     new_cursor = 0
     for i in range(len(old)):
