@@ -160,6 +160,15 @@ decide about survives:
   machine's changes.
 - **A comment above the first member stays with it.** A key inserted at the top of a multi-line
   object goes above that comment, not between the comment and the member it documents.
+- **A removed binding of a keyed array takes its notes with it.** The block of comment lines directly
+  above it (no blank line between, `//` lines and one-line `/* */` blocks alike), the comments on its
+  own lines, and the comments inside it are removed with it. A blank line ends the block, so a section
+  title separated from the binding stays. A rule-less array cannot tell which binding a note belongs to,
+  so a removal that would take a note is refused with a fixed reason instead. (An earlier version kept
+  the block above a removed binding; issue #21 reversed that.)
+- **Two sides that reorder shared bindings differently are one conflict on the whole array.** The
+  bindings that did not change decide the order, and no per-binding pick can settle it. The conflict
+  says so, and that choosing a whole side drops the other side's added bindings.
 - **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
   comes back from the tree rather than from the live file's own text, so a nested object's
   internal layout may differ from what the file had. A scalar value — the usual noise or excluded
