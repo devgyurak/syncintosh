@@ -908,13 +908,17 @@ class _Comments:
 
     def overlaps(self, start: int, end: int) -> bool:
         """True when a comment starts, ends, or lies inside ``[start, end)``."""
-        return any(span.start < end and span.end > start for span in self.spans)
+        # Spans do not overlap, so the first span that ends after `start` is the only candidate.
+        index = bisect.bisect_right(self._ends, start)
+        return index < len(self.spans) and self.spans[index].start < end
 
     def closes_after(self, start: int, limit: int) -> int | None:
         """The end of a comment opening in ``[start, limit)`` and closing at or after `limit`."""
-        for span in self.spans:
-            if start <= span.start < limit and span.end > limit:
-                return span.end
+        first = bisect.bisect_left(self._starts, start)
+        last = bisect.bisect_left(self._starts, limit)
+        # Of the spans opening before `limit`, only the last one can reach past it: the others end before it starts.
+        if last > first and self.spans[last - 1].end > limit:
+            return self.spans[last - 1].end
         return None
 
     def next_meaningful(self, position: int) -> int:
@@ -923,20 +927,21 @@ class _Comments:
         while True:
             while cursor < len(self.text) and self.text[cursor] in _WHITESPACE:
                 cursor += 1
-            span = next((item for item in self.spans if item.start <= cursor < item.end), None)
+            span = self._span_at(cursor)
             if span is None:
                 return cursor
             cursor = span.end
 
     def without_comments(self, start: int, end: int) -> str:
-        """The text of ``[start, end)`` with every comment in it blanked out."""
+        """The text of ``[start, end)`` with every comment in it removed."""
         pieces: list[str] = []
         cursor = start
-        for span in self.spans:
-            if span.end <= cursor or span.start >= end:
-                continue
+        index = bisect.bisect_right(self._ends, start)
+        while index < len(self.spans) and self.spans[index].start < end:
+            span = self.spans[index]
             pieces.append(self.text[cursor : max(cursor, span.start)])
             cursor = min(end, span.end)
+            index += 1
         pieces.append(self.text[cursor:end])
         return "".join(pieces)
 
@@ -963,6 +968,11 @@ class _Comments:
     def _starts(self) -> tuple[int, ...]:
         """The start of each comment span; the parser records them in text order, so this is sorted."""
         return tuple(span.start for span in self.spans)
+
+    @cached_property
+    def _ends(self) -> tuple[int, ...]:
+        """The end of each comment span, in the same order as `_starts`."""
+        return tuple(span.end for span in self.spans)
 
     def _span_at(self, position: int) -> _Span | None:
         index = bisect.bisect_right(self._starts, position) - 1

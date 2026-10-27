@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Any
 
 import pytest
 from hypothesis import given, settings
@@ -666,6 +667,39 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
     assert rendered.count("// note line") == 2000
     assert time.perf_counter() - started < 2.0
+
+
+def _binding_array(count: int) -> tuple[str, list[Any]]:
+    """An array of `count` bindings, each with a note above it, and the same bindings with the first moved last."""
+    lines = ["["]
+    for index in range(count):
+        lines.append(f"    // note {index}")
+        comma = "," if index < count - 1 else ""
+        lines.append(f'    {{ "key": "k{index}", "command": "c{index}" }}{comma}')
+    lines.append("]")
+    value: list[Any] = [{"key": f"k{index}", "command": f"c{index}"} for index in range(1, count)]
+    return "\n".join(lines), [*value, {"key": "k0", "command": "c0"}]
+
+
+def _best_render_seconds(count: int) -> float:
+    """The fastest of three renders of a `count`-binding array, each binding moved by the merge."""
+    template, value = _binding_array(count)
+    timings = []
+    for _ in range(3):
+        started = time.perf_counter()
+        _render(template, value)
+        timings.append(time.perf_counter() - started)
+    return min(timings)
+
+
+def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
+    # given — the same merge at 400 and at 3200 bindings: eight times the size
+
+    # when — the time ratio is compared, so the test is independent of the machine's speed
+    ratio = _best_render_seconds(3200) / _best_render_seconds(400)
+
+    # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
+    assert ratio < 20
 
 
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
