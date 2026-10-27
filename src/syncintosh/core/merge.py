@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
+from syncintosh.core.keyed_array import ArrayRule, merge_keyed_array
 from syncintosh.core.models import Conflict, TreeMerge
 from syncintosh.core.resolution import Side
 from syncintosh.core.tree import ABSENT, Absent, Array, EmptyObject, KeyPath, Leaf, Node, Scalar, Tree
@@ -38,6 +39,7 @@ def merge_tree(
     *,
     ignore: IgnorePaths = frozenset(),
     choices: Mapping[KeyPath, Side | Tree] | None = None,
+    keyed: Mapping[KeyPath, ArrayRule] | None = None,
 ) -> TreeMerge:
     """Merge three typed trees; conflicts are returned, not raised.
 
@@ -46,10 +48,16 @@ def merge_tree(
     side an operator picked, or to a proposed subtree: a `Tree` whose keys are relative to that
     path, so a proposed scalar is the tree with one root entry. A choice on a path that is not a
     conflict is ignored, and a conflict with no choice stays in the result.
+
+    ``keyed`` names the array paths merged element by element (`core/keyed_array.py`). Such an array
+    is consulted only once it is a both-sides conflict; a conflict in one of its groups is recorded
+    with that group's identity, and the rest of the array merges. An array the rule cannot read keeps
+    the whole-array conflict it would have had without the rule.
     """
     base_entries = base.entries
     local_entries = local.entries
     remote_entries = remote.entries
+    rules = keyed or {}
 
     merged: dict[KeyPath, Node] = {}
     conflicts: list[Conflict] = []
@@ -64,12 +72,29 @@ def merge_tree(
         remote_value = remote_entries.get(path, ABSENT)
         chosen, conflicted = _resolve(base_value, local_value, remote_value)
         if conflicted:
+            element_merge = (
+                merge_keyed_array(base_value, local_value, remote_value, rules[path]) if path in rules else None
+            )
+            if element_merge is not None:
+                merged[path] = element_merge.merged
+                conflicts.extend(
+                    Conflict(
+                        path=path,
+                        base=group.base,
+                        local=group.local,
+                        remote=group.remote,
+                        element=group.element,
+                    )
+                    for group in element_merge.conflicts
+                )
+                continue
             conflicts.append(Conflict(path=path, base=base_value, local=local_value, remote=remote_value))
         if not isinstance(chosen, Absent):
             merged[path] = chosen
 
     conflicts = _fold_structure(merged, base_entries, local_entries, remote_entries, ignore, conflicts)
     conflicts = _apply_choices(conflicts, choices or {}, merged, local_entries, remote_entries, ignore)
+    conflicts.sort(key=_conflict_order)
     _drop_emptied(merged)
     ordered = _ordered_entries(merged, local_entries, remote_entries)
     # A merge that deleted every key leaves an **empty object** document, and a parse represents
@@ -78,6 +103,16 @@ def merge_tree(
     # the merged tree and re-parsing it returns the same tree — so a file whose merge emptied it
     # could never settle, and every later sync would read it as changed.
     return TreeMerge(merged=Tree.create(ordered or {(): EmptyObject()}), conflicts=tuple(conflicts))
+
+
+def _conflict_order(conflict: Conflict) -> tuple[KeyPath, tuple[tuple[str, bool, str], ...]]:
+    """Sort key: by path, then by element, so a whole-path conflict precedes its element conflicts.
+
+    A missing field and an empty string sort apart (the flag), so the order is total and stable.
+    """
+    if conflict.element is None:
+        return conflict.path, ()
+    return conflict.path, tuple((field, value is None, value or "") for field, value in conflict.element)
 
 
 def _apply_choices(
