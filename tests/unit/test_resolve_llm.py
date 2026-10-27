@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import types
 
 import pytest
@@ -17,6 +18,17 @@ from syncintosh.core.resolution import ConflictKind, ConflictView, Proposal
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
 from syncintosh.system.masking import TextMasker
+
+
+def _plain(output: str) -> str:
+    """The CLI output as a reader sees it: no color codes, no box edges, words separated by one space.
+
+    Rich styles option names inside an error, so with color on the text `--llm chooses` is split by escape codes,
+    and a narrow terminal wraps it. Neither should decide whether a message is shown.
+    """
+    without_color = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(part for part in re.split(r"[│\s]+", without_color) if part)
+
 
 VSCODE = "Library/Application Support/Code/User/settings.json"
 
@@ -247,7 +259,7 @@ def test_resolve_llm_cannot_be_combined_with_a_side_choice() -> None:
 
     # then
     assert result.exit_code == 2
-    assert "--llm chooses for you" in result.output
+    assert "--llm chooses for you" in _plain(result.output)
 
 
 def test_a_refused_suggestion_is_shown_and_never_prompted(monkeypatch, capsys) -> None:
