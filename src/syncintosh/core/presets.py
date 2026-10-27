@@ -252,6 +252,23 @@ class Preset:
 
 
 @dataclass(frozen=True)
+class ShippedPresets:
+    """The presets this build ships: the only set a download URL can be trusted against.
+
+    Built through :meth:`create`. The presets package hands one out (`BuiltinCatalog.shipped`), and
+    nothing else should: a synced or community file that arrives as presets must not be wrapped in
+    this type, because wrapping it is what would make its URLs trusted (``AGENTS.md`` §3.6).
+    """
+
+    presets: tuple[Preset, ...]
+
+    @classmethod
+    def create(cls, presets: tuple[Preset, ...]) -> ShippedPresets:
+        """Freeze the shipped presets. The caller is the trust boundary, not this constructor."""
+        return cls(presets=presets)
+
+
+@dataclass(frozen=True)
 class DownloadTrust:
     """Whether a download URL is one of the built-in presets', and the domain to show.
 
@@ -264,21 +281,74 @@ class DownloadTrust:
     domain: str
 
 
-def download_trust(url: str, *, builtin: Iterable[Preset]) -> DownloadTrust:
-    """Decide whether `url` is a built-in preset's download page.
+def download_trust(url: str, *, shipped: ShippedPresets) -> DownloadTrust:
+    """Decide whether `url` is a shipped preset's download page.
 
     Trust is **exact string equality** with a hard-coded URL, never a domain or suffix match:
     `https://evil.example/?code.<vendor>` and `https://<vendor>.evil.example/` both share a
     substring with a real page, and only the exact URL is one this project shipped.
 
-    `builtin` must be the **shipped** catalog's presets (`BuiltinCatalog.default().presets`).
-    A `Preset` carries no marker distinguishing a built-in from one that arrived from a synced
-    or community file, so the trust boundary is the call site's: passing a merged list would mark
-    a community URL trusted (``AGENTS.md`` §3.6). Tighten this to a catalog-only parameter when
-    the first caller lands (#8/#9).
+    `shipped` is a :class:`ShippedPresets`, which only the shipped catalog produces. A `Preset`
+    carries no marker of its own, so the type is what keeps a community URL from being trusted
+    (``AGENTS.md`` §3.6).
     """
     domain = urlsplit(url).hostname or ""
-    return DownloadTrust(trusted=any(preset.download_url == url for preset in builtin), domain=domain)
+    return DownloadTrust(trusted=any(preset.download_url == url for preset in shipped.presets), domain=domain)
+
+
+# ASCII only: a non-ASCII host (a full-width dot or slash) makes `urlsplit` raise on the netloc, and
+# a proposal from a model must never be able to crash the resolve that reads it.
+# Case-insensitive on the scheme only: with IGNORECASE on the whole pattern, the negated range below
+# would also exclude `i`, `l` and `s` through their Unicode case variants, and cut a URL short.
+_URL: Final = re.compile(r"(?i:https?)://[^\s\"'<>()\[\]{}\x00-\x1f\x7f-\U0010ffff]+")
+_UNICODE_ESCAPE: Final = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+@dataclass(frozen=True)
+class ProposedUrl:
+    """A URL a proposal introduces that no side already had.
+
+    It is never trusted. Trust comes from a shipped preset's exact URL, and a proposal is not a
+    shipped preset: a proposed URL that matches a shipped one character for character is still
+    untrusted, because the proposal is where it came from (``AGENTS.md`` §3.6). `domain` is shown
+    prominently so the person sees where it points.
+    """
+
+    url: str
+    domain: str
+    trusted: Literal[False] = False
+
+
+def proposed_urls(proposal: str, *, base: str, local: str, remote: str) -> tuple[ProposedUrl, ...]:
+    """The URLs in `proposal` that appear in none of the three sides, each as an untrusted URL.
+
+    A URL the sides already held is not new, so it is not flagged here. Every URL this returns
+    is new, and every one is untrusted, whatever it matches. A URL is found in the text as written
+    and in its JSON-unescaped forms, so `https:\\/\\/` and `\\u0068ttps://` are seen too.
+    """
+    known = {url for side in (base, local, remote) for url in _urls_in(side)}
+    found = dict.fromkeys(url for url in _urls_in(proposal) if url not in known)
+    return tuple(ProposedUrl(url=url, domain=_host(url)) for url in found)
+
+
+def _urls_in(text: str) -> tuple[str, ...]:
+    """Every URL in any of the text's forms: as written, with `\\/` unescaped, and with `\\uXXXX` decoded."""
+    unslashed = text.replace("\\/", "/")
+    decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
+    unslashed_decoded = _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), unslashed)
+    forms = (text, unslashed, decoded, unslashed_decoded)
+    # Ordered by first appearance, so the same proposal always reports its URLs in the same order.
+    return tuple(dict.fromkeys(_clean(url) for form in forms for url in _URL.findall(form)))
+
+
+def _clean(raw: str) -> str:
+    """A matched URL without the sentence punctuation the pattern can swallow after it."""
+    return raw.rstrip(".,;:!?")
+
+
+def _host(url: str) -> str:
+    """The host a URL names. The pattern admits no brackets, so `urlsplit` cannot reject one here."""
+    return urlsplit(url).hostname or ""
 
 
 @dataclass(frozen=True)
@@ -317,6 +387,9 @@ __all__ = [
     "Preset",
     "PresetFile",
     "PresetGlob",
+    "ProposedUrl",
+    "ShippedPresets",
     "ValidatorName",
     "download_trust",
+    "proposed_urls",
 ]

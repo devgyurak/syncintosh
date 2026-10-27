@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
-from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.vscode import VSCODE
 from syncintosh.presets.zsh import ZSH
@@ -82,6 +82,14 @@ class BuiltinCatalog:
     def default(cls) -> BuiltinCatalog:
         """The catalog this build ships."""
         return cls.create(BUILTIN_PRESETS)
+
+    def shipped(self) -> ShippedPresets:
+        """This catalog's presets as the set download URLs are trusted against.
+
+        Only the shipped catalog (`default()`) should reach a caller through here. A catalog built
+        from anything else would hand its URLs trust it did not earn.
+        """
+        return ShippedPresets.create(self.presets)
 
     def get(self, name: str) -> Preset | None:
         """The built-in preset called `name`, or `None` when there is no such preset."""
