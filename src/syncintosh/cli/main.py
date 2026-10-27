@@ -404,12 +404,20 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     _render_diff(report, values=values, when_tag=_machine_when_tag())
 
 
+# Said once, on stderr, when the tags of this output come from a key that only lasts this run, so a person can tell
+# why they differ from the tags sync shows.
+WHEN_RUN_KEY_NOTICE = "when tags in this output use a key for this run only, so they will not match the tags sync shows"
+
+
 def _machine_when_tag() -> WhenTag:
     """This machine's tagger for `when` clauses. It reads the scan key and never creates the allowlist."""
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.scan_allow import machine_when_tag
 
-    return machine_when_tag(MachinePaths.default().scan_allow_file)
+    tagging = machine_when_tag(MachinePaths.default().scan_allow_file)
+    if tagging.run_key:
+        typer.echo(WHEN_RUN_KEY_NOTICE, err=True)
+    return tagging.tag
 
 
 def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:

@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from syncintosh.adapters.jsonc import UNRULED_REMOVAL_REFUSED
+from syncintosh.adapters.jsonc import CHANGED_WITH_NOTE_REFUSED, UNRULED_REMOVAL_REFUSED
 from syncintosh.cli import main as main_module
-from syncintosh.core.content_merge import RENDER_REFUSED
+from syncintosh.cli.main import WHEN_RUN_KEY_NOTICE
 from syncintosh.presets.vscode import KEYBINDINGS
 from syncintosh.system.paths import MachinePaths
 
@@ -44,9 +44,9 @@ def test_a_refused_render_exits_with_the_fixed_reason_and_no_value(tmp_path: Pat
 
     # then — exit 1, the fixed reason is said, and neither side's value is printed in it
     assert result.exit_code == 1
-    assert f"not merged: {RENDER_REFUSED}" in result.output
+    assert f"not merged: {CHANGED_WITH_NOTE_REFUSED}" in result.output
     reasons = [line for line in result.output.splitlines() if line.startswith("not merged:")]
-    assert reasons == [f"not merged: {RENDER_REFUSED}"]
+    assert reasons == [f"not merged: {CHANGED_WITH_NOTE_REFUSED}"]
 
 
 # A `when` clause is printed as a keyed tag, never as its text, whatever state the machine's allowlist is in.
@@ -58,6 +58,7 @@ UNUSABLE_ALLOWLISTS = {
     "not JSON": "{ nope",
     "key too short": '{"version": 1, "key": "ab", "entries": []}',
     "unknown version": '{"version": 99, "key": "%s", "entries": []}' % ("00" * 32),
+    "nested too deeply": '{"version": 1, "key": "' + "00" * 32 + '", "entries": ' + "[" * 100_000 + "]" * 100_000 + "}",
 }
 
 
@@ -93,6 +94,8 @@ def test_a_when_clause_conflict_prints_a_tag_and_never_the_clause_text(
     conflicts = [line for line in result.output.splitlines() if line.startswith("conflict:")]
     assert len(conflicts) == 1
     assert re.fullmatch(r"conflict: \(document\) \[key=\"b\", when=[0-9a-f]{12}\]", conflicts[0]) is not None
+    # the tags come from a key for this run only, so the person is told once, on stderr
+    assert WHEN_RUN_KEY_NOTICE in result.output
 
 
 def test_a_rule_less_refusal_says_its_fixed_reason(tmp_path: Path) -> None:

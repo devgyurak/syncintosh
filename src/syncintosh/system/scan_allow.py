@@ -36,7 +36,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from syncintosh.core.errors import ScanAllowCorrupt
 from syncintosh.core.ports import WhenTag
@@ -208,6 +208,9 @@ def read_scan_allow(path: Path) -> ScanAllow | None:
         parsed: Any = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ScanAllowCorrupt(f"the scan allowlist {path} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # Nesting deeper than the parser can follow is refused like any other corruption, never a crash of a display.
+        raise ScanAllowCorrupt(f"the scan allowlist {path} is nested too deeply to read") from exc
     if not isinstance(parsed, dict):
         raise ScanAllowCorrupt(f"the scan allowlist {path} must contain a JSON object")
     if parsed.get("version") != ALLOW_VERSION:
@@ -255,6 +258,7 @@ __all__ = [
     "WHEN_TAG_HEX_LEN",
     "ScanAllow",
     "ScanAllowEntry",
+    "WhenTagging",
     "fingerprint",
     "load_scan_allow",
     "machine_when_tag",
@@ -278,15 +282,24 @@ def when_tag_for(key: bytes) -> WhenTag:
     return tag
 
 
-def machine_when_tag(path: Path) -> WhenTag:
+class WhenTagging(NamedTuple):
+    """This run's tagger for `when` clauses, and whether it had to use a key for this run only."""
+
+    tag: WhenTag
+    run_key: bool
+
+
+def machine_when_tag(path: Path) -> WhenTagging:
     """This machine's tagger for `when` clauses, keyed with its stored scan key. Never creates the allowlist.
 
-    When the allowlist is missing or unreadable, this run uses a fresh random key: the tags still tell two
-    `when` clauses apart within one output, and nothing about that key is stored. A corrupt allowlist fails the
-    commands that write (sync loads it through `load_scan_allow`); a display must not fail on it.
+    When the allowlist is missing or unusable, this run uses a fresh random key and says so (`run_key`): the tags
+    still tell two `when` clauses apart within one output, and nothing about that key is stored. A corrupt allowlist
+    fails the commands that write (sync loads it through `load_scan_allow`); a display must not fail on it.
     """
     try:
         allow = read_scan_allow(path)
     except ScanAllowCorrupt:
         allow = None
-    return when_tag_for(os.urandom(KEY_BYTES) if allow is None else allow.key)
+    if allow is None:
+        return WhenTagging(when_tag_for(os.urandom(KEY_BYTES)), run_key=True)
+    return WhenTagging(when_tag_for(allow.key), run_key=False)
