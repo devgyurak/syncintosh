@@ -50,7 +50,7 @@ def test_merge_text_is_conflicted_when_the_render_does_not_round_trip() -> None:
         def parse(self, text: str) -> Tree:
             return tree_from_value(json.loads(text))
 
-        def render(self, tree: Tree, template: str) -> str:
+        def render(self, tree: Tree, template: str, arrays=None) -> str:
             return "{}"
 
     # when

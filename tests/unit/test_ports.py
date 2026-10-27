@@ -48,7 +48,7 @@ def test_content_adapter_port_is_structural() -> None:
         def parse(self, text: str) -> Tree:
             return Tree.create({})
 
-        def render(self, tree: Tree, template: str) -> str:
+        def render(self, tree: Tree, template: str, arrays=None) -> str:
             return template
 
     # when

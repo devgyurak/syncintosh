@@ -45,7 +45,7 @@ class JsonAdapter:
         except json.JSONDecodeError as exc:
             raise ContentParseError(str(exc)) from exc
 
-    def render(self, tree: Tree, template: str) -> str:
+    def render(self, tree: Tree, template: str, arrays=None) -> str:
         if self._corrupt_render:
             return "{}"
         return json.dumps(tree.to_value())
