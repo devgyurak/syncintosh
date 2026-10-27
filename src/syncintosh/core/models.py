@@ -59,7 +59,7 @@ class Conflict:
 class TreeMerge:
     """The outcome of a three-way, key-level merge over two typed trees."""
 
-    merged: Tree
+    merged: Tree = field(repr=False)
     conflicts: tuple[Conflict, ...]
 
     @property
@@ -77,7 +77,7 @@ class TextMerge:
     reported as conflicted (``docs/design/01-sync-model.md``).
     """
 
-    text: str
+    text: str = field(repr=False)
     conflicted: bool
 
 

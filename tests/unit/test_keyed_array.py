@@ -13,7 +13,6 @@ from syncintosh.core.diff import changed_addresses
 from syncintosh.core.keyed_array import (
     ArrayRule,
     accepts_group,
-    group_leaf,
     group_leaves,
     merge_keyed_array,
 )
@@ -638,7 +637,7 @@ def test_a_when_clause_is_labelled_by_a_digest_so_its_text_is_not_printed() -> N
     assert label.startswith('[key="ctrl+k", when=sha256:')
 
 
-def test_group_leaves_indexes_each_group_once_and_matches_group_leaf() -> None:
+def test_group_leaves_indexes_each_group_once_with_its_own_bindings() -> None:
     # given
     array = _array([_binding("a", "1"), _binding("a", "2"), _binding("b", "3", when="p")])
     group = (("key", "a"), ("when", None))
@@ -648,7 +647,7 @@ def test_group_leaves_indexes_each_group_once_and_matches_group_leaf() -> None:
 
     # then
     assert leaves is not None
-    assert leaves[group] == group_leaf(array, RULE, group)
+    assert leaves[group] == _array([_binding("a", "1"), _binding("a", "2")])
     assert set(leaves) == {((("key", "a"), ("when", None))), ((("key", "b"), ("when", "p")))}
 
 
@@ -665,3 +664,61 @@ def test_a_proposal_for_a_group_the_local_side_removed_stays_between_its_neighbo
     # then — the proposal sits where the group was, not after `ctrl+y`
     assert result is not None
     assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p", "y"]
+
+
+def test_two_adjacent_removed_groups_get_their_proposals_in_order() -> None:
+    # given — local removed both neighbouring groups; remote edited both; the model proposes one binding for each
+    base = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k"), _binding("ctrl+m", "m"), _binding("ctrl+y", "y")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+y", "y")])
+    remote = _array(
+        [
+            _binding("ctrl+x", "x"),
+            _binding("ctrl+k", "k", args=1),
+            _binding("ctrl+m", "m", args=1),
+            _binding("ctrl+y", "y"),
+        ]
+    )
+    k_group = (("key", "ctrl+k"), ("when", None))
+    m_group = (("key", "ctrl+m"), ("when", None))
+
+    # when
+    result = merge_keyed_array(
+        base,
+        local,
+        remote,
+        RULE,
+        picks={k_group: _array([_binding("ctrl+k", "p1")]), m_group: _array([_binding("ctrl+m", "p2")])},
+    )
+
+    # then — the first proposal is not placed after the second
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p1", "p2", "y"]
+
+
+def test_an_unsettled_conflict_does_not_turn_an_unrelated_reorder_into_a_whole_array_conflict() -> None:
+    # given — `ctrl+k` conflicts (both sides changed it), and the two sides moved its bindings differently
+    base = _array([_binding("ctrl+k", "p"), _binding("ctrl+k", "q"), _binding("ctrl+z", "r")])
+    local = _array([_binding("ctrl+k", "q"), _binding("ctrl+k", "p", args=1), _binding("ctrl+z", "r")])
+    remote = _array([_binding("ctrl+z", "r"), _binding("ctrl+k", "p"), _binding("ctrl+k", "q", args=2)])
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE)
+
+    # then — the conflict is that one group, and it can still be picked; the array is not a whole-array conflict
+    assert result is not None
+    assert [conflict.element for conflict in result.conflicts] == [(("key", "ctrl+k"), ("when", None))]
+
+
+def test_a_proposal_for_a_group_both_sides_added_goes_to_the_end() -> None:
+    # given — neither base nor a side held a binding in this group before both added one
+    base = _array([_binding("ctrl+x", "x")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "a1")])
+    remote = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "a2")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = merge_keyed_array(base, local, remote, RULE, picks={group: _array([_binding("ctrl+k", "p")])})
+
+    # then — there is no earlier place for it, so it is the last binding
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p"]

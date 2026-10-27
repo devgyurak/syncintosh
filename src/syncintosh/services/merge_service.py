@@ -59,9 +59,9 @@ def merge_text(
     arrays = None if policy is None else policy.array_rules
     result = merge_tree(base, local, remote, ignore=ignore, keyed=arrays)
     if result.has_conflicts:
-        rendered = render_merged(adapter, result.merged, local_text)
+        rendered = render_merged(adapter, result.merged, local_text, arrays)
         return RenderedMerge(text=local_text if rendered is None else rendered, conflicts=result.conflicts)
-    rendered = render_merged(adapter, result.merged, local_text)
+    rendered = render_merged(adapter, result.merged, local_text, arrays)
     if rendered is None:
         return RenderedMerge(text=local_text, conflicted=True)
     return RenderedMerge(text=rendered)

@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -53,7 +53,8 @@ class Scalar:
     """
 
     kind: ScalarKind
-    value: str | int | float | bool | None
+    # A value is a setting, which may be a credential; a repr shows the kind only (AGENTS.md §4).
+    value: str | int | float | bool | None = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -64,14 +65,14 @@ class Array:
     same kind distinction a top-level leaf gets.
     """
 
-    elements: tuple[Node, ...]
+    elements: tuple[Node, ...] = field(repr=False)
 
 
 @dataclass(frozen=True)
 class Object:
     """An object *inside* an array, kept whole because array positions are not key paths."""
 
-    entries: tuple[tuple[str, Node], ...]
+    entries: tuple[tuple[str, Node], ...] = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,7 @@ class Tree:
     the document order the parse produced, which the render step needs to place an added key.
     """
 
-    _entries: Mapping[KeyPath, Node]
+    _entries: Mapping[KeyPath, Node] = field(repr=False)
 
     @classmethod
     def create(cls, entries: Mapping[KeyPath, Node]) -> Tree:

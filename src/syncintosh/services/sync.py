@@ -266,16 +266,16 @@ class _Collect:
 
     records: dict[str, ManifestRecord] = field(default_factory=dict)
     # The projected bytes that would be sealed: the object content, keyed by file_id.
-    contents: dict[str, bytes] = field(default_factory=dict)
+    contents: dict[str, bytes] = field(default_factory=dict, repr=False)
     # The projected form of each live file that existed at collect, keyed by file_id. Apply reuses
     # it instead of projecting again whenever the raw bytes are unchanged since collect — the
     # compare-and-swap already proves the file is the one this projection was made from.
-    views: dict[str, bytes] = field(default_factory=dict)
+    views: dict[str, bytes] = field(default_factory=dict, repr=False)
     # The bytes collect read from each live file, kept so apply can compare-and-swap a record it
     # is about to overwrite on an explicit adopt — even though it collected nothing for it. These
     # are the **raw** bytes, never the projection: an edit between collect and apply must abort
     # the write even when the edit touched only a key the preset strips.
-    seen: dict[str, bytes] = field(default_factory=dict)
+    seen: dict[str, bytes] = field(default_factory=dict, repr=False)
     # A local change whose ledger baseline is older than HEAD: it must be merged with HEAD's
     # content, not pushed over it.
     stale: list[_StaleChange] = field(default_factory=list)
@@ -303,7 +303,7 @@ class _StaleChange:
 
     record: ManifestRecord
     entry: LedgerEntry
-    live: bytes
+    live: bytes = field(repr=False)
 
 
 def _join(home: str, relpath: str) -> str:
@@ -422,8 +422,8 @@ class _Projected:
     (``AGENTS.md`` §4, "never log secrets").
     """
 
-    raw: bytes | None
-    view: bytes | None
+    raw: bytes | None = field(repr=False)
+    view: bytes | None = field(repr=False)
     failure: ProjectionFailure | None = None
 
 

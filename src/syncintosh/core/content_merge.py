@@ -107,7 +107,9 @@ def _parsed_or_none(adapter: ContentAdapter, text: str) -> Tree | None:
         return None
 
 
-def render_merged(adapter: ContentAdapter, merged: Tree, template: str) -> str | None:
+def render_merged(
+    adapter: ContentAdapter, merged: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None
+) -> str | None:
     """Render `merged` and re-parse it; `None` when it does not round-trip to the same tree.
 
     This is the guard that keeps an adapter from publishing a partially rendered file: the caller
@@ -115,7 +117,7 @@ def render_merged(adapter: ContentAdapter, merged: Tree, template: str) -> str |
     Shared by the byte-level content merge and the `merge` command so the two cannot drift.
     """
     try:
-        rendered = adapter.render(merged, template)
+        rendered = adapter.render(merged, template, arrays)
         if adapter.parse(rendered) != merged:
             return None
     except ContentParseError:
@@ -194,7 +196,7 @@ def _merge_via_adapter(
     )
     if result.has_conflicts:
         return None, tuple(dict.fromkeys((conflict.path, conflict.element) for conflict in result.conflicts))
-    rendered = render_merged(adapter, result.merged, local_text)
+    rendered = render_merged(adapter, result.merged, local_text, arrays)
     if rendered is None:
         return None, ()
     return rendered, ()

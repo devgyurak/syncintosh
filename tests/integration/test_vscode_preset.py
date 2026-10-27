@@ -672,3 +672,37 @@ def test_a_model_proposal_for_one_binding_settles_only_that_binding(tmp_path, me
     assert b"terminal.clearAll" not in _read(b, KEYBINDINGS)
     _run(a)
     assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
+
+
+def test_a_reordered_binding_group_settles_in_one_resolve_and_both_machines_converge(
+    tmp_path, memory_key_store
+) -> None:
+    # given — two bindings share the key `cmd+shift+k`; A reorders them and edits the first, B edits the second
+    a, b = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
+    base = _with_binding(_fixture("vscode-keybindings.jsonc"), "cmd+shift+k", "b.extra")
+    _write(a, KEYBINDINGS, base)
+    _run(a)
+    _run(b)
+    reordered_by_a = (
+        b"// Place your key bindings in this file to override the defaults\n[\n"
+        b'  {"key": "cmd+shift+k", "command": "b.extra"},\n'
+        b'  {\n    "key": "cmd+shift+k",\n    "command": "workbench.action.terminal.clear",\n'
+        b'    "args": {"a": 1}\n  },\n'
+        b'  {"key": "cmd+alt+left", "command": "-workbench.action.navigateBack"}\n]'
+    )
+    _write(a, KEYBINDINGS, reordered_by_a)
+    _run(a)
+    edited_by_b = base.replace(b'"command": "b.extra"}', b'"command": "b.extra", "args": {"b": 2}}')
+    _write(b, KEYBINDINGS, edited_by_b)
+
+    # when — B's sync stops on the group; B resolves it by taking its own side, in one round
+    stopped = _run(b)
+    assert stopped.has_conflicts is True
+    settled = _run(b, decide=decision(take_chooser("local")), resolving=True)
+
+    # then — no conflict is left, B keeps its own version of the group, and A converges to it
+    assert settled.has_conflicts is False
+    assert b'"b": 2' in _read(b, KEYBINDINGS)
+    assert _read(b, KEYBINDINGS).index(b"terminal.clear") < _read(b, KEYBINDINGS).index(b"b.extra")
+    _run(a)
+    assert _read(a, KEYBINDINGS) == _read(b, KEYBINDINGS)
