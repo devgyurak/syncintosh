@@ -469,4 +469,11 @@ def _slot(sequence: list[ElementId], position: int, ordered: list[ElementId], pl
     return len(ordered)
 
 
-__all__ = ["ArrayRule", "GroupConflict", "KeyedMerge", "merge_keyed_array"]
+__all__ = [
+    "ORDER_CONFLICT_REASON",
+    "ArrayRule",
+    "GroupConflict",
+    "KeyedMerge",
+    "OrderConflict",
+    "merge_keyed_array",
+]
