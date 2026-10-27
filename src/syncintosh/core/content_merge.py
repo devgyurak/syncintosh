@@ -121,7 +121,7 @@ def render_merged(
 
 # The reasons a render can refuse, as fixed texts: a reason that echoed the adapter's message could carry a key name,
 # and a conflict must never show a value (AGENTS.md §4).
-RENDER_REFUSED = "this change cannot be written without losing a comment"
+RENDER_REFUSED = "this change cannot be written to this file safely"
 ROUND_TRIP_REFUSED = "the merged result does not render back to itself"
 
 
