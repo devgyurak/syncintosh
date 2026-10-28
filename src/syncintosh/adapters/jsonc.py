@@ -1199,6 +1199,9 @@ CHANGED_WITH_NOTE_REFUSED = (
     "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
 )
 
+# Two edits to one array overlap, so one of them would be dropped; the text names only the cause.
+EDIT_OVERLAP_REFUSED = "two edits to this array overlap, so it cannot be written without losing one of them"
+
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
 )
@@ -1363,11 +1366,18 @@ def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
 
 
 def _apply_edits(text: str, edits: list[_Edit]) -> str:
-    """Apply the edits in offset order, skipping any that overlap an earlier one."""
+    """Apply the edits in offset order.
+
+    An edit that starts inside an earlier one is skipped only when it takes nothing with it: it removes text the earlier
+    edit already removed. One that carries text, or reaches past the earlier edit, would be lost without a trace, so it
+    refuses the render instead.
+    """
     pieces: list[str] = []
     cursor = 0
     for edit in sorted(edits, key=lambda item: item.start):
         if edit.start < cursor:
+            if edit.text or edit.end > cursor:
+                raise RenderRefused(EDIT_OVERLAP_REFUSED)
             continue
         pieces.append(text[cursor : edit.start])
         pieces.append(edit.text)
@@ -1378,6 +1388,7 @@ def _apply_edits(text: str, edits: list[_Edit]) -> str:
 
 __all__ = [
     "CHANGED_WITH_NOTE_REFUSED",
+    "EDIT_OVERLAP_REFUSED",
     "UNRULED_REMOVAL_REFUSED",
     "VALUE_WITH_NOTE_REFUSED",
     "JsoncAdapter",

@@ -839,6 +839,37 @@ def test_an_insertion_where_two_deletions_meet_is_not_lost() -> None:
     assert result == "X9"
 
 
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [jsonc._Edit(0, 6, ""), jsonc._Edit(3, 3, "X")],
+        [jsonc._Edit(0, 6, ""), jsonc._Edit(3, 9, "")],
+    ],
+    ids=["insertion-inside", "reaching-past"],
+)
+def test_an_edit_that_would_be_dropped_refuses_the_render(edits: list[Any]) -> None:
+    # when & then — the edit starts inside an earlier one and carries text or reaches past it, so it is not skipped
+    with pytest.raises(RenderRefused) as refused:
+        jsonc._apply_edits("0123456789", edits)
+    assert refused.value.reason == jsonc.EDIT_OVERLAP_REFUSED
+
+
+@pytest.mark.parametrize(
+    ("edits", "expected"),
+    [
+        ([jsonc._Edit(0, 6, ""), jsonc._Edit(2, 4, "")], "6789"),
+        ([jsonc._Edit(0, 6, "Y"), jsonc._Edit(2, 4, "")], "Y6789"),
+    ],
+    ids=["removal-inside-a-removal", "removal-inside-a-replacement"],
+)
+def test_a_removal_inside_an_earlier_edit_is_skipped_harmlessly(edits: list[Any], expected: str) -> None:
+    # when — the second edit removes only text the first one already took
+    result = jsonc._apply_edits("0123456789", edits)
+
+    # then
+    assert result == expected
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
