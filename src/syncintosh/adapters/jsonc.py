@@ -974,6 +974,17 @@ class _Comments:
             return first.start
         return None
 
+    def opened_above(self, line_start: int, line_end: int) -> int | None:
+        """Where the comment that covers a line's first character began, when that was on an earlier line.
+
+        `None` for a line whose first character is code, a space-only line, or a comment that begins on the line.
+        """
+        first = next(
+            (i for i in range(line_start, line_end) if self.text[i] not in _SPACES and self.text[i] != "\r"), None
+        )
+        span = None if first is None else self._span_at(first)
+        return span.start if span is not None and span.start < line_start else None
+
     @cached_property
     def _starts(self) -> tuple[int, ...]:
         """The start of each comment span; the parser records them in text order, so this is sorted."""
@@ -1054,13 +1065,14 @@ def _widened_deletions(
 
 
 def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The ranges in order, with overlapping or touching ones merged, so no two deletions overlap.
+    """The ranges in order, with overlapping ones merged, so no two deletions overlap.
 
-    `_apply_edits` skips an edit that starts inside an earlier one, so an overlap would drop a deletion silently.
+    Ranges that only touch stay apart: an insertion at the offset where they meet would fall inside a merged range, and
+    an edit that starts inside an earlier one is not applied (see `_apply_edits`).
     """
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
-        if merged and start <= merged[-1][1]:
+        if merged and start < merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
@@ -1110,6 +1122,38 @@ def _opens_array(text: str, comments: _Comments, start: int) -> bool:
     return start > 0 and _code_above(text, comments, start - 1).endswith("[")
 
 
+def _blank_opens(text: str, comments: _Comments, position: int) -> bool:
+    """True when the line right above `position` is blank and the line that opens the array stands right above it.
+
+    A blank line there would sit against the opening bracket if the edit at `position` took the element below it.
+    """
+    blank_start = _line_start(text, position - 1) if position > 0 else 0
+    return (
+        blank_start > 0
+        and _is_blank(text, comments, blank_start, position - 1)
+        and _is_opening_line(text, comments, blank_start - 1)
+    )
+
+
+def _is_opening_line(text: str, comments: _Comments, line_end: int) -> bool:
+    """True when the line ending at `line_end` opens the array: its code ends in `[`.
+
+    A block comment that opens on that line and runs over the next ones belongs to it, so the lines of that comment are
+    walked up. A comment of its own on a line of its own, a section title, stands between the bracket and what follows,
+    so it ends the walk with no.
+    """
+    while line_end >= 0:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code.endswith("[")
+        opened = comments.opened_above(line_start, line_end)
+        if opened is None:
+            return False
+        line_end = _line_end(text, opened)
+    return False
+
+
 def _code_above(text: str, comments: _Comments, line_end: int) -> str:
     """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
 
@@ -1144,12 +1188,18 @@ def _bracket_below(text: str, comments: _Comments, position: int) -> bool:
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
     """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
-    A blank line that sits between two unaffected elements is left alone. A blank line is removed when the deletion
-    would put it right after the opening `[`, right before the closing `]`, or beside another blank line; but not when
-    an insertion goes in at the deletion's first offset, since that blank line then separates a section title from the
-    new binding. Brackets are read with their comments taken out, so `[ // cols` opens an array and `// [` does not.
-    A blank line before the deletion is its own range, not part of it, so an insertion at the same offset is not
-    skipped. The lines are read from the text as it stands, which is the text the deletion is made in.
+    A blank line that sits between two unaffected elements is left alone. Of the blank lines beside the deletion:
+
+    - The one right above it goes when the line that opens the array stands right above that blank line, so it would
+      sit against `[`; or when the closing `]` follows the deletion and no insertion goes in at its first offset.
+    - The one right below it goes when a blank line or the opening `[` is above the deletion, or the closing `]` is
+      below it, so it would sit beside another blank line or against a bracket. An insertion at the deletion's first
+      offset keeps it unless `]` follows (`closes or not inserted`): the blank line then separates the new binding from
+      what comes next, a section title say, and only against `]` does it have nothing to separate.
+
+    Brackets are read with their comments taken out, so `[ // cols` opens an array and `// [` does not. A blank line
+    above the deletion is its own range, not part of it, so an insertion at the same offset is not skipped. The lines
+    are read from the text as it stands, which is the text the deletion is made in.
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
@@ -1162,7 +1212,7 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and closes and not inserted:
+    if blank_before and ((closes and not inserted) or _blank_opens(text, comments, start)):
         pieces.append((_line_start(text, start - 1), start))
     if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end
@@ -1197,6 +1247,9 @@ VALUE_WITH_NOTE_REFUSED = (
 CHANGED_WITH_NOTE_REFUSED = (
     "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
 )
+
+# Two edits to one array overlap, so one of them would be dropped; the text names only the cause.
+EDIT_OVERLAP_REFUSED = "two edits to this array overlap, so it cannot be written without losing one of them"
 
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
@@ -1362,11 +1415,18 @@ def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
 
 
 def _apply_edits(text: str, edits: list[_Edit]) -> str:
-    """Apply the edits in offset order, skipping any that overlap an earlier one."""
+    """Apply the edits in offset order.
+
+    An edit that starts inside an earlier one is skipped only when it takes nothing with it: it removes text the earlier
+    edit already removed. One that carries text, or reaches past the earlier edit, would be lost without a trace, so it
+    refuses the render instead.
+    """
     pieces: list[str] = []
     cursor = 0
     for edit in sorted(edits, key=lambda item: item.start):
         if edit.start < cursor:
+            if edit.text or edit.end > cursor:
+                raise RenderRefused(EDIT_OVERLAP_REFUSED)
             continue
         pieces.append(text[cursor : edit.start])
         pieces.append(edit.text)
@@ -1377,6 +1437,7 @@ def _apply_edits(text: str, edits: list[_Edit]) -> str:
 
 __all__ = [
     "CHANGED_WITH_NOTE_REFUSED",
+    "EDIT_OVERLAP_REFUSED",
     "UNRULED_REMOVAL_REFUSED",
     "VALUE_WITH_NOTE_REFUSED",
     "JsoncAdapter",

@@ -672,7 +672,7 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     # given — a binding under two thousand note lines, and the merge moves it below its neighbour
     notes = "".join(f"    // note line {index}\n" for index in range(2000))
     template = "[\n" + notes + '    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]\n'
-    started = time.perf_counter()
+    started = time.process_time()
 
     # when
     rendered = _render(template, [_b("y"), _a("x")])
@@ -681,7 +681,7 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     assert rendered.index('{ "key": "b"') < rendered.index("// note line 0") < rendered.index('{ "key": "a"')
     assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
     assert rendered.count("// note line") == 2000
-    assert time.perf_counter() - started < 2.0
+    assert time.process_time() - started < 2.0
 
 
 def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_removed_one_was() -> None:
@@ -783,27 +783,7 @@ def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line
     assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
 
 
-@pytest.mark.parametrize(
-    ("ranges", "merged"),
-    [
-        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
-        ([(0, 5), (5, 9)], [(0, 9)]),
-        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
-        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
-    ],
-    ids=["disjoint", "touching", "overlapping", "nested-and-unordered"],
-)
-def test_overlapping_deletions_merge_into_one_range_before_they_are_applied(
-    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
-) -> None:
-    # when
-    result = jsonc._union(ranges)
-
-    # then — the ranges come out in order and no two of them overlap
-    assert result == merged
-
-
-def test_a_blank_line_above_a_removed_group_goes_with_the_group() -> None:
+def test_the_blank_line_between_two_removed_bindings_goes_when_a_blank_line_stands_above_them() -> None:
     # given — a blank line sits above `k3`, and one more blank line sits between `k3` and `k1`; both are removed, and
     # `k2` is merged in where `k3` was
     template = '[\n    // S0\n\n    {"key": "k3", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S3\n]'
@@ -824,6 +804,202 @@ def test_a_removed_group_at_the_opening_bracket_takes_the_blank_line_between_its
 
     # then — the group sits against the opening bracket, so its inner blank line goes
     assert rendered == '[\n    {"key": "new", "command": "w"}\n    // S2\n]'
+
+
+@pytest.mark.parametrize(
+    ("ranges", "merged"),
+    [
+        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
+        ([(0, 5), (5, 9)], [(0, 5), (5, 9)]),
+        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
+        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
+    ],
+    ids=["disjoint", "touching-stay-apart", "overlapping", "nested-and-unordered"],
+)
+def test_deletion_ranges_merge_only_where_they_overlap(
+    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
+) -> None:
+    # when
+    result = jsonc._union(ranges)
+
+    # then — the ranges come out in order, and two that only touch are not joined
+    assert result == merged
+
+
+def test_an_insertion_where_two_deletions_meet_is_not_lost() -> None:
+    # given — two deletions that meet at offset 5, and an insertion at that offset
+    text = "0123456789"
+    insertion = jsonc._Edit(5, 5, "X")
+    deletions = [jsonc._Edit(start, end, "") for start, end in jsonc._union([(0, 5), (5, 9)])]
+
+    # when
+    result = jsonc._apply_edits(text, [insertion, *deletions])
+
+    # then — the insertion lands between the two deleted stretches
+    assert result == "X9"
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [jsonc._Edit(0, 6, ""), jsonc._Edit(3, 3, "X")],
+        [jsonc._Edit(0, 6, ""), jsonc._Edit(3, 9, "")],
+    ],
+    ids=["insertion-inside", "reaching-past"],
+)
+def test_an_edit_that_would_be_dropped_refuses_the_render(edits: list[Any]) -> None:
+    # when & then — the edit starts inside an earlier one and carries text or reaches past it, so it is not skipped
+    with pytest.raises(RenderRefused) as refused:
+        jsonc._apply_edits("0123456789", edits)
+    assert refused.value.reason == jsonc.EDIT_OVERLAP_REFUSED
+
+
+@pytest.mark.parametrize(
+    ("edits", "expected"),
+    [
+        ([jsonc._Edit(0, 6, ""), jsonc._Edit(2, 4, "")], "6789"),
+        ([jsonc._Edit(0, 6, "Y"), jsonc._Edit(2, 4, "")], "Y6789"),
+    ],
+    ids=["removal-inside-a-removal", "removal-inside-a-replacement"],
+)
+def test_a_removal_inside_an_earlier_edit_is_skipped_harmlessly(edits: list[Any], expected: str) -> None:
+    # when — the second edit removes only text the first one already took
+    result = jsonc._apply_edits("0123456789", edits)
+
+    # then
+    assert result == expected
+
+
+def _row(key: str, comma: str = ",") -> str:
+    """One one-line binding with the `c` command, indented as the tests' templates are."""
+    return f'    {{"key": "{key}", "command": "c"}}{comma}'
+
+
+def _keys(*keys: str) -> list[dict[str, object]]:
+    return [{"key": key, "command": "c"} for key in keys]
+
+
+@pytest.mark.parametrize(
+    ("template", "keys", "expected"),
+    [
+        ("[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]", ("a",), "[\n" + _row("a", "") + "\n]"),
+        (
+            "[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a", "x"),
+            "[\n" + _row("a") + "\n" + _row("x", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("n", "a"),
+            "[\n" + _row("n") + "\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[ // cols\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[ // cols\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[ /* a\n\n   b */\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[ /* a\n\n   b */\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n    // note on x\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("x") + "\n\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n" + _row("a", "") + "\n]",
+        ),
+    ],
+    ids=[
+        "removed",
+        "moved",
+        "replaced",
+        "comment-on-bracket",
+        "block-comment-on-bracket",
+        "note-removed-too",
+        "blank-after",
+    ],
+)
+def test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_an_edit_takes(
+    template: str, keys: tuple[str, ...], expected: str
+) -> None:
+    # when — the binding right under the blank line is removed, moved away, or replaced
+    rendered = _render(template, _keys(*keys))
+
+    # then — the blank line would sit against the opening bracket, so it goes with the binding
+    assert rendered == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "keys", "expected"),
+    [
+        (
+            "[\n\n" + _row("a") + "\n" + _row("x", "") + "\n]",
+            ("a",),
+            "[\n\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("a", "") + "\n]",
+            ("n", "a"),
+            "[\n\n" + _row("n") + "\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n    // S\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n    // S\n\n" + _row("a", "") + "\n]",
+        ),
+    ],
+    ids=["later-binding-removed", "binding-added-above", "title-between"],
+)
+def test_a_blank_line_after_the_opening_bracket_that_no_edit_touches_stays(
+    template: str, keys: tuple[str, ...], expected: str
+) -> None:
+    # when — an edit elsewhere, an addition above the first binding, or a removal below a section title
+    rendered = _render(template, _keys(*keys))
+
+    # then — the blank line is the user's and nothing took the binding it was set before
+    assert rendered == expected
+
+
+def test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_in_crlf() -> None:
+    # given — the same layout as the removal case, with CRLF line endings
+    template = ("[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]").replace("\n", "\r\n")
+
+    # when
+    rendered = _render(template, _keys("a"))
+
+    # then
+    assert rendered == "[\r\n" + _row("a", "") + "\r\n]"
+
+
+@st.composite
+def _lead_case(draw: st.DrawFn) -> tuple[str, bool, list[bool]]:
+    """A template of one-line bindings, optionally with a blank line after `[`, and which of the bindings are kept."""
+    count = draw(st.integers(min_value=1, max_value=5))
+    lead = draw(st.booleans())
+    keep = draw(st.lists(st.booleans(), min_size=count, max_size=count))
+    newline = draw(st.sampled_from(["\n", "\r\n"]))
+    rows = [_row(f"k{index}", "," if index < count - 1 else "") for index in range(count)]
+    return newline.join(["[", *([""] if lead else []), *rows, "]"]), lead, keep
+
+
+@given(case=_lead_case())
+def test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays(case) -> None:
+    # given — bindings after an optional blank line, some of them removed
+    template, lead, keep = case
+    value = _keys(*[f"k{index}" for index, kept in enumerate(keep) if kept])
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then — a render exists, and a blank line follows `[` only if the template had one and the first binding is kept
+    assert rendered is not None
+    lines = rendered.replace("\r\n", "\n").split("\n")
+    assert (len(lines) > 1 and lines[1].strip() == "") == (lead and keep[0])
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
@@ -946,19 +1122,23 @@ def _binding_array(count: int) -> tuple[str, list[Any]]:
 
 
 def _best_render_seconds(count: int) -> float:
-    """The fastest of three renders of a `count`-binding array, each binding moved by the merge."""
+    """The fastest of three renders of a `count`-binding array, each binding moved by the merge.
+
+    It is measured in CPU time of this process, not wall-clock time: other work on the machine stretches wall-clock time
+    of a short render several times over, and the ratio of two of them with it.
+    """
     template, value = _binding_array(count)
     timings = []
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         _render(template, value)
-        timings.append(time.perf_counter() - started)
+        timings.append(time.process_time() - started)
     return min(timings)
 
 
 def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
-    # when — the same merge at 400 and at 3200 bindings (eight times the size); the time ratio is compared, so the test
-    # does not depend on the machine's speed
+    # when — the same merge at 400 and at 3200 bindings (eight times the size); the CPU-time ratio is compared, so the
+    # test depends neither on the machine's speed nor much on its load
     ratio = _best_render_seconds(3200) / _best_render_seconds(400)
 
     # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
