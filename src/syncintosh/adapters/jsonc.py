@@ -974,6 +974,17 @@ class _Comments:
             return first.start
         return None
 
+    def opened_above(self, line_start: int, line_end: int) -> int | None:
+        """Where the comment that covers a line's first character began, when that was on an earlier line.
+
+        `None` for a line whose first character is code, a space-only line, or a comment that begins on the line.
+        """
+        first = next(
+            (i for i in range(line_start, line_end) if self.text[i] not in _SPACES and self.text[i] != "\r"), None
+        )
+        span = None if first is None else self._span_at(first)
+        return span.start if span is not None and span.start < line_start else None
+
     @cached_property
     def _starts(self) -> tuple[int, ...]:
         """The start of each comment span; the parser records them in text order, so this is sorted."""
@@ -1111,6 +1122,38 @@ def _opens_array(text: str, comments: _Comments, start: int) -> bool:
     return start > 0 and _code_above(text, comments, start - 1).endswith("[")
 
 
+def _blank_opens(text: str, comments: _Comments, position: int) -> bool:
+    """True when the line right above `position` is blank and the line that opens the array stands right above it.
+
+    A blank line there would sit against the opening bracket if the edit at `position` took the element below it.
+    """
+    blank_start = _line_start(text, position - 1) if position > 0 else 0
+    return (
+        blank_start > 0
+        and _is_blank(text, comments, blank_start, position - 1)
+        and _is_opening_line(text, comments, blank_start - 1)
+    )
+
+
+def _is_opening_line(text: str, comments: _Comments, line_end: int) -> bool:
+    """True when the line ending at `line_end` opens the array: its code ends in `[`.
+
+    A block comment that opens on that line and runs over the next ones belongs to it, so the lines of that comment are
+    walked up. A comment of its own on a line of its own, a section title, stands between the bracket and what follows,
+    so it ends the walk with no.
+    """
+    while line_end >= 0:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code.endswith("[")
+        opened = comments.opened_above(line_start, line_end)
+        if opened is None:
+            return False
+        line_end = _line_end(text, opened)
+    return False
+
+
 def _code_above(text: str, comments: _Comments, line_end: int) -> str:
     """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
 
@@ -1163,7 +1206,7 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and closes and not inserted:
+    if blank_before and ((closes and not inserted) or _blank_opens(text, comments, start)):
         pieces.append((_line_start(text, start - 1), start))
     if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end

@@ -870,6 +870,138 @@ def test_a_removal_inside_an_earlier_edit_is_skipped_harmlessly(edits: list[Any]
     assert result == expected
 
 
+def _row(key: str, comma: str = ",") -> str:
+    """One one-line binding with the `c` command, indented as the tests' templates are."""
+    return f'    {{"key": "{key}", "command": "c"}}{comma}'
+
+
+def _keys(*keys: str) -> list[dict[str, object]]:
+    return [{"key": key, "command": "c"} for key in keys]
+
+
+@pytest.mark.parametrize(
+    ("template", "keys", "expected"),
+    [
+        ("[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]", ("a",), "[\n" + _row("a", "") + "\n]"),
+        (
+            "[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a", "x"),
+            "[\n" + _row("a") + "\n" + _row("x", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("n", "a"),
+            "[\n" + _row("n") + "\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[ // cols\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[ // cols\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[ /* a\n\n   b */\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[ /* a\n\n   b */\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n    // note on x\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("x") + "\n\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n" + _row("a", "") + "\n]",
+        ),
+    ],
+    ids=[
+        "removed",
+        "moved",
+        "replaced",
+        "comment-on-bracket",
+        "block-comment-on-bracket",
+        "note-removed-too",
+        "blank-after",
+    ],
+)
+def test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_an_edit_takes(
+    template: str, keys: tuple[str, ...], expected: str
+) -> None:
+    # when — the binding right under the blank line is removed, moved away, or replaced
+    rendered = _render(template, _keys(*keys))
+
+    # then — the blank line would sit against the opening bracket, so it goes with the binding
+    assert rendered == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "keys", "expected"),
+    [
+        (
+            "[\n\n" + _row("a") + "\n" + _row("x", "") + "\n]",
+            ("a",),
+            "[\n\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n\n" + _row("a", "") + "\n]",
+            ("n", "a"),
+            "[\n\n" + _row("n") + "\n" + _row("a", "") + "\n]",
+        ),
+        (
+            "[\n    // S\n\n" + _row("x") + "\n" + _row("a", "") + "\n]",
+            ("a",),
+            "[\n    // S\n\n" + _row("a", "") + "\n]",
+        ),
+    ],
+    ids=["later-binding-removed", "binding-added-above", "title-between"],
+)
+def test_a_blank_line_after_the_opening_bracket_that_no_edit_touches_stays(
+    template: str, keys: tuple[str, ...], expected: str
+) -> None:
+    # when — an edit elsewhere, an addition above the first binding, or a removal below a section title
+    rendered = _render(template, _keys(*keys))
+
+    # then — the blank line is the user's and nothing took the binding it was set before
+    assert rendered == expected
+
+
+def test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_in_crlf() -> None:
+    # given — the same layout as the removal case, with CRLF line endings
+    template = ("[\n\n" + _row("x") + "\n" + _row("a", "") + "\n]").replace("\n", "\r\n")
+
+    # when
+    rendered = _render(template, _keys("a"))
+
+    # then
+    assert rendered == "[\r\n" + _row("a", "") + "\r\n]"
+
+
+@st.composite
+def _lead_case(draw: st.DrawFn) -> tuple[str, bool, list[bool]]:
+    """A template of one-line bindings, optionally with a blank line after `[`, and which of the bindings are kept."""
+    count = draw(st.integers(min_value=1, max_value=5))
+    lead = draw(st.booleans())
+    keep = draw(st.lists(st.booleans(), min_size=count, max_size=count))
+    newline = draw(st.sampled_from(["\n", "\r\n"]))
+    rows = [_row(f"k{index}", "," if index < count - 1 else "") for index in range(count)]
+    return newline.join(["[", *([""] if lead else []), *rows, "]"]), lead, keep
+
+
+@given(case=_lead_case())
+def test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays(case) -> None:
+    # given — bindings after an optional blank line, some of them removed
+    template, lead, keep = case
+    value = _keys(*[f"k{index}" for index, kept in enumerate(keep) if kept])
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then — a render exists, and a blank line follows `[` only if the template had one and the first binding is kept
+    assert rendered is not None
+    lines = rendered.replace("\r\n", "\n").split("\n")
+    assert (len(lines) > 1 and lines[1].strip() == "") == (lead and keep[0])
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
