@@ -672,7 +672,7 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     # given — a binding under two thousand note lines, and the merge moves it below its neighbour
     notes = "".join(f"    // note line {index}\n" for index in range(2000))
     template = "[\n" + notes + '    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]\n'
-    started = time.perf_counter()
+    started = time.process_time()
 
     # when
     rendered = _render(template, [_b("y"), _a("x")])
@@ -681,7 +681,7 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     assert rendered.index('{ "key": "b"') < rendered.index("// note line 0") < rendered.index('{ "key": "a"')
     assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
     assert rendered.count("// note line") == 2000
-    assert time.perf_counter() - started < 2.0
+    assert time.process_time() - started < 2.0
 
 
 def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_removed_one_was() -> None:
@@ -990,19 +990,23 @@ def _binding_array(count: int) -> tuple[str, list[Any]]:
 
 
 def _best_render_seconds(count: int) -> float:
-    """The fastest of three renders of a `count`-binding array, each binding moved by the merge."""
+    """The fastest of three renders of a `count`-binding array, each binding moved by the merge.
+
+    It is measured in CPU time of this process, not wall-clock time: other work on the machine stretches wall-clock time
+    of a short render several times over, and the ratio of two of them with it.
+    """
     template, value = _binding_array(count)
     timings = []
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         _render(template, value)
-        timings.append(time.perf_counter() - started)
+        timings.append(time.process_time() - started)
     return min(timings)
 
 
 def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
-    # when — the same merge at 400 and at 3200 bindings (eight times the size); the time ratio is compared, so the test
-    # does not depend on the machine's speed
+    # when — the same merge at 400 and at 3200 bindings (eight times the size); the CPU-time ratio is compared, so the
+    # test depends neither on the machine's speed nor much on its load
     ratio = _best_render_seconds(3200) / _best_render_seconds(400)
 
     # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
