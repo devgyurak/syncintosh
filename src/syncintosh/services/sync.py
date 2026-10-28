@@ -841,7 +841,8 @@ def _content_detail(
     """
     named = dict.fromkeys(path_label(path, element, when_tag=when_tag) for path, element in addresses)
     detail = reason if not named else f"{reason}: {', '.join(named)}"
-    # A refusal the adapter gave (its fixed text) is said, so the person knows why no pick would settle it.
+    # A refusal the adapter gave (its fixed text) is said, so the person knows why the conflict stays one. An order
+    # conflict is settled by choosing a whole side, not by a binding pick, and its reason says so.
     return f"{detail} ({why})" if why else detail
 
 
@@ -1118,6 +1119,12 @@ def _settle_content(
     A whole-file pick settles the file outright; otherwise each key pick settles its key, and what
     the merge still cannot settle is reported with the choices it needs. Every settled result,
     however it was settled, goes through the syntax check.
+
+    Picks are applied in rounds: each merge's views are read, the picks for views not yet settled are
+    applied, and the merge runs again, until a round applies no new pick or the cap is reached. This is a
+    guard, not a path the core takes today: a key pick has not been seen to expose a conflict the first
+    merge lacked (checked on randomly generated documents, not by a construction in the core), so the
+    rounds only matter for a merge that does, and the cap bounds them whatever the merge does.
     """
     adapter = presets.adapter_for(fmt)
     policy = presets.policy_for(path)

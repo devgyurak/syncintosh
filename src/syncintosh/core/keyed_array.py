@@ -19,7 +19,9 @@ the order cannot be decided, so the caller falls back to the whole-array compare
 
 A few arrays cannot be read this way, and :func:`merge_keyed_array` returns ``None`` for them, which
 the caller treats as a whole-array conflict: an element that is not an object, a field that is missing
-without being optional or is not a string, two elements with one identity, or the reorder above.
+without being optional or is not a string, or two elements with one identity. The reorder above returns an
+:class:`OrderConflict` instead. It is also a whole-array conflict, but it carries
+:data:`ORDER_CONFLICT_REASON`, and no per-group pick settles it: only choosing a whole side does.
 
 Stdlib only, and no I/O (``AGENTS.md`` §2.1, §2.2).
 """
@@ -343,7 +345,8 @@ def _ordered(
 
     The elements that survive, exist on all three sides, and are not set aside carry the order ("anchors"). A set-aside
     binding is placed from the side its conflict was settled to (`owners`), in that side's order, and the rest follow
-    the local, then the remote, sequence. So settling a conflict never turns the array into a whole-array conflict.
+    the local, then the remote, sequence. Settling a conflict does not by itself make the array one: only the
+    anchors' own order can conflict, and that returns an `OrderConflict`.
     """
     node_of = dict(chosen)
     local_set, remote_set = set(local_ids), set(remote_ids)

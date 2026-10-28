@@ -100,7 +100,8 @@ class ContentMerge:
     data: bytes = field(repr=False)
     conflicted: bool
     conflict_addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
-    # Why a structural merge refused (a fixed text from the adapter, never a value); empty when it did not.
+    # Why the merge could not settle the file key by key: a refusal the adapter named, or the fixed reason of an order
+    # conflict (`ORDER_CONFLICT_REASON`). Always a fixed text, never a value; empty when there is no such reason.
     reason: str = ""
 
 
