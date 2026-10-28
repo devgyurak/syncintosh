@@ -782,6 +782,21 @@ def test_removing_two_bindings_above_a_blank_line_and_the_bracket_leaves_no_blan
     assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
 
 
+def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line_before_the_bracket() -> None:
+    # given — `x`, `y` and `w` are each one blank line apart, and a blank line sits before the bracket;
+    # only `a` is kept
+    template = (
+        '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"},\n\n'
+        '    {"key": "y", "command": "c"},\n\n    {"key": "w", "command": "c"}\n\n]'
+    )
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "c"}])
+
+    # then — the group goes as one piece, and no blank line is left in front of the bracket
+    assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed

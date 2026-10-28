@@ -1072,9 +1072,7 @@ def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) 
     That is when a blank line or the opening bracket stands above the group, or the closing bracket stands below it.
     """
     blank_above = first > 0 and _is_blank(text, comments, _line_start(text, first - 1), first - 1)
-    after_end = _next_line_start(text, last)
-    closes = last < len(text) and comments.without_comments(last, after_end).strip().startswith("]")
-    return blank_above or _opens_array(text, comments, first) or closes
+    return blank_above or _opens_array(text, comments, first) or _bracket_below(text, comments, last)
 
 
 def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
@@ -1145,8 +1143,9 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = _opens_array(text, comments, start)
     closes = _bracket_below(text, comments, end)
-    # An insertion at this offset puts the new binding where the deleted one was, so the blank line after the deletion
-    # separates that binding from whatever follows (a section title, say) and must stay.
+    # An insertion at this offset puts the new binding where the deleted one was. The blank line after the deletion then
+    # separates that binding from whatever follows (a section title, say) and must stay, unless the closing bracket
+    # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and not inserted:
