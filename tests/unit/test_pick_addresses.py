@@ -148,3 +148,89 @@ def test_the_nested_pick_property_is_exercised_by_many_documents() -> None:
     # then — many cases have a conflict that a pick settled, and none adds an address
     assert sum(exercised for exercised, _ in cases) > 100
     assert [seed for seed, (_, added) in enumerate(cases) if added] == []
+
+
+def _perturb(rng: random.Random, node: Any) -> Any:
+    """A changed copy of a document: bindings gain args or go, arrays reorder, and scalars change.
+
+    Both sides are made this way from one document, so the same binding is often changed on both sides and the merge
+    has group conflicts to pick from, at the top level and one level down.
+    """
+    if isinstance(node, dict):
+        return {key: _perturb(rng, value) for key, value in node.items()}
+    if isinstance(node, list) and node and isinstance(node[0], dict):
+        bindings = [dict(item) for item in node if rng.random() > 0.15]
+        for binding in bindings:
+            if rng.random() < 0.5:
+                binding["args"] = rng.choice([1, 2])
+        if rng.random() < 0.3:
+            rng.shuffle(bindings)
+        return bindings
+    return rng.choice([1, 2, "x"]) if rng.random() < 0.3 else node
+
+
+def _bindings(rng: random.Random) -> list[dict[str, object]]:
+    return [{"key": key, "command": command} for key, command in rng.sample(_DOC_POOL, rng.randint(1, 3))]
+
+
+def _related_doc(rng: random.Random) -> dict[str, object]:
+    """A document whose arrays always hold bindings, at the top level and one level down, so both sides have
+    bindings to change and group conflicts are common."""
+    doc: dict[str, object] = {"a": _bindings(rng), "b": _bindings(rng)}
+    doc["c"] = {"a": _bindings(rng), "b": _bindings(rng)} if rng.random() < 0.5 else rng.choice([1, 2])
+    return doc
+
+
+def _related_case(seed: int) -> tuple[bool, bool, bool, list[tuple[Any, Any]]]:
+    """One merge of two changed copies of a document, with some of its conflicts picked, and some left open.
+
+    Returns whether a group pick applied at the top level, whether one applied one level down, whether a conflict stayed
+    open with a pick applied (a partial pick), and the addresses the picks added.
+    """
+    rng = random.Random(seed)
+    document = _related_doc(rng)
+    base = tree_from_value(document)
+    local = tree_from_value(_perturb(rng, document))
+    remote = tree_from_value(_perturb(rng, document))
+    first = merge_tree(base, local, remote, keyed=_DOC_KEYED)
+    before = {(conflict.path, conflict.element) for conflict in first.conflicts}
+    choices: dict[tuple[str, ...], Any] = {}
+    element_picks: dict[Any, Any] = {}
+    for conflict in first.conflicts:
+        if rng.random() < 0.4:
+            continue
+        side = rng.choice(["local", "remote"])
+        if conflict.element is None:
+            choices[conflict.path] = side
+        else:
+            key = conflict.element[0][1]
+            proposal = tree_from_value([{"key": key, "command": "proposed"}]).value(())
+            element_picks[(conflict.path, conflict.element)] = proposal if rng.random() < 0.3 else side
+    second = merge_tree(
+        base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
+    )
+    after = {(conflict.path, conflict.element) for conflict in second.conflicts}
+    picked = bool(choices or element_picks)
+    top = any(len(path) == 1 for path, _ in element_picks)
+    nested = any(len(path) == 2 for path, _ in element_picks)
+    return top, nested, picked and bool(after), sorted(after - before, key=repr)
+
+
+@settings(max_examples=300, deadline=None)
+@given(seed=st.integers(min_value=0, max_value=10**6))
+def test_a_pick_never_adds_an_address_when_both_sides_change_the_same_bindings(seed: int) -> None:
+    # when — both sides change shared bindings, some conflicts are picked and some are left open
+    *_, added = _related_case(seed)
+
+    # then — no address appears that the merge did not already have
+    assert added == []
+
+
+def test_the_related_cases_include_top_level_nested_and_partial_picks_in_many_documents() -> None:
+    # when — a fixed run of documents, so the counts are the same on every run
+    cases = [_related_case(seed) for seed in range(400)]
+
+    # then — group picks apply at both levels, and a partial pick (a conflict left open) applies in many documents
+    assert sum(top for top, _, _, _ in cases) >= 100
+    assert sum(nested for _, nested, _, _ in cases) >= 50
+    assert sum(partial for _, _, partial, _ in cases) >= 50
