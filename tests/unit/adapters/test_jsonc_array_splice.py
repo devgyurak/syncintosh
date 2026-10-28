@@ -818,6 +818,29 @@ def test_overlapping_deletions_merge_into_one_range_before_they_are_applied(
     assert result == merged
 
 
+def test_a_blank_line_above_a_removed_group_goes_with_the_group() -> None:
+    # given — a blank line sits above `k3`, and one more blank line sits between `k3` and `k1`; both are removed, and
+    # `k2` is merged in where `k3` was
+    template = '[\n    // S0\n\n    {"key": "k3", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S3\n]'
+
+    # when
+    rendered = _render(template, [{"key": "k2", "command": "w"}])
+
+    # then — the blank line between the two removed bindings goes with the group, so `// S3` sits right under `k2`
+    assert rendered == '[\n    // S0\n\n    {"key": "k2", "command": "w"}\n    // S3\n]'
+
+
+def test_a_removed_group_at_the_opening_bracket_takes_the_blank_line_between_its_parts() -> None:
+    # given — the first two bindings are removed, with one blank line between them; `new` is merged in
+    template = '[\n    {"key": "k0", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S2\n]'
+
+    # when
+    rendered = _render(template, [{"key": "new", "command": "w"}])
+
+    # then — the group sits against the opening bracket, so its inner blank line goes
+    assert rendered == '[\n    {"key": "new", "command": "w"}\n    // S2\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
