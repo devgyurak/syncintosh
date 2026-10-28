@@ -1144,8 +1144,9 @@ def _settle_content(
     key_choices: dict[KeyPath, Side | Proposal] = {}
     element_picks: dict[tuple[KeyPath, ElementId], Side | Proposal] = {}
     applied: set[str] = set()
-    # The views are read again from each merge, so a conflict that a merge shows only after a pick still gets its own
-    # pick. A round that applies no new pick stops the loop, and the cap bounds it whatever the merge does.
+    # The views are read again from each merge, so a conflict that a merge shows still gets its own pick. A pick adds no
+    # conflict address (see the docstring), so the loop is a guard: a round that applies no new pick stops it, and the
+    # cap bounds it.
     for _ in range(_MAX_SETTLE_ROUNDS):
         if not merged.conflicted:
             return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
