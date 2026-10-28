@@ -1033,13 +1033,13 @@ def _widened_deletions(
 ) -> list[tuple[int, int]]:
     """The deletions, each widened over the blank lines it would leave beside a bracket or a blank line.
 
-    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. The blank
-    line between them goes with the group only when a blank line or the opening bracket stands above the group, or the
-    closing bracket stands below it (`_gap_goes_with_group`). Otherwise that blank line separates two parts of the
-    array that stay, so each segment is widened on its own and the blank line stays. The neighbours that decide this
-    need not be bindings: a section title or a comment can stand there. A group of three or more deletions is decided
-    once, by its outer neighbours; each segment is then widened by `_widen`, so a middle segment can still take a blank
-    line that touches it.
+    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. A group
+    is either joined or not, decided by `_gap_goes_with_group`: a blank line or the opening bracket above it, or the
+    closing bracket below it. A joined group is widened once, as one range from its first deletion to its last, so the
+    blank line between its parts goes with it. A group that is not joined is widened segment by segment, so the blank
+    line that separates two parts of the array that stay is kept. The neighbours that decide this need not be
+    bindings: a section title or a comment can stand there. Ranges that overlap after widening are merged last
+    (`_union`), so no two deletions overlap.
     """
     groups: list[list[tuple[int, int]]] = []
     for start, end in sorted(spans):
@@ -1050,7 +1050,21 @@ def _widened_deletions(
             groups[-1].append((start, end))
         else:
             groups.append([(start, end)])
-    return [piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)]
+    return _union([piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)])
+
+
+def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges in order, with overlapping or touching ones merged, so no two deletions overlap.
+
+    `_apply_edits` skips an edit that starts inside an earlier one, so an overlap would drop a deletion silently.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _group_pieces(
@@ -1072,9 +1086,7 @@ def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) 
     That is when a blank line or the opening bracket stands above the group, or the closing bracket stands below it.
     """
     blank_above = first > 0 and _is_blank(text, comments, _line_start(text, first - 1), first - 1)
-    after_end = _next_line_start(text, last)
-    closes = last < len(text) and comments.without_comments(last, after_end).strip().startswith("]")
-    return blank_above or _opens_array(text, comments, first) or closes
+    return blank_above or _opens_array(text, comments, first) or _bracket_below(text, comments, last)
 
 
 def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
@@ -1145,13 +1157,14 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = _opens_array(text, comments, start)
     closes = _bracket_below(text, comments, end)
-    # An insertion at this offset puts the new binding where the deleted one was, so the blank line after the deletion
-    # separates that binding from whatever follows (a section title, say) and must stay.
+    # An insertion at this offset puts the new binding where the deleted one was. The blank line after the deletion then
+    # separates that binding from whatever follows (a section title, say) and must stay, unless the closing bracket
+    # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and not inserted:
         pieces.append((_line_start(text, start - 1), start))
-    if blank_after and (blank_before or opens) and not inserted:
+    if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end
     pieces.append((start, end))
     return pieces

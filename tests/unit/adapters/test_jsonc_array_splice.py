@@ -16,6 +16,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+from syncintosh.adapters import jsonc
 from syncintosh.adapters.jsonc import (
     CHANGED_WITH_NOTE_REFUSED,
     UNRULED_REMOVAL_REFUSED,
@@ -694,21 +695,6 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
-def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_between_them() -> None:
-    # given — the first bindings are removed and `a` is merged in; the blank line above `// S4` is the one the removed
-    # `d` had, and it separates the title from the new binding
-    template = (
-        '[\n    {"key": "c", "command": "y"},\n    /* N1 */\n    {"key": "b", "command": "z"},\n'
-        '    {"key": "c", "command": "x"},\n\n    // S4\n\n    {"key": "d", "command": "z"}\n]'
-    )
-
-    # when
-    rendered = _render(template, [{"key": "a", "command": "z"}])
-
-    # then — the new binding is followed by a blank line and the title; nothing is left glued to the title
-    assert rendered == '[\n    {"key": "a", "command": "z"}\n\n    // S4\n]'
-
-
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_in_both_line_endings(newline: str) -> None:
     # given — the same layout as the LF case, written with CRLF line endings
@@ -744,6 +730,100 @@ def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_
 
     # then
     assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
+
+
+def test_replacing_the_last_binding_leaves_no_blank_line_before_the_closing_bracket() -> None:
+    # given — a blank line sits between the last binding and the closing bracket
+    template = '[\n    {"key": "x", "command": "c"}\n\n]'
+
+    # when — `x` is replaced by `z`, which is inserted where `x` was
+    rendered = _render(template, [{"key": "z", "command": "c"}])
+
+    # then — the blank line the edit touches goes, so the bracket follows the new binding
+    assert rendered == '[\n    {"key": "z", "command": "c"}\n]'
+
+
+def test_a_binding_replacing_the_last_one_after_a_kept_binding_leaves_no_blank_line_before_the_bracket() -> None:
+    # given — `x` is the last binding, with a blank line before the bracket, and `a` is kept above it
+    template = '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"}\n\n]'
+
+    # when — `x` is replaced by `z`
+    rendered = _render(template, [{"key": "a", "command": "c"}, {"key": "z", "command": "c"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "c"},\n    {"key": "z", "command": "c"}\n]'
+
+
+def test_removing_two_bindings_above_a_blank_line_and_the_bracket_leaves_no_blank_line_before_it() -> None:
+    # given — `x` and `y` are removed; the blank line between them and the one before the bracket both go with them
+    template = (
+        '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"},\n\n'
+        '    {"key": "y", "command": "c"}\n\n]'
+    )
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "c"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
+
+
+def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line_before_the_bracket() -> None:
+    # given — `x`, `y` and `w` are each one blank line apart, and a blank line sits before the bracket;
+    # only `a` is kept
+    template = (
+        '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"},\n\n'
+        '    {"key": "y", "command": "c"},\n\n    {"key": "w", "command": "c"}\n\n]'
+    )
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "c"}])
+
+    # then — the group goes as one piece, and no blank line is left in front of the bracket
+    assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
+
+
+@pytest.mark.parametrize(
+    ("ranges", "merged"),
+    [
+        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
+        ([(0, 5), (5, 9)], [(0, 9)]),
+        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
+        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
+    ],
+    ids=["disjoint", "touching", "overlapping", "nested-and-unordered"],
+)
+def test_overlapping_deletions_merge_into_one_range_before_they_are_applied(
+    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
+) -> None:
+    # when
+    result = jsonc._union(ranges)
+
+    # then — the ranges come out in order and no two of them overlap
+    assert result == merged
+
+
+def test_a_blank_line_above_a_removed_group_goes_with_the_group() -> None:
+    # given — a blank line sits above `k3`, and one more blank line sits between `k3` and `k1`; both are removed, and
+    # `k2` is merged in where `k3` was
+    template = '[\n    // S0\n\n    {"key": "k3", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S3\n]'
+
+    # when
+    rendered = _render(template, [{"key": "k2", "command": "w"}])
+
+    # then — the blank line between the two removed bindings goes with the group, so `// S3` sits right under `k2`
+    assert rendered == '[\n    // S0\n\n    {"key": "k2", "command": "w"}\n    // S3\n]'
+
+
+def test_a_removed_group_at_the_opening_bracket_takes_the_blank_line_between_its_parts() -> None:
+    # given — the first two bindings are removed, with one blank line between them; `new` is merged in
+    template = '[\n    {"key": "k0", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S2\n]'
+
+    # when
+    rendered = _render(template, [{"key": "new", "command": "w"}])
+
+    # then — the group sits against the opening bracket, so its inner blank line goes
+    assert rendered == '[\n    {"key": "new", "command": "w"}\n    // S2\n]'
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
