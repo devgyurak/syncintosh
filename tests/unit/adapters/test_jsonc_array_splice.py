@@ -832,17 +832,6 @@ def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() 
     assert ratio < 20
 
 
-def test_a_blank_line_inside_a_block_comment_after_the_opening_bracket_is_not_a_blank_line() -> None:
-    # given — the opening bracket is followed by a block comment with an empty line inside it
-    template = '[ /* a\n\n   b */\n    { "key": "x", "command": "1" },\n\n    { "key": "y", "command": "2" }\n]'
-
-    # when — `x` is removed
-    rendered = _render(template, [{"key": "y", "command": "2"}])
-
-    # then — the blank line after `x` goes, since the line above it is the array's opening line
-    assert rendered == '[ /* a\n\n   b */\n    { "key": "y", "command": "2" }\n]'
-
-
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
 
 
@@ -863,6 +852,8 @@ def _rich_case(draw: st.DrawFn) -> tuple[str, list[dict[str, object]], list[str]
     )
     bindings: list[dict[str, object]] = []
     fragments: list[str] = []
+    blank_between = draw(st.lists(st.booleans(), min_size=len(base), max_size=len(base)))
+    newline = draw(st.sampled_from(["\n", "\r\n"]))
     lines = ["["]
     for index, ((key, command), (inner, inline, section, has_when)) in enumerate(zip(base, flags, strict=True)):
         binding: dict[str, object] = {"key": key, "command": command}
@@ -874,11 +865,13 @@ def _rich_case(draw: st.DrawFn) -> tuple[str, list[dict[str, object]], list[str]
         fragments.append(body)
         if section:
             lines.extend(["", f"    // section {index}", ""])
+        elif blank_between[index] and index > 0:
+            lines.append("")
         lines.append(f"    // note {index}")
         comma = "," if index < len(base) - 1 else ""
         lines.append(f"    {{{body}}}{comma}" + (f" // inl {index}" if inline else ""))
     lines.append("]")
-    template = "\n".join(lines)
+    template = newline.join(lines)
 
     kept = draw(st.lists(st.integers(min_value=0, max_value=len(base) - 1), unique=True, max_size=len(base)))
     order = draw(st.permutations(kept))
@@ -903,6 +896,58 @@ def _rich_case(draw: st.DrawFn) -> tuple[str, list[dict[str, object]], list[str]
     return template, bindings, fragments, unchanged, value
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_blank_line_between_two_kept_bindings_survives_a_removal_between_them(newline: str) -> None:
+    # given — `x` and `y` sit between `a` and `b` with one blank line between them; both are removed
+    template = (
+        '[\n    { "key": "a", "command": "a" },\n    { "key": "x", "command": "x" },\n\n'
+        '    { "key": "y", "command": "y" },\n    { "key": "b", "command": "b" }\n]'
+    )
+
+    # when
+    rendered = _render(template.replace("\n", newline), [{"key": "a", "command": "a"}, {"key": "b", "command": "b"}])
+
+    # then — `a` and `b` are kept, so the blank line that separated them stays as one line
+    kept_a = '    { "key": "a", "command": "a" },'
+    kept_b = '    { "key": "b", "command": "b" }'
+    assert rendered == f"[{newline}{kept_a}{newline}{newline}{kept_b}{newline}]"
+
+
+def test_a_removal_between_kept_bindings_and_an_insertion_keeps_the_blank_line_before_the_new_binding() -> None:
+    # given — the same layout; `x` and `y` are removed and a new `z` is merged in after `a`
+    template = (
+        '[\n    { "key": "a", "command": "a" },\n    { "key": "x", "command": "x" },\n\n'
+        '    { "key": "y", "command": "y" },\n    { "key": "b", "command": "b" }\n]'
+    )
+
+    # when
+    rendered = _render(
+        template, [{"key": "a", "command": "a"}, {"key": "z", "command": "z"}, {"key": "b", "command": "b"}]
+    )
+
+    # then — the blank line stays between `a` and the new binding, and no line is left against a bracket
+    assert rendered == (
+        '[\n    { "key": "a", "command": "a" },\n\n'
+        '    {"key": "z", "command": "z"},\n    { "key": "b", "command": "b" }\n]'
+    )
+
+
+def test_a_blank_line_inside_a_block_comment_after_the_opening_bracket_is_not_a_blank_line() -> None:
+    # given — the opening bracket is followed by a block comment with an empty line inside it
+    template = '[ /* a\n\n   b */\n    { "key": "x", "command": "1" },\n\n    { "key": "y", "command": "2" }\n]'
+
+    # when — `x` is removed
+    rendered = _render(template, [{"key": "y", "command": "2"}])
+
+    # then — the blank line after `x` goes, since the line above it is the array's opening line
+    assert rendered == '[ /* a\n\n   b */\n    { "key": "y", "command": "2" }\n]'
+
+
+def _bindings_of(case: Any) -> list[dict[str, object]]:
+    """The base bindings of a rich case, as the merge would see them when nothing changed."""
+    return case[1]
+
+
 @given(case=_rich_case())
 def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     # given
@@ -912,11 +957,15 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     rendered = _try_render(template, value)
 
     # then — a render parses back to the merged value, never leaves two blank lines side by side, and never leaves a
-    # blank line against the closing bracket, including when every binding was removed
+    # blank line against either bracket, unless the template had one there. A merge that changes nothing keeps the
+    # layout exactly, blank lines and line endings included.
+    opens_blank = re.compile(r"\[[ \t]*\r?\n[ \t]*\r?\n")
     assert rendered is None or (
         ADAPTER.parse(rendered) == tree_from_value(value)
         and not _has_doubled_blank(rendered)
-        and re.search(r"\n[ \t]*\n[ \t]*\]", rendered) is None
+        and re.search(r"\r?\n[ \t]*\r?\n[ \t]*\]", rendered) is None
+        and (opens_blank.search(template) is not None or opens_blank.search(rendered) is None)
+        and (value != _bindings_of(case) or rendered == template)
     )
 
 
@@ -930,7 +979,7 @@ def test_an_unchanged_binding_keeps_its_note_above_it_and_its_inner_and_inline_n
     rendered = _try_render(template, value)
 
     # then — checked as text in place: the note sits directly above the binding's own line, not merely somewhere
-    text = "" if rendered is None else rendered
+    text = "" if rendered is None else rendered.replace("\r\n", "\n")
     missing = [
         index
         for index in unchanged
