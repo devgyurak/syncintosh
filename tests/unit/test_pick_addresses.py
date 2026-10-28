@@ -175,7 +175,7 @@ def _perturb(rng: random.Random, node: Any) -> Any:
         if rng.random() < 0.3:
             rng.shuffle(bindings)
         return bindings
-    return rng.choice([1, 2, "x"]) if rng.random() < 0.3 else node
+    return rng.choice([1, 2, "x"]) if rng.random() < 0.5 else node
 
 
 def _bindings(rng: random.Random) -> list[dict[str, object]]:
@@ -183,18 +183,24 @@ def _bindings(rng: random.Random) -> list[dict[str, object]]:
 
 
 def _related_doc(rng: random.Random) -> dict[str, object]:
-    """A document whose arrays always hold bindings, at the top level and one level down, so both sides have
-    bindings to change and group conflicts are common."""
-    doc: dict[str, object] = {"a": _bindings(rng), "b": _bindings(rng)}
+    """A document whose arrays always hold bindings, at the top level and one level down, plus a scalar, so both sides
+    have bindings and values to change and group and key conflicts are common."""
+    doc: dict[str, object] = {
+        "a": _bindings(rng),
+        "b": _bindings(rng),
+        "d": rng.choice([1, 2]),
+        "e": rng.choice([1, 2]),
+    }
     doc["c"] = {"a": _bindings(rng), "b": _bindings(rng)} if rng.random() < 0.5 else rng.choice([1, 2])
     return doc
 
 
-def _related_case(seed: int) -> tuple[bool, bool, bool, list[tuple[Any, Any]]]:
+def _related_case(seed: int) -> tuple[bool, bool, bool, bool, list[tuple[Any, Any]]]:
     """One merge of two changed copies of a document, with some of its conflicts picked, and some left open.
 
-    Returns whether a group pick applied at the top level, whether one applied one level down, whether a conflict stayed
-    open with a pick applied (a partial pick), and the addresses the picks added.
+    Returns whether a group pick resolved at the top level, whether one resolved one level down, whether a key pick
+    resolved (a whole value, not a group), whether a pick resolved while another conflict stayed open (a partial pick),
+    and the addresses the merge added. A pick counts only when its own address is gone after the picks.
     """
     rng = random.Random(seed)
     document = _related_doc(rng)
@@ -207,10 +213,13 @@ def _related_case(seed: int) -> tuple[bool, bool, bool, list[tuple[Any, Any]]]:
         base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
     )
     before, after = _addresses(first), _addresses(second)
-    picked = bool(choices or element_picks)
-    top = any(len(path) == 1 for path, _ in element_picks)
-    nested = any(len(path) == 2 for path, _ in element_picks)
-    return top, nested, picked and bool(after), sorted(after - before, key=repr)
+    picked = set(element_picks) | {(path, None) for path in choices}
+    resolved = picked & before - after
+    top = any(len(path) == 1 for path, _ in resolved)
+    nested = any(len(path) == 2 for path, _ in resolved)
+    key = any(element is None for _, element in resolved)
+    partial = bool(resolved) and bool(after)
+    return top, nested, key, partial, sorted(after - before, key=repr)
 
 
 @settings(max_examples=300, deadline=None)
@@ -223,11 +232,12 @@ def test_a_pick_never_adds_an_address_when_both_sides_change_the_same_bindings(s
     assert added == []
 
 
-def test_the_related_cases_include_top_level_nested_and_partial_picks_in_many_documents() -> None:
+def test_the_related_cases_resolve_top_level_nested_key_and_partial_picks_in_many_documents() -> None:
     # when — a fixed run of documents, so the counts are the same on every run
     cases = [_related_case(seed) for seed in range(400)]
 
-    # then — group picks apply at both levels, and a partial pick (a conflict left open) applies in many documents
-    assert sum(top for top, _, _, _ in cases) >= 100
-    assert sum(nested for _, nested, _, _ in cases) >= 50
-    assert sum(partial for _, _, partial, _ in cases) >= 50
+    # then — picks that resolve their own conflict apply at each level and alongside an open conflict, in many documents
+    assert sum(top for top, _, _, _, _ in cases) >= 100
+    assert sum(nested for _, nested, _, _, _ in cases) >= 50
+    assert sum(key for _, _, key, _, _ in cases) >= 30
+    assert sum(partial for _, _, _, partial, _ in cases) >= 50
