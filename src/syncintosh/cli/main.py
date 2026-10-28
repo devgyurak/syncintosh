@@ -410,14 +410,27 @@ WHEN_RUN_KEY_NOTICE = "when tags in this output use a key for this run only, so 
 
 
 def _machine_when_tag() -> WhenTag:
-    """This machine's tagger for `when` clauses. It reads the scan key and never creates the allowlist."""
+    """This machine's tagger for `when` clauses. It reads the scan key and never creates the allowlist.
+
+    The notice is printed when the first tag is actually shown, once per command, so an output that shows no tag
+    (nothing tracked, no conflict) says nothing about keys.
+    """
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.scan_allow import machine_when_tag
 
     tagging = machine_when_tag(MachinePaths.default().scan_allow_file)
-    if tagging.run_key:
-        typer.echo(WHEN_RUN_KEY_NOTICE, err=True)
-    return tagging.tag
+    if not tagging.run_key:
+        return tagging.tag
+    announced = False
+
+    def tag(text: str) -> str:
+        nonlocal announced
+        if not announced:
+            announced = True
+            typer.echo(WHEN_RUN_KEY_NOTICE, err=True)
+        return tagging.tag(text)
+
+    return tag
 
 
 def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
