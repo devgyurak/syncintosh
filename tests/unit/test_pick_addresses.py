@@ -134,9 +134,7 @@ def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
 @settings(max_examples=300, deadline=None)
 @given(seed=st.integers(min_value=0, max_value=10**6))
 def test_a_pick_of_a_key_or_a_group_never_adds_an_address_in_nested_documents(seed: int) -> None:
-    # given — a random merge of documents with scalars, an object, and arrays, with some of its conflicts picked
-
-    # when
+    # when — a random merge of documents with scalars, an object, and arrays, with some of its conflicts picked
     _, added = _pick_case(seed)
 
     # then — no address appears that the merge did not already have
@@ -144,9 +142,7 @@ def test_a_pick_of_a_key_or_a_group_never_adds_an_address_in_nested_documents(se
 
 
 def test_the_nested_pick_property_is_exercised_by_many_documents() -> None:
-    # given — a fixed run of documents, so the count is the same on every run
-
-    # when
+    # when — a fixed run of documents, so the count is the same on every run
     cases = [_pick_case(seed) for seed in range(400)]
 
     # then — many cases have a conflict that a pick settled, and none adds an address
