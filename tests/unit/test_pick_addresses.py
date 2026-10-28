@@ -191,8 +191,9 @@ def _bindings(rng: random.Random) -> list[dict[str, object]]:
 
 
 def _related_doc(rng: random.Random) -> dict[str, object]:
-    """A document whose arrays always hold bindings, at the top level and one level down, plus a scalar, so both sides
-    have bindings and values to change and group and key conflicts are common."""
+    """A document whose arrays always hold bindings, at the top level and one level down, plus two scalars (`d`, `e`)
+    and a third value (`c`) that is an object of arrays or a scalar, so both sides have bindings and values to change
+    and group and key conflicts are common."""
     doc: dict[str, object] = {
         "a": _bindings(rng),
         "b": _bindings(rng),
