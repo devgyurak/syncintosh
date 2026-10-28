@@ -106,16 +106,16 @@ def _random_doc(rng: random.Random, depth: int = 0) -> dict[str, object]:
     return doc
 
 
-def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
-    """One random merge with some conflicts picked: whether a pick applied, and the addresses added."""
-    rng = random.Random(seed)
-    base, local, remote = (tree_from_value(_random_doc(rng)) for _ in range(3))
-    first = merge_tree(base, local, remote, keyed=_DOC_KEYED)
-    before = {(conflict.path, conflict.element) for conflict in first.conflicts}
+def _addresses(merged: Any) -> set[tuple[Any, Any]]:
+    return {(conflict.path, conflict.element) for conflict in merged.conflicts}
+
+
+def _pick_some(rng: random.Random, first: Any, skip: float) -> tuple[dict[Any, Any], dict[Any, Any]]:
+    """A side or a proposal for some of the conflicts of `first`; the rest are left open with probability `skip`."""
     choices: dict[tuple[str, ...], Any] = {}
     element_picks: dict[Any, Any] = {}
     for conflict in first.conflicts:
-        if rng.random() < 0.5:
+        if rng.random() < skip:
             continue
         side = rng.choice(["local", "remote"])
         if conflict.element is None:
@@ -124,10 +124,19 @@ def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
             key = conflict.element[0][1]
             proposal = tree_from_value([{"key": key, "command": "proposed"}]).value(())
             element_picks[(conflict.path, conflict.element)] = proposal if rng.random() < 0.3 else side
+    return choices, element_picks
+
+
+def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
+    """One random merge with some conflicts picked: whether a pick applied, and the addresses added."""
+    rng = random.Random(seed)
+    base, local, remote = (tree_from_value(_random_doc(rng)) for _ in range(3))
+    first = merge_tree(base, local, remote, keyed=_DOC_KEYED)
+    choices, element_picks = _pick_some(rng, first, skip=0.5)
     second = merge_tree(
         base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
     )
-    after = {(conflict.path, conflict.element) for conflict in second.conflicts}
+    before, after = _addresses(first), _addresses(second)
     return bool(before) and bool(choices or element_picks), sorted(after - before, key=repr)
 
 
@@ -193,23 +202,11 @@ def _related_case(seed: int) -> tuple[bool, bool, bool, list[tuple[Any, Any]]]:
     local = tree_from_value(_perturb(rng, document))
     remote = tree_from_value(_perturb(rng, document))
     first = merge_tree(base, local, remote, keyed=_DOC_KEYED)
-    before = {(conflict.path, conflict.element) for conflict in first.conflicts}
-    choices: dict[tuple[str, ...], Any] = {}
-    element_picks: dict[Any, Any] = {}
-    for conflict in first.conflicts:
-        if rng.random() < 0.4:
-            continue
-        side = rng.choice(["local", "remote"])
-        if conflict.element is None:
-            choices[conflict.path] = side
-        else:
-            key = conflict.element[0][1]
-            proposal = tree_from_value([{"key": key, "command": "proposed"}]).value(())
-            element_picks[(conflict.path, conflict.element)] = proposal if rng.random() < 0.3 else side
+    choices, element_picks = _pick_some(rng, first, skip=0.4)
     second = merge_tree(
         base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
     )
-    after = {(conflict.path, conflict.element) for conflict in second.conflicts}
+    before, after = _addresses(first), _addresses(second)
     picked = bool(choices or element_picks)
     top = any(len(path) == 1 for path, _ in element_picks)
     nested = any(len(path) == 2 for path, _ in element_picks)
