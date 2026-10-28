@@ -783,7 +783,7 @@ def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line
     assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
 
 
-def test_a_blank_line_above_a_removed_group_goes_with_the_group() -> None:
+def test_the_blank_line_between_two_removed_bindings_goes_when_a_blank_line_stands_above_them() -> None:
     # given — a blank line sits above `k3`, and one more blank line sits between `k3` and `k1`; both are removed, and
     # `k2` is merged in where `k3` was
     template = '[\n    // S0\n\n    {"key": "k3", "command": "v"},\n\n    {"key": "k1", "command": "v"}\n    // S3\n]'
