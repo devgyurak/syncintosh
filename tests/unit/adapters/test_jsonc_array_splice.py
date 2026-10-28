@@ -783,26 +783,6 @@ def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line
     assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
 
 
-@pytest.mark.parametrize(
-    ("ranges", "merged"),
-    [
-        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
-        ([(0, 5), (5, 9)], [(0, 9)]),
-        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
-        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
-    ],
-    ids=["disjoint", "touching", "overlapping", "nested-and-unordered"],
-)
-def test_overlapping_deletions_merge_into_one_range_before_they_are_applied(
-    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
-) -> None:
-    # when
-    result = jsonc._union(ranges)
-
-    # then — the ranges come out in order and no two of them overlap
-    assert result == merged
-
-
 def test_a_blank_line_above_a_removed_group_goes_with_the_group() -> None:
     # given — a blank line sits above `k3`, and one more blank line sits between `k3` and `k1`; both are removed, and
     # `k2` is merged in where `k3` was
@@ -824,6 +804,39 @@ def test_a_removed_group_at_the_opening_bracket_takes_the_blank_line_between_its
 
     # then — the group sits against the opening bracket, so its inner blank line goes
     assert rendered == '[\n    {"key": "new", "command": "w"}\n    // S2\n]'
+
+
+@pytest.mark.parametrize(
+    ("ranges", "merged"),
+    [
+        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
+        ([(0, 5), (5, 9)], [(0, 5), (5, 9)]),
+        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
+        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
+    ],
+    ids=["disjoint", "touching-stay-apart", "overlapping", "nested-and-unordered"],
+)
+def test_deletion_ranges_merge_only_where_they_overlap(
+    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
+) -> None:
+    # when
+    result = jsonc._union(ranges)
+
+    # then — the ranges come out in order, and two that only touch are not joined
+    assert result == merged
+
+
+def test_an_insertion_where_two_deletions_meet_is_not_lost() -> None:
+    # given — two deletions that meet at offset 5, and an insertion at that offset
+    text = "0123456789"
+    insertion = jsonc._Edit(5, 5, "X")
+    deletions = [jsonc._Edit(start, end, "") for start, end in jsonc._union([(0, 5), (5, 9)])]
+
+    # when
+    result = jsonc._apply_edits(text, [insertion, *deletions])
+
+    # then — the insertion lands between the two deleted stretches
+    assert result == "X9"
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
