@@ -155,21 +155,22 @@ def test_two_when_tags_in_one_output_print_the_run_key_notice_exactly_once(
     assert result.output.count(WHEN_RUN_KEY_NOTICE) == 1
 
 
-def test_an_output_with_no_tag_prints_no_run_key_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # given — only the local side changed, so nothing conflicts and no tag is shown
+def test_a_conflict_with_no_tag_prints_no_run_key_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # given — a scalar setting that both sides changed differently: a conflict, but its label carries no `when` tag
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     base, local, remote = tmp_path / "base.jsonc", tmp_path / "local.jsonc", tmp_path / "remote.jsonc"
-    base.write_bytes(WHEN_TWO_BASE)
-    local.write_bytes(WHEN_TWO_LOCAL)
-    remote.write_bytes(WHEN_TWO_BASE)
+    base.write_bytes(b'{\n  "editor.fontSize": 13\n}\n')
+    local.write_bytes(b'{\n  "editor.fontSize": 14\n}\n')
+    remote.write_bytes(b'{\n  "editor.fontSize": 15\n}\n')
 
     # when
-    result = runner.invoke(main_module.app, ["merge", str(base), str(local), str(remote), "--path", KEYBINDINGS])
+    result = runner.invoke(main_module.app, ["merge", str(base), str(local), str(remote), "--path", "settings.json"])
 
-    # then — the merge is clean and the notice does not appear
-    assert result.exit_code == 0
+    # then — the conflict is named, no tag is shown, and so the notice is not printed
+    conflicts = [line for line in result.output.splitlines() if line.startswith("conflict:")]
+    assert conflicts == ['conflict: "editor.fontSize"']
     assert WHEN_RUN_KEY_NOTICE not in result.output
 
 
