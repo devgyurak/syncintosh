@@ -1112,6 +1112,21 @@ def _code_above(text: str, comments: _Comments, line_end: int) -> str:
         line_end = line_start - 1
 
 
+def _bracket_below(text: str, comments: _Comments, position: int) -> bool:
+    """True when the first line at or below `position` that is not blank starts with the closing `]`.
+
+    Blank lines are skipped, because a deletion that leaves a blank line in front of the closing bracket leaves the
+    same blank line as one a deletion right before the bracket would. A line of comments before the bracket is not
+    skipped: it stays, so the bracket is not reached.
+    """
+    while position < len(text):
+        line_end = _line_end(text, position)
+        if not _is_blank(text, comments, position, line_end):
+            return comments.without_comments(position, line_end).strip().startswith("]")
+        position = _next_line_start(text, line_end)
+    return False
+
+
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
     """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
@@ -1124,11 +1139,10 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
-    after_code = comments.without_comments(end, after_end) if end < len(text) else None
     blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
-    closes = after_code is not None and after_code.strip().startswith("]")
+    closes = _bracket_below(text, comments, end)
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and start not in insert_points:
         pieces.append((_line_start(text, start - 1), start))

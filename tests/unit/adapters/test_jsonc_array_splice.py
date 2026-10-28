@@ -693,6 +693,17 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
+def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_it() -> None:
+    # given — the last binding is removed, and a blank line the user had before it would end up against the bracket
+    template = '[\n    {"key": "a", "command": "1"},\n\n    {"key": "x", "command": "2"}\n\n]'
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "1"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
