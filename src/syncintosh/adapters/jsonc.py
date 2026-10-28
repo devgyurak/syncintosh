@@ -897,8 +897,7 @@ def _clean_multiline_object(text: str, node: _ObjectNode, comments: _Comments) -
 def _member_tail_clean(comments: _Comments, value_end: int) -> bool:
     """True when what follows a value to end of line is only a comma, comments, and whitespace."""
     text = comments.text
-    line_end = text.find("\n", value_end)
-    line_end = len(text) if line_end == -1 else line_end
+    line_end = _line_end(text, value_end)
     # The comments are masked out with the parse's own spans, so a `, // hides **/*.map` tail reads
     # as a comma rather than as text that only looks like syntax.
     return comments.without_comments(value_end, line_end).strip() in ("", ",")
@@ -1032,12 +1031,15 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 def _widened_deletions(
     text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
 ) -> list[tuple[int, int]]:
-    """The deletions, each widened over the blank lines it would leave beside a bracket or another blank line.
+    """The deletions, each widened over the blank lines it would leave beside a bracket or a blank line.
 
     Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. The blank
-    line between them goes with the group only when a bracket or a blank line stands on one side of the whole group;
-    otherwise it separates two kept bindings, so each segment is widened on its own and the blank line stays. Without
-    this, the blank line that separates two kept bindings would be taken with the deletion.
+    line between them goes with the group only when a blank line or the opening bracket stands above the group, or the
+    closing bracket stands below it (`_gap_goes_with_group`). Otherwise that blank line separates two parts of the
+    array that stay, so each segment is widened on its own and the blank line stays. The neighbours that decide this
+    need not be bindings: a section title or a comment can stand there. A group of three or more deletions is decided
+    once, by its outer neighbours; each segment is then widened by `_widen`, so a middle segment can still take a blank
+    line that touches it.
     """
     groups: list[list[tuple[int, int]]] = []
     for start, end in sorted(spans):
@@ -1065,19 +1067,14 @@ def _group_pieces(
 
 
 def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) -> bool:
-    """True when a bracket or a blank line stands beside the whole group, so the blank line between its parts can go."""
-    if first > 0:
-        before_blank = _is_blank(text, comments, _line_start(text, first - 1), first - 1)
-        opens = _code_above(text, comments, first - 1).endswith("[")
-    else:
-        before_blank = opens = False
+    """True when the blank line between two parts of a group goes with the group.
+
+    That is when a blank line or the opening bracket stands above the group, or the closing bracket stands below it.
+    """
+    blank_above = first > 0 and _is_blank(text, comments, _line_start(text, first - 1), first - 1)
     after_end = _next_line_start(text, last)
-    if last < len(text):
-        after_blank = _is_blank(text, comments, last, _line_end(text, last))
-        closes = comments.without_comments(last, after_end).strip().startswith("]")
-    else:
-        after_blank = closes = False
-    return before_blank or opens or after_blank or closes
+    closes = last < len(text) and comments.without_comments(last, after_end).strip().startswith("]")
+    return blank_above or _opens_array(text, comments, first) or closes
 
 
 def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
@@ -1096,6 +1093,11 @@ def _line_end(text: str, position: int) -> int:
     return len(text) if newline == -1 else newline
 
 
+def _opens_array(text: str, comments: _Comments, start: int) -> bool:
+    """True when the nearest code above `start` is an opening bracket, so `start` is the array's first element."""
+    return start > 0 and _code_above(text, comments, start - 1).endswith("[")
+
+
 def _code_above(text: str, comments: _Comments, line_end: int) -> str:
     """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
 
@@ -1112,6 +1114,21 @@ def _code_above(text: str, comments: _Comments, line_end: int) -> str:
         line_end = line_start - 1
 
 
+def _bracket_below(text: str, comments: _Comments, position: int) -> bool:
+    """True when the first line at or below `position` that is not blank starts with the closing `]`.
+
+    Blank lines are skipped, because a deletion that leaves a blank line in front of the closing bracket leaves the
+    same blank line as one a deletion right before the bracket would. A line of comments before the bracket is not
+    skipped: it stays, so the bracket is not reached.
+    """
+    while position < len(text):
+        line_end = _line_end(text, position)
+        if not _is_blank(text, comments, position, line_end):
+            return comments.without_comments(position, line_end).strip().startswith("]")
+        position = _next_line_start(text, line_end)
+    return False
+
+
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
     """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
@@ -1124,15 +1141,17 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
-    after_code = comments.without_comments(end, after_end) if end < len(text) else None
     blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
-    opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
-    closes = after_code is not None and after_code.strip().startswith("]")
+    opens = _opens_array(text, comments, start)
+    closes = _bracket_below(text, comments, end)
+    # An insertion at this offset puts the new binding where the deleted one was, so the blank line after the deletion
+    # separates that binding from whatever follows (a section title, say) and must stay.
+    inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and closes and start not in insert_points:
+    if blank_before and closes and not inserted:
         pieces.append((_line_start(text, start - 1), start))
-    if blank_after and (blank_before or opens):
+    if blank_after and (blank_before or opens) and not inserted:
         end = after_end
     pieces.append((start, end))
     return pieces
