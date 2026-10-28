@@ -1277,4 +1277,9 @@ def _apply_edits(text: str, edits: list[_Edit]) -> str:
     return "".join(pieces)
 
 
-__all__ = ["JsoncAdapter"]
+__all__ = [
+    "CHANGED_WITH_NOTE_REFUSED",
+    "UNRULED_REMOVAL_REFUSED",
+    "VALUE_WITH_NOTE_REFUSED",
+    "JsoncAdapter",
+]
