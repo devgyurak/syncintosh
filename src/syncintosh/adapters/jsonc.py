@@ -1031,12 +1031,15 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 def _widened_deletions(
     text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
 ) -> list[tuple[int, int]]:
-    """The deletions, each widened over the blank lines it would leave beside a bracket or another blank line.
+    """The deletions, each widened over the blank lines it would leave beside a bracket or a blank line.
 
     Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. The blank
-    line between them goes with the group only when a bracket or a blank line stands on one side of the whole group;
-    otherwise it separates two kept bindings, so each segment is widened on its own and the blank line stays. Without
-    this, the blank line that separates two kept bindings would be taken with the deletion.
+    line between them goes with the group only when a blank line or the opening bracket stands above the group, or the
+    closing bracket stands below it (`_gap_goes_with_group`). Otherwise that blank line separates two parts of the
+    array that stay, so each segment is widened on its own and the blank line stays. The neighbours that decide this
+    need not be bindings: a section title or a comment can stand there. A group of three or more deletions is decided
+    once, by its outer neighbours; each segment is then widened by `_widen`, so a middle segment can still take a blank
+    line that touches it.
     """
     groups: list[list[tuple[int, int]]] = []
     for start, end in sorted(spans):
