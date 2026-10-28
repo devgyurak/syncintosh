@@ -177,12 +177,10 @@ def test_a_conflict_with_no_tag_prints_no_run_key_notice(tmp_path: Path, monkeyp
 def test_the_tagger_says_nothing_until_a_tag_is_shown_and_then_says_it_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # given — a machine with no allowlist, so the tagger uses a key for this run only
+    # given — a machine with no allowlist, so the tagger uses a key for this run only, and the tagger is made
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-
-    # when — the tagger is made; nothing is shown yet
     tag = main_module._machine_when_tag()
     before = capsys.readouterr().err
 
