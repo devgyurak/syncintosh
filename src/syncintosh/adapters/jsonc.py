@@ -15,11 +15,13 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
   rewrites only that value's span; an added key is inserted after the sibling the remote had
   before it; a removed key takes its line, comma, and same-line comment with it, leaving the
   comment above it. Indentation, trailing-comma style, newline style, and a BOM are detected in
-  the original and kept. A multi-line array of keyed bindings is spliced one element at a time
-  (see `_splice_array`): each unchanged element keeps its own text and notes, and a removed
-  binding takes its notes with it. A value the splice cannot place — an inline array, an array
-  with a comma alone on its line, an object that is not laid out member-per-line — is
-  reserialized whole, and refused when a comment inside it would be lost.
+  the original and kept. A multi-line array is spliced one element at a time (see
+  `_splice_array`), with a rule or without one: each unchanged element keeps its own text and
+  notes. A removal that would take a note from an array with no rule is refused with a fixed
+  reason (`UNRULED_REMOVAL_REFUSED`), since nothing says which element the note belongs to. A
+  value the splice cannot place — an inline array, an array with a comma first on its line, an
+  object that is not laid out member-per-line — is reserialized whole, and refused when a
+  comment inside it would be lost.
 
 The merge itself is not this module's job: it returns a :class:`~syncintosh.core.tree.Tree` and
 takes one back, and the engine decides what changed (``core/merge.py``).
@@ -1030,18 +1032,41 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 def _widened_deletions(
     text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
 ) -> list[tuple[int, int]]:
-    """The deletions with adjacent ones joined, each widened over the blank line that would otherwise be left beside it.
+    """The deletions with neighbours joined, each widened over the blank line that would otherwise be left beside it.
 
-    Joining first matters: two deletions that touch would each see a single blank line beside them and both widen,
-    leaving two blank lines side by side where the deletions met.
+    Joining first matters: two deletions that touch, or that are separated by exactly one blank line, would each see a
+    blank line beside them and both widen, leaving two blank lines side by side where the deletions met, or a blank
+    line against a bracket once the last binding is gone. Such a blank line is joined into the deletion.
     """
     joined: list[tuple[int, int]] = []
     for start, end in sorted(spans):
-        if joined and start <= joined[-1][1]:
+        if joined and (start <= joined[-1][1] or _single_blank_line(text, joined[-1][1], start)):
             joined[-1] = (joined[-1][0], max(joined[-1][1], end))
         else:
             joined.append((start, end))
     return [piece for start, end in joined for piece in _widen(text, comments, insert_points, start, end)]
+
+
+def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
+    """True when the text between two deletions is exactly one blank line."""
+    gap = text[gap_start:gap_end]
+    return gap.strip() == "" and gap.count("\n") == 1
+
+
+def _code_above(text: str, comments: _Comments, line_end: int) -> str:
+    """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
+
+    Lines that hold only comments are skipped, so a bracket followed by a block comment that runs over several
+    lines still counts as the line that opens the array. A blank line ends the search with nothing, as does the top.
+    """
+    while True:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code
+        if text[line_start:line_end].strip() == "" or line_start == 0:
+            return ""
+        line_end = line_start - 1
 
 
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
@@ -1055,13 +1080,12 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     skipped. The lines are read from the text as it stands, which is the text the deletion is made in.
     """
     before = text[_line_start(text, start - 1) : start - 1] if start > 0 else None
-    before_code = comments.without_comments(_line_start(text, start - 1), start - 1) if start > 0 else None
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
     after_code = comments.without_comments(end, after_end) if end < len(text) else None
     blank_before = before is not None and before.strip() == ""
     blank_after = after is not None and after != "" and after.strip() == ""
-    opens = before_code is not None and before_code.rstrip().endswith("[")
+    opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
     closes = after_code is not None and after_code.strip().startswith("]")
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and start not in insert_points:

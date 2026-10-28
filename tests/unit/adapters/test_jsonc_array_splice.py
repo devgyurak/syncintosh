@@ -44,6 +44,10 @@ def _b(command: str) -> dict[str, object]:
     return {"key": "b", "command": command}
 
 
+def _y(command: str) -> dict[str, object]:
+    return {"key": "y", "command": command}
+
+
 def _z(command: str) -> dict[str, object]:
     return {"key": "z", "command": command}
 
@@ -689,6 +693,29 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
+    # given — a section title, then two bindings separated by a blank line, all of which are removed
+    template = '[\n    // section 0\n\n    { "key": "e", "command": "x" },\n\n    { "key": "g", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template.replace("\n", newline), [])
+
+    # then — the title stays and no blank line is left against the closing bracket
+    assert rendered == f"[{newline}    // section 0{newline}]"
+
+
+def test_a_block_comment_spanning_lines_after_the_opening_bracket_is_read_as_the_bracket_line() -> None:
+    # given — the opening bracket is followed by a block comment that runs over two lines, then the first binding
+    template = '[ /* a\n   b */\n    { "key": "x", "command": "1" },\n\n    { "key": "y", "command": "2" }\n]'
+
+    # when — the first binding is removed
+    rendered = _render(template, [_y("2")])
+
+    # then — the blank line after it goes too, because the block is still the array's opening line
+    assert rendered == '[ /* a\n   b */\n    { "key": "y", "command": "2" }\n]'
+
+
 def test_a_comment_inside_a_rule_less_inline_array_refuses_with_the_general_reason() -> None:
     # given — an inline array with a comment in it; its value changes, so it is rewritten whole
     template = '{\n  "editor.rulers": [80, /* why */ 120]\n}'
@@ -797,9 +824,8 @@ def _best_render_seconds(count: int) -> float:
 
 
 def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
-    # given — the same merge at 400 and at 3200 bindings: eight times the size
-
-    # when — the time ratio is compared, so the test is independent of the machine's speed
+    # when — the same merge at 400 and at 3200 bindings (eight times the size); the time ratio is compared, so the test
+    # does not depend on the machine's speed
     ratio = _best_render_seconds(3200) / _best_render_seconds(400)
 
     # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
@@ -874,8 +900,13 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     # when
     rendered = _try_render(template, value)
 
-    # then — a render parses back to the merged value, and never leaves two blank lines side by side
-    assert rendered is None or (ADAPTER.parse(rendered) == tree_from_value(value) and not _has_doubled_blank(rendered))
+    # then — a render parses back to the merged value, never leaves two blank lines side by side, and never leaves a
+    # blank line against the closing bracket, including when every binding was removed
+    assert rendered is None or (
+        ADAPTER.parse(rendered) == tree_from_value(value)
+        and not _has_doubled_blank(rendered)
+        and re.search(r"\n[ \t]*\n[ \t]*\]", rendered) is None
+    )
 
 
 @settings(max_examples=400, deadline=None)
