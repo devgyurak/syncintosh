@@ -1033,13 +1033,13 @@ def _widened_deletions(
 ) -> list[tuple[int, int]]:
     """The deletions, each widened over the blank lines it would leave beside a bracket or a blank line.
 
-    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. The blank
-    line between them goes with the group only when a blank line or the opening bracket stands above the group, or the
-    closing bracket stands below it (`_gap_goes_with_group`). Otherwise that blank line separates two parts of the
-    array that stay, so each segment is widened on its own and the blank line stays. The neighbours that decide this
-    need not be bindings: a section title or a comment can stand there. A group of three or more deletions is decided
-    once, by its outer neighbours; each segment is then widened by `_widen`, so a middle segment can still take a blank
-    line that touches it.
+    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. A group
+    is either joined or not, decided by `_gap_goes_with_group`: a blank line or the opening bracket above it, or the
+    closing bracket below it. A joined group is widened once, as one range from its first deletion to its last, so the
+    blank line between its parts goes with it. A group that is not joined is widened segment by segment, so the blank
+    line that separates two parts of the array that stay is kept. The neighbours that decide this need not be
+    bindings: a section title or a comment can stand there. Ranges that overlap after widening are merged last
+    (`_union`), so no two deletions overlap.
     """
     groups: list[list[tuple[int, int]]] = []
     for start, end in sorted(spans):
