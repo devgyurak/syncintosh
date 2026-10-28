@@ -9,12 +9,18 @@ import re
 import subprocess
 import sys
 import time
+from typing import Any
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from syncintosh.adapters.jsonc import CHANGED_WITH_NOTE_REFUSED, UNRULED_REMOVAL_REFUSED, JsoncAdapter
+from syncintosh.adapters.jsonc import (
+    CHANGED_WITH_NOTE_REFUSED,
+    UNRULED_REMOVAL_REFUSED,
+    VALUE_WITH_NOTE_REFUSED,
+    JsoncAdapter,
+)
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.tree import tree_from_value
@@ -36,6 +42,10 @@ def _a(command: str) -> dict[str, object]:
 
 def _b(command: str) -> dict[str, object]:
     return {"key": "b", "command": command}
+
+
+def _z(command: str) -> dict[str, object]:
+    return {"key": "z", "command": command}
 
 
 def _c(command: str) -> dict[str, object]:
@@ -666,6 +676,134 @@ def test_a_two_thousand_line_note_block_moves_within_a_generous_time_limit() -> 
     assert rendered.index("// note line 1999") < rendered.index('{ "key": "a"')
     assert rendered.count("// note line") == 2000
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_removed_one_was() -> None:
+    # given — a section title, a blank line, then the only binding, which is removed for a new one
+    template = '[\n    // Section\n\n    { "key": "a", "command": "x" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y")])
+
+    # then — the blank line stays, so the title is not glued to the new binding as its note
+    assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
+
+
+def test_a_comment_inside_a_rule_less_inline_array_refuses_with_the_general_reason() -> None:
+    # given — an inline array with a comment in it; its value changes, so it is rewritten whole
+    template = '{\n  "editor.rulers": [80, /* why */ 120]\n}'
+
+    # when & then — the refusal is the general one: a setting, not a binding, is what changed
+    with pytest.raises(RenderRefused) as refused:
+        ADAPTER.render(tree_from_value({"editor.rulers": [81, 120]}), template)
+    assert refused.value.reason == VALUE_WITH_NOTE_REFUSED
+    assert refused.value.reason != CHANGED_WITH_NOTE_REFUSED
+
+
+def test_a_comment_inside_an_object_member_refuses_with_the_general_reason() -> None:
+    # given — an object member with a comment inside it changes its value
+    template = '{\n  "x": {"a": 1, /* c */ "b": 2}\n}'
+
+    # when & then
+    with pytest.raises(RenderRefused) as refused:
+        ADAPTER.render(tree_from_value({"x": {"a": 1, "b": 3}}), template)
+    assert refused.value.reason == VALUE_WITH_NOTE_REFUSED
+
+
+def test_a_comma_first_layout_with_a_comment_refuses_with_the_general_reason() -> None:
+    # given — keybindings with each comma at the start of its line, and a comment inside the first binding
+    template = '[\n  {"key": "a", "command": "x" /* c */}\n  , {"key": "b", "command": "y"}\n]'
+
+    # when & then — the array is rewritten whole, so the refusal is the general one, not a binding's
+    with pytest.raises(RenderRefused) as refused:
+        ADAPTER.render(tree_from_value([_a("x2"), _b("y")]), template)
+    assert refused.value.reason == VALUE_WITH_NOTE_REFUSED
+
+
+def test_a_blank_line_after_an_opening_bracket_with_a_comment_is_removed_with_the_element() -> None:
+    # given — the opening bracket carries a comment, and a blank line follows the first binding
+    template = '[ // cols\n    { "key": "a", "command": "x" },\n\n    { "key": "b", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template, [_b("y")])
+
+    # then — the bracket still counts as opening the array, so no blank line is left after it
+    assert rendered == '[ // cols\n    { "key": "b", "command": "y" }\n]'
+
+
+def test_a_comment_that_ends_in_a_bracket_is_not_an_opening_bracket() -> None:
+    # given — the line before a removed binding ends with `[` only inside a comment
+    template = (
+        '[\n    { "key": "z", "command": "w" }, // see [\n    { "key": "a", "command": "x" },\n\n'
+        '    { "key": "b", "command": "y" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_z("w"), _b("y")])
+
+    # then — the blank line between the removed binding and `b` is kept, because the line above is not a bracket
+    assert rendered == '[\n    { "key": "z", "command": "w" }, // see [\n\n    { "key": "b", "command": "y" }\n]'
+
+
+def test_a_multi_line_block_note_moves_with_its_binding() -> None:
+    # given — a block note spread over two lines documents `a`, and the merge moves `a` below `c`
+    template = (
+        '[\n    /* first\n       second */\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_c("z"), _a("x")])
+
+    # then — the whole two-line block travels with `a`
+    assert rendered == (
+        '[\n    { "key": "c", "command": "z" },\n    /* first\n       second */\n    { "key": "a", "command": "x" }\n]'
+    )
+
+
+def test_a_multi_line_block_note_goes_with_its_binding_when_that_binding_is_removed() -> None:
+    # given — the same block note documents `a`, which is removed
+    template = (
+        '[\n    /* first\n       second */\n    { "key": "a", "command": "x" },\n    { "key": "c", "command": "z" }\n]'
+    )
+
+    # when
+    rendered = _render(template, [_c("z")])
+
+    # then — nothing of the block is left behind
+    assert rendered == '[\n    { "key": "c", "command": "z" }\n]'
+
+
+def _binding_array(count: int) -> tuple[str, list[Any]]:
+    """An array of `count` bindings, each with a note above it, and the same bindings with the first moved last."""
+    lines = ["["]
+    for index in range(count):
+        lines.append(f"    // note {index}")
+        comma = "," if index < count - 1 else ""
+        lines.append(f'    {{ "key": "k{index}", "command": "c{index}" }}{comma}')
+    lines.append("]")
+    value: list[Any] = [{"key": f"k{index}", "command": f"c{index}"} for index in range(1, count)]
+    return "\n".join(lines), [*value, {"key": "k0", "command": "c0"}]
+
+
+def _best_render_seconds(count: int) -> float:
+    """The fastest of three renders of a `count`-binding array, each binding moved by the merge."""
+    template, value = _binding_array(count)
+    timings = []
+    for _ in range(3):
+        started = time.perf_counter()
+        _render(template, value)
+        timings.append(time.perf_counter() - started)
+    return min(timings)
+
+
+def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
+    # given — the same merge at 400 and at 3200 bindings: eight times the size
+
+    # when — the time ratio is compared, so the test is independent of the machine's speed
+    ratio = _best_render_seconds(3200) / _best_render_seconds(400)
+
+    # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
+    assert ratio < 20
 
 
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
