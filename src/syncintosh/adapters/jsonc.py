@@ -1051,6 +1051,22 @@ def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
     return gap.strip() == "" and gap.count("\n") == 1
 
 
+def _code_above(text: str, comments: _Comments, line_end: int) -> str:
+    """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
+
+    Lines that hold only comments are skipped, so a bracket followed by a block comment that runs over several
+    lines still counts as the line that opens the array. A blank line ends the search with nothing, as does the top.
+    """
+    while True:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code
+        if text[line_start:line_end].strip() == "" or line_start == 0:
+            return ""
+        line_end = line_start - 1
+
+
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
     """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
@@ -1062,13 +1078,12 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     skipped. The lines are read from the text as it stands, which is the text the deletion is made in.
     """
     before = text[_line_start(text, start - 1) : start - 1] if start > 0 else None
-    before_code = comments.without_comments(_line_start(text, start - 1), start - 1) if start > 0 else None
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
     after_code = comments.without_comments(end, after_end) if end < len(text) else None
     blank_before = before is not None and before.strip() == ""
     blank_after = after is not None and after != "" and after.strip() == ""
-    opens = before_code is not None and before_code.rstrip().endswith("[")
+    opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
     closes = after_code is not None and after_code.strip().startswith("]")
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and start not in insert_points:

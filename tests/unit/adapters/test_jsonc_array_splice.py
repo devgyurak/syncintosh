@@ -44,6 +44,10 @@ def _b(command: str) -> dict[str, object]:
     return {"key": "b", "command": command}
 
 
+def _y(command: str) -> dict[str, object]:
+    return {"key": "y", "command": command}
+
+
 def _z(command: str) -> dict[str, object]:
     return {"key": "z", "command": command}
 
@@ -699,6 +703,17 @@ def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_befor
 
     # then — the title stays and no blank line is left against the closing bracket
     assert rendered == f"[{newline}    // section 0{newline}]"
+
+
+def test_a_block_comment_spanning_lines_after_the_opening_bracket_is_read_as_the_bracket_line() -> None:
+    # given — the opening bracket is followed by a block comment that runs over two lines, then the first binding
+    template = '[ /* a\n   b */\n    { "key": "x", "command": "1" },\n\n    { "key": "y", "command": "2" }\n]'
+
+    # when — the first binding is removed
+    rendered = _render(template, [_y("2")])
+
+    # then — the blank line after it goes too, because the block is still the array's opening line
+    assert rendered == '[ /* a\n   b */\n    { "key": "y", "command": "2" }\n]'
 
 
 def test_a_comment_inside_a_rule_less_inline_array_refuses_with_the_general_reason() -> None:
