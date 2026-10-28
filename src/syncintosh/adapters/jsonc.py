@@ -1064,7 +1064,7 @@ def _code_above(text: str, comments: _Comments, line_end: int) -> str:
         code = comments.without_comments(line_start, line_end).strip()
         if code:
             return code
-        if text[line_start:line_end].strip() == "" or line_start == 0:
+        if (text[line_start:line_end].strip() == "" and not comments.overlaps(line_start, line_end)) or line_start == 0:
             return ""
         line_end = line_start - 1
 

@@ -832,6 +832,17 @@ def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() 
     assert ratio < 20
 
 
+def test_a_blank_line_inside_a_block_comment_after_the_opening_bracket_is_not_a_blank_line() -> None:
+    # given — the opening bracket is followed by a block comment with an empty line inside it
+    template = '[ /* a\n\n   b */\n    { "key": "x", "command": "1" },\n\n    { "key": "y", "command": "2" }\n]'
+
+    # when — `x` is removed
+    rendered = _render(template, [{"key": "y", "command": "2"}])
+
+    # then — the blank line after `x` goes, since the line above it is the array's opening line
+    assert rendered == '[ /* a\n\n   b */\n    { "key": "y", "command": "2" }\n]'
+
+
 # --- the rich property: every kind of note, with section titles, `when`, additions, reorders and changes ----------
 
 
