@@ -1032,25 +1032,68 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 def _widened_deletions(
     text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
 ) -> list[tuple[int, int]]:
-    """The deletions with neighbours joined, each widened over the blank line that would otherwise be left beside it.
+    """The deletions, each widened over the blank lines it would leave beside a bracket or another blank line.
 
-    Joining first matters: two deletions that touch, or that are separated by exactly one blank line, would each see a
-    blank line beside them and both widen, leaving two blank lines side by side where the deletions met, or a blank
-    line against a bracket once the last binding is gone. Such a blank line is joined into the deletion.
+    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. The blank
+    line between them goes with the group only when a bracket or a blank line stands on one side of the whole group;
+    otherwise it separates two kept bindings, so each segment is widened on its own and the blank line stays. Without
+    this, the blank line that separates two kept bindings would be taken with the deletion.
     """
-    joined: list[tuple[int, int]] = []
+    groups: list[list[tuple[int, int]]] = []
     for start, end in sorted(spans):
-        if joined and (start <= joined[-1][1] or _single_blank_line(text, joined[-1][1], start)):
-            joined[-1] = (joined[-1][0], max(joined[-1][1], end))
+        if groups and start <= groups[-1][-1][1]:
+            last_start, last_end = groups[-1][-1]
+            groups[-1][-1] = (last_start, max(last_end, end))
+        elif groups and _single_blank_line(text, groups[-1][-1][1], start):
+            groups[-1].append((start, end))
         else:
-            joined.append((start, end))
-    return [piece for start, end in joined for piece in _widen(text, comments, insert_points, start, end)]
+            groups.append([(start, end)])
+    return [piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)]
+
+
+def _group_pieces(
+    text: str, comments: _Comments, insert_points: set[int], segments: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """The ranges one group of deletion segments becomes (see `_widened_deletions`)."""
+    first, last = segments[0][0], segments[-1][1]
+    if len(segments) == 1 or _gap_goes_with_group(text, comments, first, last):
+        return _widen(text, comments, insert_points, first, last)
+    pieces: list[tuple[int, int]] = []
+    for start, end in segments:
+        pieces.extend(_widen(text, comments, insert_points, start, end))
+    return pieces
+
+
+def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) -> bool:
+    """True when a bracket or a blank line stands beside the whole group, so the blank line between its parts can go."""
+    if first > 0:
+        before_blank = _is_blank(text, comments, _line_start(text, first - 1), first - 1)
+        opens = _code_above(text, comments, first - 1).endswith("[")
+    else:
+        before_blank = opens = False
+    after_end = _next_line_start(text, last)
+    if last < len(text):
+        after_blank = _is_blank(text, comments, last, _line_end(text, last))
+        closes = comments.without_comments(last, after_end).strip().startswith("]")
+    else:
+        after_blank = closes = False
+    return before_blank or opens or after_blank or closes
 
 
 def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
     """True when the text between two deletions is exactly one blank line."""
     gap = text[gap_start:gap_end]
     return gap.strip() == "" and gap.count("\n") == 1
+
+
+def _is_blank(text: str, comments: _Comments, line_start: int, line_end: int) -> bool:
+    """True for a line with nothing on it. A line inside a block comment holds that comment, so it is not blank."""
+    return text[line_start:line_end].strip() == "" and not comments.overlaps(line_start, line_end)
+
+
+def _line_end(text: str, position: int) -> int:
+    newline = text.find("\n", position)
+    return len(text) if newline == -1 else newline
 
 
 def _code_above(text: str, comments: _Comments, line_end: int) -> str:
@@ -1064,7 +1107,7 @@ def _code_above(text: str, comments: _Comments, line_end: int) -> str:
         code = comments.without_comments(line_start, line_end).strip()
         if code:
             return code
-        if text[line_start:line_end].strip() == "" or line_start == 0:
+        if _is_blank(text, comments, line_start, line_end) or line_start == 0:
             return ""
         line_end = line_start - 1
 
@@ -1079,12 +1122,11 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     A blank line before the deletion is its own range, not part of it, so an insertion at the same offset is not
     skipped. The lines are read from the text as it stands, which is the text the deletion is made in.
     """
-    before = text[_line_start(text, start - 1) : start - 1] if start > 0 else None
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
     after_code = comments.without_comments(end, after_end) if end < len(text) else None
-    blank_before = before is not None and before.strip() == ""
-    blank_after = after is not None and after != "" and after.strip() == ""
+    blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
+    blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
     closes = after_code is not None and after_code.strip().startswith("]")
     pieces: list[tuple[int, int]] = []
