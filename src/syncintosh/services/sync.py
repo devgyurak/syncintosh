@@ -1097,7 +1097,8 @@ def _checked(
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
-# A content conflict settles in a few rounds: each round applies at least one new pick or stops.
+# The rounds that settle a content conflict are a guard: no pick adds a conflict address (see `_settle_content`), so
+# the cap is a backstop for a merge that did.
 _MAX_SETTLE_ROUNDS = 8
 
 
@@ -1143,9 +1144,8 @@ def _settle_content(
     key_choices: dict[KeyPath, Side | Proposal] = {}
     element_picks: dict[tuple[KeyPath, ElementId], Side | Proposal] = {}
     applied: set[str] = set()
-    # A pick can settle a conflict and expose another one the first merge did not show, so the views are read again
-    # from each merge until a round applies no new pick. Each round either applies a pick or stops, so the loop is
-    # bounded by the picks it can apply; the cap is a guard on top of that.
+    # The views are read again from each merge, so a conflict that a merge shows only after a pick still gets its own
+    # pick. A round that applies no new pick stops the loop, and the cap bounds it whatever the merge does.
     for _ in range(_MAX_SETTLE_ROUNDS):
         if not merged.conflicted:
             return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
