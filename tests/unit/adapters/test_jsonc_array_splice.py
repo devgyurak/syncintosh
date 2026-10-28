@@ -695,21 +695,6 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
-def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_between_them() -> None:
-    # given — the first bindings are removed and `a` is merged in; the blank line above `// S4` is the one the removed
-    # `d` had, and it separates the title from the new binding
-    template = (
-        '[\n    {"key": "c", "command": "y"},\n    /* N1 */\n    {"key": "b", "command": "z"},\n'
-        '    {"key": "c", "command": "x"},\n\n    // S4\n\n    {"key": "d", "command": "z"}\n]'
-    )
-
-    # when
-    rendered = _render(template, [{"key": "a", "command": "z"}])
-
-    # then — the new binding is followed by a blank line and the title; nothing is left glued to the title
-    assert rendered == '[\n    {"key": "a", "command": "z"}\n\n    // S4\n]'
-
-
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_in_both_line_endings(newline: str) -> None:
     # given — the same layout as the LF case, written with CRLF line endings
