@@ -824,9 +824,8 @@ def _best_render_seconds(count: int) -> float:
 
 
 def test_moving_a_binding_scales_with_the_number_of_bindings_not_their_square() -> None:
-    # given — the same merge at 400 and at 3200 bindings: eight times the size
-
-    # when — the time ratio is compared, so the test is independent of the machine's speed
+    # when — the same merge at 400 and at 3200 bindings (eight times the size); the time ratio is compared, so the test
+    # does not depend on the machine's speed
     ratio = _best_render_seconds(3200) / _best_render_seconds(400)
 
     # then — linear work gives a ratio near 8; the old quadratic scan gave about 50 on the same machine
@@ -908,7 +907,6 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
         and not _has_doubled_blank(rendered)
         and re.search(r"\n[ \t]*\n[ \t]*\]", rendered) is None
     )
-
 
 
 @settings(max_examples=400, deadline=None)

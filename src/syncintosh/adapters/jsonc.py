@@ -15,11 +15,13 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
   rewrites only that value's span; an added key is inserted after the sibling the remote had
   before it; a removed key takes its line, comma, and same-line comment with it, leaving the
   comment above it. Indentation, trailing-comma style, newline style, and a BOM are detected in
-  the original and kept. A multi-line array of keyed bindings is spliced one element at a time
-  (see `_splice_array`): each unchanged element keeps its own text and notes, and a removed
-  binding takes its notes with it. A value the splice cannot place — an inline array, an array
-  with a comma alone on its line, an object that is not laid out member-per-line — is
-  reserialized whole, and refused when a comment inside it would be lost.
+  the original and kept. A multi-line array is spliced one element at a time (see
+  `_splice_array`), with a rule or without one: each unchanged element keeps its own text and
+  notes. A removal that would take a note from an array with no rule is refused with a fixed
+  reason (`UNRULED_REMOVAL_REFUSED`), since nothing says which element the note belongs to. A
+  value the splice cannot place — an inline array, an array with a comma first on its line, an
+  object that is not laid out member-per-line — is reserialized whole, and refused when a
+  comment inside it would be lost.
 
 The merge itself is not this module's job: it returns a :class:`~syncintosh.core.tree.Tree` and
 takes one back, and the engine decides what changed (``core/merge.py``).
