@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import (
@@ -461,7 +461,7 @@ def test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json() -> None
 
 def _has_doubled_blank(text: str) -> bool:
     """True when two blank lines sit side by side, a whitespace-only difference every sync would show."""
-    return re.search(r"\n[ \t]*\n[ \t]*\n", text) is not None
+    return re.search(r"\r?\n[ \t]*\r?\n[ \t]*\r?\n", text) is not None
 
 
 def test_a_block_comment_note_moves_with_its_binding_and_stays_directly_above_it() -> None:
@@ -693,17 +693,6 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
-def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_it() -> None:
-    # given — the last binding is removed, and a blank line the user had before it would end up against the bracket
-    template = '[\n    {"key": "a", "command": "1"},\n\n    {"key": "x", "command": "2"}\n\n]'
-
-    # when
-    rendered = _render(template, [{"key": "a", "command": "1"}])
-
-    # then
-    assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
-
-
 def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_between_them() -> None:
     # given — the first bindings are removed and `a` is merged in; the blank line above `// S4` is the one the removed
     # `d` had, and it separates the title from the new binding
@@ -743,6 +732,17 @@ def test_a_binding_inserted_after_a_multi_line_block_comment_on_the_opening_brac
 
     # then — the blank line inside the comment is not a blank line of the array, and the one before `// S` stays
     assert rendered == '[ /* a\n\n   b */\n    {"key": "z", "command": "9"}\n\n    // S\n]'
+
+
+def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_it() -> None:
+    # given — the last binding is removed, and a blank line the user had before it would end up against the bracket
+    template = '[\n    {"key": "a", "command": "1"},\n\n    {"key": "x", "command": "2"}\n\n]'
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "1"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
@@ -995,29 +995,26 @@ def test_a_blank_line_inside_a_block_comment_after_the_opening_bracket_is_not_a_
     assert rendered == '[ /* a\n\n   b */\n    { "key": "y", "command": "2" }\n]'
 
 
-def _bindings_of(case: Any) -> list[dict[str, object]]:
-    """The base bindings of a rich case, as the merge would see them when nothing changed."""
-    return case[1]
-
-
 @given(case=_rich_case())
 def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     # given
-    template, _, _, _, value = case
+    template, bindings, _, _, value = case
 
     # when
     rendered = _try_render(template, value)
 
     # then — a render parses back to the merged value, never leaves two blank lines side by side, and never leaves a
     # blank line against either bracket, unless the template had one there. A merge that changes nothing keeps the
-    # layout exactly, blank lines and line endings included.
+    # layout exactly, blank lines and line endings included. A CRLF template renders with CRLF only.
     opens_blank = re.compile(r"\[[ \t]*\r?\n[ \t]*\r?\n")
+    crlf_only = "\r\n" not in template or re.search(r"(?<!\r)\n", rendered or "") is None
     assert rendered is None or (
         ADAPTER.parse(rendered) == tree_from_value(value)
         and not _has_doubled_blank(rendered)
         and re.search(r"\r?\n[ \t]*\r?\n[ \t]*\]", rendered) is None
         and (opens_blank.search(template) is not None or opens_blank.search(rendered) is None)
-        and (value != _bindings_of(case) or rendered == template)
+        and (value != bindings or rendered == template)
+        and crlf_only
     )
 
 
@@ -1107,3 +1104,166 @@ def test_a_rule_less_render_never_drops_a_note_when_it_succeeds(case: st.DataObj
     ]
     assert dropped == []
     assert misplaced == []
+
+
+# --- blank lines around removals and insertions: a property over chunks of titles and noted bindings ---------------
+
+
+@st.composite
+def _gap_case(draw: st.DrawFn) -> tuple[str, list[dict[str, Any]], list[bool], str, list[int], list[tuple[str, str]]]:
+    """A template of section titles and bindings (each binding may have a note directly above it), with blank lines
+    between chunks at random, plus which bindings the target keeps and which bindings it adds.
+
+    Returns the template, the chunks in template order, the blank flag before each chunk after the first, the newline,
+    the chunk indexes of the kept bindings, and the added pairs (the merged value's bindings the template never had).
+    """
+    kinds = draw(st.lists(st.sampled_from(("binding", "binding", "binding", "title")), min_size=1, max_size=9))
+    count = kinds.count("binding")
+    # Every binding gets its own key, so no two can share a group and each one is independently kept or removed.
+    keys = draw(st.permutations(range(count + 3)))
+    pairs = [(f"k{key}", "v") for key in keys[:count]]
+    notes = draw(st.lists(st.booleans(), min_size=count, max_size=count))
+    blanks = draw(st.lists(st.booleans(), min_size=len(kinds) - 1, max_size=len(kinds) - 1))
+    # A title with a binding right below it, and no blank line between them, is that binding's note; a section title is
+    # set off by a blank line.
+    blanks = [flag or kinds[position] == "title" for position, flag in enumerate(blanks)]
+    newline = draw(st.sampled_from(["\n", "\r\n"]))
+    keep_flags = draw(st.lists(st.booleans(), min_size=count, max_size=count))
+    additions = draw(st.lists(st.sampled_from(keys[count:]), unique=True, max_size=2))
+
+    chunks: list[dict[str, Any]] = []
+    binding_slot = 0
+    for position, kind in enumerate(kinds):
+        if kind == "title":
+            chunks.append({"kind": "title", "index": position, "line": f"    // S{position}"})
+            continue
+        key, command = pairs[binding_slot]
+        chunks.append(
+            {
+                "kind": "binding",
+                "index": position,
+                "key": key,
+                "command": command,
+                "note": notes[binding_slot],
+                "body": f'{{"key": "{key}", "command": "{command}"}}',
+            }
+        )
+        binding_slot += 1
+
+    lines = ["["]
+    for position, chunk in enumerate(chunks):
+        if position > 0 and blanks[position - 1]:
+            lines.append("")
+        if chunk["kind"] == "title":
+            lines.append(chunk["line"])
+            continue
+        if chunk["note"]:
+            lines.append(f"    // n{chunk['index']}")
+        later_binding = any(later["kind"] == "binding" for later in chunks[position + 1 :])
+        lines.append(f"    {chunk['body']}{',' if later_binding else ''}")
+    lines.append("]")
+
+    kept = [chunk["index"] for chunk in chunks if chunk["kind"] == "binding"]
+    kept = [index for index, flag in zip(kept, keep_flags, strict=True) if flag]
+    # An added binding has a key the template does not, so it is not paired with a template binding in the same group.
+    added = [(f"k{key}", "w") for key in additions]
+    return newline.join(lines), chunks, blanks, newline, kept, added
+
+
+def _output_lines(rendered: str) -> list[str]:
+    return rendered.replace("\r\n", "\n").split("\n")
+
+
+def _line_of(lines: list[str], text: str) -> int | None:
+    """The index of the line whose code is `text`, ignoring the trailing comma the line may carry."""
+    return next((index for index, line in enumerate(lines) if line.strip().rstrip(",") == text), None)
+
+
+def _start_line_of(lines: list[str], chunk: dict[str, Any]) -> int | None:
+    """The line where a chunk starts: its note when it has one, its own line otherwise."""
+    if chunk["kind"] == "title":
+        return _line_of(lines, chunk["line"].strip())
+    if chunk["note"]:
+        return _line_of(lines, f"// n{chunk['index']}")
+    return _line_of(lines, chunk["body"])
+
+
+def _survivor_gap_violations(
+    chunks: list[dict[str, Any]], blanks: list[bool], rendered: str, kept: list[int]
+) -> list[str]:
+    """Each pair of survivors (titles and kept bindings) with a removed binding between them, checked for blank lines.
+
+    The output gap between them must hold exactly one blank line when the template had any blank line in the gap, and
+    none otherwise, and nothing but blank lines.
+    """
+    lines = _output_lines(rendered)
+    survivors = [chunk for chunk in chunks if chunk["kind"] == "title" or chunk["index"] in kept]
+    problems: list[str] = []
+    for before, after in zip(survivors, survivors[1:], strict=False):
+        between = [chunk for chunk in chunks if before["index"] < chunk["index"] < after["index"]]
+        if not any(chunk["kind"] == "binding" and chunk["index"] not in kept for chunk in between):
+            continue
+        expected = 1 if any(blanks[before["index"] : after["index"]]) else 0
+        end = _line_of(lines, before["line"].strip() if before["kind"] == "title" else before["body"])
+        start = _start_line_of(lines, after)
+        if end is None or start is None or start <= end:
+            problems.append(f"missing survivor: {before['index']} -> {after['index']}")
+            continue
+        gap = lines[end + 1 : start]
+        if any(line.strip() for line in gap) or len(gap) != expected:
+            problems.append(f"gap {before['index']} -> {after['index']}: {gap!r} expected {expected} blank")
+    return problems
+
+
+def _title_above_insertion_violations(chunks: list[dict[str, Any]], blanks: list[bool], rendered: str) -> list[str]:
+    """Each title that had a blank line above it and a binding above it in the template keeps a blank line above it.
+
+    With every binding removed and new ones added, the additions land above the first binding, so the blank line the
+    title had after a removed binding must still separate it from what was inserted.
+    """
+    lines = _output_lines(rendered)
+    problems: list[str] = []
+    for chunk in chunks:
+        if chunk["kind"] != "title" or chunk["index"] == 0 or not blanks[chunk["index"] - 1]:
+            continue
+        if not any(earlier["kind"] == "binding" for earlier in chunks[: chunk["index"]]):
+            continue
+        at = _line_of(lines, chunk["line"].strip())
+        if at is None or at == 0 or lines[at - 1].strip():
+            problems.append(f"title {chunk['index']} lost its blank line above it")
+    return problems
+
+
+@settings(max_examples=500, deadline=None)
+@given(case=_gap_case())
+def test_a_blank_line_between_two_survivors_stays_one_line_when_removals_sit_between(case) -> None:
+    # given — the target keeps some bindings and removes others; nothing is added or reordered
+    template, chunks, blanks, _newline, kept, _added = case
+    value = [
+        {"key": chunk["key"], "command": chunk["command"]}
+        for chunk in chunks
+        if chunk["kind"] == "binding" and chunk["index"] in kept
+    ]
+
+    # when
+    rendered = _try_render(template, value)
+
+    # then — a render exists, and every gap between two survivors that had a removal between them holds one blank line
+    # if the template had any blank line there, and none otherwise
+    assert rendered is not None
+    assert _survivor_gap_violations(chunks, blanks, rendered, kept) == []
+
+
+@settings(max_examples=500, deadline=None)
+@given(case=_gap_case())
+def test_a_blank_line_above_a_title_stays_when_the_bindings_above_it_are_removed_and_one_is_added(case) -> None:
+    # given — every binding is removed and a new one is merged in, so the new binding lands above the first removal
+    template, chunks, blanks, _newline, _kept, added = case
+    assume(added and any(chunk["kind"] == "binding" for chunk in chunks))
+
+    # when
+    rendered = _try_render(template, [{"key": key, "command": command} for key, command in added])
+
+    # then — each title with a blank line above it in the template still has a blank line above it in the output
+    assert rendered is not None
+    assert _title_above_insertion_violations(chunks, blanks, rendered) == []
