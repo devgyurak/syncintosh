@@ -1151,7 +1151,7 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     pieces: list[tuple[int, int]] = []
     if blank_before and closes and not inserted:
         pieces.append((_line_start(text, start - 1), start))
-    if blank_after and (blank_before or opens) and not inserted:
+    if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end
     pieces.append((start, end))
     return pieces

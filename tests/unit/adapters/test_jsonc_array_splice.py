@@ -746,6 +746,42 @@ def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_
     assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
 
 
+def test_replacing_the_last_binding_leaves_no_blank_line_before_the_closing_bracket() -> None:
+    # given — a blank line sits between the last binding and the closing bracket
+    template = '[\n    {"key": "x", "command": "c"}\n\n]'
+
+    # when — `x` is replaced by `z`, which is inserted where `x` was
+    rendered = _render(template, [{"key": "z", "command": "c"}])
+
+    # then — the blank line the edit touches goes, so the bracket follows the new binding
+    assert rendered == '[\n    {"key": "z", "command": "c"}\n]'
+
+
+def test_a_binding_replacing_the_last_one_after_a_kept_binding_leaves_no_blank_line_before_the_bracket() -> None:
+    # given — `x` is the last binding, with a blank line before the bracket, and `a` is kept above it
+    template = '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"}\n\n]'
+
+    # when — `x` is replaced by `z`
+    rendered = _render(template, [{"key": "a", "command": "c"}, {"key": "z", "command": "c"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "c"},\n    {"key": "z", "command": "c"}\n]'
+
+
+def test_removing_two_bindings_above_a_blank_line_and_the_bracket_leaves_no_blank_line_before_it() -> None:
+    # given — `x` and `y` are removed; the blank line between them and the one before the bracket both go with them
+    template = (
+        '[\n    {"key": "a", "command": "c"},\n    {"key": "x", "command": "c"},\n\n'
+        '    {"key": "y", "command": "c"}\n\n]'
+    )
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "c"}])
+
+    # then
+    assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
