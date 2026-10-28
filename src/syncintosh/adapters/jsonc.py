@@ -897,8 +897,7 @@ def _clean_multiline_object(text: str, node: _ObjectNode, comments: _Comments) -
 def _member_tail_clean(comments: _Comments, value_end: int) -> bool:
     """True when what follows a value to end of line is only a comma, comments, and whitespace."""
     text = comments.text
-    line_end = text.find("\n", value_end)
-    line_end = len(text) if line_end == -1 else line_end
+    line_end = _line_end(text, value_end)
     # The comments are masked out with the parse's own spans, so a `, // hides **/*.map` tail reads
     # as a comma rather than as text that only looks like syntax.
     return comments.without_comments(value_end, line_end).strip() in ("", ",")
@@ -1065,19 +1064,14 @@ def _group_pieces(
 
 
 def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) -> bool:
-    """True when a bracket or a blank line stands beside the whole group, so the blank line between its parts can go."""
-    if first > 0:
-        before_blank = _is_blank(text, comments, _line_start(text, first - 1), first - 1)
-        opens = _code_above(text, comments, first - 1).endswith("[")
-    else:
-        before_blank = opens = False
+    """True when the blank line between two parts of a group goes with the group.
+
+    That is when a blank line or the opening bracket stands above the group, or the closing bracket stands below it.
+    """
+    blank_above = first > 0 and _is_blank(text, comments, _line_start(text, first - 1), first - 1)
     after_end = _next_line_start(text, last)
-    if last < len(text):
-        after_blank = _is_blank(text, comments, last, _line_end(text, last))
-        closes = comments.without_comments(last, after_end).strip().startswith("]")
-    else:
-        after_blank = closes = False
-    return before_blank or opens or after_blank or closes
+    closes = last < len(text) and comments.without_comments(last, after_end).strip().startswith("]")
+    return blank_above or _opens_array(text, comments, first) or closes
 
 
 def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
@@ -1094,6 +1088,11 @@ def _is_blank(text: str, comments: _Comments, line_start: int, line_end: int) ->
 def _line_end(text: str, position: int) -> int:
     newline = text.find("\n", position)
     return len(text) if newline == -1 else newline
+
+
+def _opens_array(text: str, comments: _Comments, start: int) -> bool:
+    """True when the nearest code above `start` is an opening bracket, so `start` is the array's first element."""
+    return start > 0 and _code_above(text, comments, start - 1).endswith("[")
 
 
 def _code_above(text: str, comments: _Comments, line_end: int) -> str:
@@ -1141,7 +1140,7 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     after = text[end:after_end] if end < len(text) else None
     blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
-    opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
+    opens = _opens_array(text, comments, start)
     closes = _bracket_below(text, comments, end)
     # An insertion at this offset puts the new binding where the deleted one was, so the blank line after the deletion
     # separates that binding from whatever follows (a section title, say) and must stay.

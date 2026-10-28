@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import random
 import re
@@ -1199,7 +1200,7 @@ def _survivor_gap_violations(
     lines = _output_lines(rendered)
     survivors = [chunk for chunk in chunks if chunk["kind"] == "title" or chunk["index"] in kept]
     problems: list[str] = []
-    for before, after in zip(survivors, survivors[1:], strict=False):
+    for before, after in itertools.pairwise(survivors):
         between = [chunk for chunk in chunks if before["index"] < chunk["index"] < after["index"]]
         if not any(chunk["kind"] == "binding" and chunk["index"] not in kept for chunk in between):
             continue
