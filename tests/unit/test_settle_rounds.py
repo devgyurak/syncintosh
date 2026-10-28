@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from syncintosh.core.content_merge import ContentMerge
-from syncintosh.services.sync import _settle_content, _Settled
+from syncintosh.services.sync import _MAX_SETTLE_ROUNDS, _settle_content, _Settled
 
 # `syncintosh.services.sync` is also a function name in the package, so the module is taken from `sys.modules`.
 _SYNC = sys.modules["syncintosh.services.sync"]
@@ -71,13 +71,21 @@ def test_a_pick_that_exposes_a_new_conflict_is_settled_in_the_same_run(monkeypat
 
 
 def test_a_pick_that_never_stops_exposing_conflicts_stops_at_the_round_cap(monkeypatch: Any) -> None:
-    # given — every conflict is new after the last pick, and the person has a pick for each
+    # given — every conflict is new after the last pick, and the person has a pick for each of a hundred of them
     chain = [f"k{index}" for index in range(100)]
     picks = {f"f{key}": "local" for key in chain}
+    calls: list[int] = []
+    inner = _chain_merge(chain)
+
+    def counting(*args: Any, **kwargs: Any) -> ContentMerge:
+        calls.append(1)
+        return inner(*args, **kwargs)
 
     # when
-    settled = _settle(monkeypatch, _chain_merge(chain), picks)
+    settled = _settle(monkeypatch, counting, picks)
 
-    # then — the loop stops at its cap, the file stays pending, and the detail names the conflict it reached
+    # then — the first merge plus one merge per round, and no more: the loop stops at its cap; the file stays pending,
+    # and the detail names the conflict the last round reached, which is the first one no pick settled
+    assert len(calls) == 1 + _MAX_SETTLE_ROUNDS
     assert settled.data is None
-    assert settled.detail != ""
+    assert settled.detail.endswith(": k8")
