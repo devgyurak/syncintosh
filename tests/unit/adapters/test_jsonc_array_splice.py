@@ -689,6 +689,18 @@ def test_a_section_title_stays_apart_from_a_binding_inserted_where_the_last_remo
     assert rendered == '[\n    // Section\n\n    {"key": "b", "command": "y"}\n]'
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
+    # given — a section title, then two bindings separated by a blank line, all of which are removed
+    template = '[\n    // section 0\n\n    { "key": "e", "command": "x" },\n\n    { "key": "g", "command": "y" }\n]'
+
+    # when
+    rendered = _render(template.replace("\n", newline), [])
+
+    # then — the title stays and no blank line is left against the closing bracket
+    assert rendered == f"[{newline}    // section 0{newline}]"
+
+
 def test_a_comment_inside_a_rule_less_inline_array_refuses_with_the_general_reason() -> None:
     # given — an inline array with a comment in it; its value changes, so it is rewritten whole
     template = '{\n  "editor.rulers": [80, /* why */ 120]\n}'
@@ -874,8 +886,14 @@ def test_a_rich_render_parses_back_exactly_or_refuses(case) -> None:
     # when
     rendered = _try_render(template, value)
 
-    # then — a render parses back to the merged value, and never leaves two blank lines side by side
-    assert rendered is None or (ADAPTER.parse(rendered) == tree_from_value(value) and not _has_doubled_blank(rendered))
+    # then — a render parses back to the merged value, never leaves two blank lines side by side, and never leaves a
+    # blank line against the closing bracket, including when every binding was removed
+    assert rendered is None or (
+        ADAPTER.parse(rendered) == tree_from_value(value)
+        and not _has_doubled_blank(rendered)
+        and re.search(r"\n[ \t]*\n[ \t]*\]", rendered) is None
+    )
+
 
 
 @settings(max_examples=400, deadline=None)

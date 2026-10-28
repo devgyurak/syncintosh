@@ -1030,18 +1030,25 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
 def _widened_deletions(
     text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
 ) -> list[tuple[int, int]]:
-    """The deletions with adjacent ones joined, each widened over the blank line that would otherwise be left beside it.
+    """The deletions with neighbours joined, each widened over the blank line that would otherwise be left beside it.
 
-    Joining first matters: two deletions that touch would each see a single blank line beside them and both widen,
-    leaving two blank lines side by side where the deletions met.
+    Joining first matters: two deletions that touch, or that are separated by exactly one blank line, would each see a
+    blank line beside them and both widen, leaving two blank lines side by side where the deletions met, or a blank
+    line against a bracket once the last binding is gone. Such a blank line is joined into the deletion.
     """
     joined: list[tuple[int, int]] = []
     for start, end in sorted(spans):
-        if joined and start <= joined[-1][1]:
+        if joined and (start <= joined[-1][1] or _single_blank_line(text, joined[-1][1], start)):
             joined[-1] = (joined[-1][0], max(joined[-1][1], end))
         else:
             joined.append((start, end))
     return [piece for start, end in joined for piece in _widen(text, comments, insert_points, start, end)]
+
+
+def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
+    """True when the text between two deletions is exactly one blank line."""
+    gap = text[gap_start:gap_end]
+    return gap.strip() == "" and gap.count("\n") == 1
 
 
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
