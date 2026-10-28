@@ -1121,10 +1121,12 @@ def _settle_content(
     however it was settled, goes through the syntax check.
 
     Picks are applied in rounds: each merge's views are read, the picks for views not yet settled are
-    applied, and the merge runs again, until a round applies no new pick or the cap is reached. This is a
-    guard, not a path the core takes today: a key pick has not been seen to expose a conflict the first
-    merge lacked (checked on randomly generated documents, not by a construction in the core), so the
-    rounds only matter for a merge that does, and the cap bounds them whatever the merge does.
+    applied, and the merge runs again, until a round applies no new pick or the cap is reached.
+
+    A pick does not add a conflict address: the addresses after a pick are a subset of those before it
+    (`tests/unit/test_pick_addresses.py`). A pick can still make a render refuse, with no address, and then
+    the file stays pending with the refusal's fixed reason. The rounds therefore guard against a merge that
+    adds an address after a pick, which the core does not do; the cap bounds them whatever the merge does.
     """
     adapter = presets.adapter_for(fmt)
     policy = presets.policy_for(path)

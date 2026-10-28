@@ -88,4 +88,4 @@ def test_a_pick_that_never_stops_exposing_conflicts_stops_at_the_round_cap(monke
     # and the detail names the conflict the last round reached, which is the first one no pick settled
     assert len(calls) == 1 + _MAX_SETTLE_ROUNDS
     assert settled.data is None
-    assert settled.detail.endswith(": k8")
+    assert settled.detail.endswith(f": k{_MAX_SETTLE_ROUNDS}")
