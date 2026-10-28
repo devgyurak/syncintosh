@@ -16,6 +16,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+from syncintosh.adapters import jsonc
 from syncintosh.adapters.jsonc import (
     CHANGED_WITH_NOTE_REFUSED,
     UNRULED_REMOVAL_REFUSED,
@@ -795,6 +796,26 @@ def test_removing_three_bindings_in_single_blank_line_steps_leaves_no_blank_line
 
     # then — the group goes as one piece, and no blank line is left in front of the bracket
     assert rendered == '[\n    {"key": "a", "command": "c"}\n]'
+
+
+@pytest.mark.parametrize(
+    ("ranges", "merged"),
+    [
+        ([(0, 5), (7, 9)], [(0, 5), (7, 9)]),
+        ([(0, 5), (5, 9)], [(0, 9)]),
+        ([(0, 5), (3, 9), (12, 14)], [(0, 9), (12, 14)]),
+        ([(7, 9), (0, 10), (2, 3)], [(0, 10)]),
+    ],
+    ids=["disjoint", "touching", "overlapping", "nested-and-unordered"],
+)
+def test_overlapping_deletions_merge_into_one_range_before_they_are_applied(
+    ranges: list[tuple[int, int]], merged: list[tuple[int, int]]
+) -> None:
+    # when
+    result = jsonc._union(ranges)
+
+    # then — the ranges come out in order and no two of them overlap
+    assert result == merged
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])

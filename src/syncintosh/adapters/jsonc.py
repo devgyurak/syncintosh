@@ -1050,7 +1050,21 @@ def _widened_deletions(
             groups[-1].append((start, end))
         else:
             groups.append([(start, end)])
-    return [piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)]
+    return _union([piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)])
+
+
+def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges in order, with overlapping or touching ones merged, so no two deletions overlap.
+
+    `_apply_edits` skips an edit that starts inside an earlier one, so an overlap would drop a deletion silently.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _group_pieces(
