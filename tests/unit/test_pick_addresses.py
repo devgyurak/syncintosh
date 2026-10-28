@@ -127,8 +127,16 @@ def _pick_some(rng: random.Random, first: Any, skip: float) -> tuple[dict[Any, A
     return choices, element_picks
 
 
+def _resolved(
+    choices: dict[Any, Any], element_picks: dict[Any, Any], before: set[tuple[Any, Any]], after: set[tuple[Any, Any]]
+) -> set[tuple[Any, Any]]:
+    """The addresses a pick was given for that the merge had and no longer has: picks that settled their conflict."""
+    picked = set(element_picks) | {(path, None) for path in choices}
+    return picked & before - after
+
+
 def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
-    """One random merge with some conflicts picked: whether a pick applied, and the addresses added."""
+    """One random merge with some conflicts picked: whether a pick settled its conflict, and the addresses added."""
     rng = random.Random(seed)
     base, local, remote = (tree_from_value(_random_doc(rng)) for _ in range(3))
     first = merge_tree(base, local, remote, keyed=_DOC_KEYED)
@@ -137,7 +145,7 @@ def _pick_case(seed: int) -> tuple[bool, list[tuple[Any, Any]]]:
         base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
     )
     before, after = _addresses(first), _addresses(second)
-    return bool(before) and bool(choices or element_picks), sorted(after - before, key=repr)
+    return bool(_resolved(choices, element_picks, before, after)), sorted(after - before, key=repr)
 
 
 @settings(max_examples=300, deadline=None)
@@ -213,8 +221,7 @@ def _related_case(seed: int) -> tuple[bool, bool, bool, bool, list[tuple[Any, An
         base, local, remote, keyed=_DOC_KEYED, choices=choices or None, element_picks=element_picks or None
     )
     before, after = _addresses(first), _addresses(second)
-    picked = set(element_picks) | {(path, None) for path in choices}
-    resolved = picked & before - after
+    resolved = _resolved(choices, element_picks, before, after)
     top = any(len(path) == 1 for path, _ in resolved)
     nested = any(len(path) == 2 for path, _ in resolved)
     key = any(element is None for _, element in resolved)
