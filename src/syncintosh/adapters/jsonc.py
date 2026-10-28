@@ -1143,10 +1143,13 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = start > 0 and _code_above(text, comments, start - 1).endswith("[")
     closes = _bracket_below(text, comments, end)
+    # An insertion at this offset puts the new binding where the deleted one was, so the blank line after the deletion
+    # separates that binding from whatever follows (a section title, say) and must stay.
+    inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and closes and start not in insert_points:
+    if blank_before and closes and not inserted:
         pieces.append((_line_start(text, start - 1), start))
-    if blank_after and (blank_before or opens):
+    if blank_after and (blank_before or opens) and not inserted:
         end = after_end
     pieces.append((start, end))
     return pieces

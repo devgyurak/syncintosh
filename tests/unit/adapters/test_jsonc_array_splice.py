@@ -704,6 +704,47 @@ def test_a_removal_right_before_the_closing_bracket_leaves_no_blank_line_before_
     assert rendered == '[\n    {"key": "a", "command": "1"}\n]'
 
 
+def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_between_them() -> None:
+    # given — the first bindings are removed and `a` is merged in; the blank line above `// S4` is the one the removed
+    # `d` had, and it separates the title from the new binding
+    template = (
+        '[\n    {"key": "c", "command": "y"},\n    /* N1 */\n    {"key": "b", "command": "z"},\n'
+        '    {"key": "c", "command": "x"},\n\n    // S4\n\n    {"key": "d", "command": "z"}\n]'
+    )
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "z"}])
+
+    # then — the new binding is followed by a blank line and the title; nothing is left glued to the title
+    assert rendered == '[\n    {"key": "a", "command": "z"}\n\n    // S4\n]'
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_binding_inserted_above_a_section_title_keeps_the_blank_line_in_both_line_endings(newline: str) -> None:
+    # given — the same layout as the LF case, written with CRLF line endings
+    template = (
+        '[\n    {"key": "c", "command": "y"},\n    /* N1 */\n    {"key": "b", "command": "z"},\n'
+        '    {"key": "c", "command": "x"},\n\n    // S4\n\n    {"key": "d", "command": "z"}\n]'
+    ).replace("\n", newline)
+
+    # when
+    rendered = _render(template, [{"key": "a", "command": "z"}])
+
+    # then
+    assert rendered == f'[{newline}    {{"key": "a", "command": "z"}}{newline}{newline}    // S4{newline}]'
+
+
+def test_a_binding_inserted_after_a_multi_line_block_comment_on_the_opening_bracket_keeps_the_blank_line() -> None:
+    # given — the opening bracket carries a block comment with a blank line inside it; `x` is removed, `z` is added
+    template = '[ /* a\n\n   b */\n    {"key": "x", "command": "1"},\n\n    // S\n\n    {"key": "y", "command": "2"}\n]'
+
+    # when
+    rendered = _render(template, [{"key": "z", "command": "9"}])
+
+    # then — the blank line inside the comment is not a blank line of the array, and the one before `// S` stays
+    assert rendered == '[ /* a\n\n   b */\n    {"key": "z", "command": "9"}\n\n    // S\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
