@@ -1188,12 +1188,18 @@ def _bracket_below(text: str, comments: _Comments, position: int) -> bool:
 def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
     """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
 
-    A blank line that sits between two unaffected elements is left alone. A blank line is removed when the deletion
-    would put it right after the opening `[`, right before the closing `]`, or beside another blank line; but not when
-    an insertion goes in at the deletion's first offset, since that blank line then separates a section title from the
-    new binding. Brackets are read with their comments taken out, so `[ // cols` opens an array and `// [` does not.
-    A blank line before the deletion is its own range, not part of it, so an insertion at the same offset is not
-    skipped. The lines are read from the text as it stands, which is the text the deletion is made in.
+    A blank line that sits between two unaffected elements is left alone. Of the blank lines beside the deletion:
+
+    - The one right above it goes when the line that opens the array stands right above that blank line, so it would
+      sit against `[`; or when the closing `]` follows the deletion and no insertion goes in at its first offset.
+    - The one right below it goes when a blank line or the opening `[` is above the deletion, or the closing `]` is
+      below it, so it would sit beside another blank line or against a bracket. An insertion at the deletion's first
+      offset keeps it unless `]` follows (`closes or not inserted`): the blank line then separates the new binding from
+      what comes next, a section title say, and only against `]` does it have nothing to separate.
+
+    Brackets are read with their comments taken out, so `[ // cols` opens an array and `// [` does not. A blank line
+    above the deletion is its own range, not part of it, so an insertion at the same offset is not skipped. The lines
+    are read from the text as it stands, which is the text the deletion is made in.
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
