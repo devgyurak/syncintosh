@@ -319,7 +319,7 @@ def test_restore_text_still_refuses_a_render_that_breaks_a_projection() -> None:
         def parse(self, text: str) -> Tree:
             return ADAPTER.parse(text)
 
-        def render(self, tree: Tree, template: str) -> str:
+        def render(self, tree: Tree, template: str, arrays=None) -> str:
             return "{}"
 
     policy = _policy(noise={NOISE})

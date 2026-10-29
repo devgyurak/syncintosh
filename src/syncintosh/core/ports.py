@@ -12,8 +12,9 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.advice import Advice, MaskedText
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
-from syncintosh.core.tree import Tree
+from syncintosh.core.tree import KeyPath, Tree
 
 if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
@@ -83,7 +84,7 @@ class ContentAdapter(Protocol):
         """Parse `text` into a typed tree, or raise when the text is not this format."""
         ...
 
-    def render(self, tree: Tree, template: str) -> str:
+    def render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None) -> str:
         """Render `tree` into text, using `template` as the unchanged baseline to edit."""
         ...
 

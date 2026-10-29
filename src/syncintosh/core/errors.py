@@ -152,6 +152,18 @@ class ContentParseError(DomainError):
     """
 
 
+class RenderRefused(ContentParseError):
+    """An adapter refused to render a merged value, for a reason it can name without echoing a value.
+
+    ``reason`` is a fixed text the adapter owns, never built from a setting's key or value, so a caller may show it
+    to a person. A caller that does not read the reason sees the same exception as any other render refusal.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class ProjectionError(DomainError):
     """A file could not be reduced to, or restored from, the preset's projected form.
 

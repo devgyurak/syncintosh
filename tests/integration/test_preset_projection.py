@@ -585,7 +585,7 @@ class _CountingAdapter:
         self.parses += 1
         return self._inner.parse(text)
 
-    def render(self, tree: Tree, template: str) -> str:
+    def render(self, tree: Tree, template: str, arrays=None) -> str:
         return self._inner.render(tree, template)
 
 

@@ -15,9 +15,13 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
   rewrites only that value's span; an added key is inserted after the sibling the remote had
   before it; a removed key takes its line, comma, and same-line comment with it, leaving the
   comment above it. Indentation, trailing-comma style, newline style, and a BOM are detected in
-  the original and kept. An array is one value, so a change to it (or to an object inside it) is
-  rendered by reserializing the whole array; an object that is not laid out member-per-line is
-  reserialized whole too, because a one-line object has no per-member line to splice.
+  the original and kept. A multi-line array is spliced one element at a time (see
+  `_splice_array`), with a rule or without one: each unchanged element keeps its own text and
+  notes. A removal that would take a note from an array with no rule is refused with a fixed
+  reason (`UNRULED_REMOVAL_REFUSED`), since nothing says which element the note belongs to. A
+  value the splice cannot place — an inline array, an array with a comma first on its line, an
+  object that is not laid out member-per-line — is reserialized whole, and refused when a
+  comment inside it would be lost.
 
 The merge itself is not this module's job: it returns a :class:`~syncintosh.core.tree.Tree` and
 takes one back, and the engine decides what changed (``core/merge.py``).
@@ -25,12 +29,17 @@ takes one back, and the engine decides what changed (``core/merge.py``).
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from functools import cached_property
 
-from syncintosh.core.errors import ContentParseError
-from syncintosh.core.tree import Array, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
+from syncintosh.core.errors import ContentParseError, RenderRefused
+from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
+from syncintosh.core.tree import Array, ElementId, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
 
 # Whitespace the scanner skips; a BOM is treated as leading trivia so spans stay absolute.
 _WHITESPACE = " \t\r\n\ufeff"
@@ -58,7 +67,7 @@ class _Span:
 @dataclass(frozen=True)
 class _ScalarNode:
     kind: ScalarKind
-    value: str | int | float | bool | None
+    value: str | int | float | bool | None = field(repr=False)
     span: _Span
 
 
@@ -282,7 +291,7 @@ class _Edit:
 
     start: int
     end: int
-    text: str
+    text: str = field(repr=False)
 
 
 class JsoncAdapter:
@@ -297,25 +306,37 @@ class JsoncAdapter:
             # malformed input for this format, not a crash the caller has to know about.
             raise ContentParseError(str(exc)) from exc
 
-    def render(self, tree: Tree, template: str) -> str:
-        """Render `tree` by editing `template`; unchanged content returns the bytes verbatim."""
+    def render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None) -> str:
+        """Render `tree` by editing `template`; unchanged content returns the bytes verbatim.
+
+        `arrays` names the arrays that pair an element by its identity when it is rewritten (`core/keyed_array.py`);
+        an array without a rule pairs nothing, so a changed element there is removed and re-added.
+        """
         try:
-            return self._render(tree, template)
+            return self._render(tree, template, arrays or {})
         except (ValueError, RecursionError) as exc:
             raise ContentParseError(str(exc)) from exc
 
-    def _render(self, tree: Tree, template: str) -> str:
+    def _render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule]) -> str:
         parser = _Parser(template)
         root = parser.parse()
         if _tree_of(root) == tree:
             return template
-        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments))).apply()
+        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays).apply()
 
 
 class _Diff:
     """Computes the minimal edits that turn the template's AST into the merged tree."""
 
-    def __init__(self, tree: Tree, root: _AstNode, text: str, comments: _Comments) -> None:
+    def __init__(
+        self,
+        tree: Tree,
+        root: _AstNode,
+        text: str,
+        comments: _Comments,
+        arrays: Mapping[KeyPath, ArrayRule],
+    ) -> None:
+        self._arrays = arrays
         self._source = text
         self._comments = comments
         self._root = root
@@ -352,6 +373,12 @@ class _Diff:
                     return
                 if self._splice_inline(node, path, edits):
                     return
+            if (
+                isinstance(leaf, Array)
+                and isinstance(node, _ArrayNode)
+                and self._splice_array(node, leaf, edits, self._arrays.get(path))
+            ):
+                return
             if leaf is not None:
                 self._rewrite(node, _leaf_text(leaf), edits)
             return
@@ -424,8 +451,8 @@ class _Diff:
             # The block goes after everything that survives — and after any removal, never inside
             # one. The padding before `}` sits between the last member and the brace, so a run that
             # emptied the object ends past that member's value; an insert placed there would be
-            # inside the deleted range, and the edit merge drops an edit that starts before the
-            # cursor. `{"a": 1, "b": 2}` handed `{c}` would then render as `{}` with no `c` in it.
+            # inside the deleted range, and `_apply_edits` refuses an edit that carries text and
+            # starts before the cursor. `{"a": 1, "b": 2}` handed `{c}` would then not render at all.
             natural = node.members[-1].value.span.end if node.members else node.span.end - 1
             position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
@@ -494,35 +521,165 @@ class _Diff:
         """Where a block that opens the object goes: above the first member's own comment.
 
         A comment on the line directly above the first member documents *that* member, so inserting
-        between the two would move the comment onto the inserted key. Walking up over `//` lines
-        keeps it attached to what it describes. A blank line, or any other line, stops the walk —
-        and so does a block comment, which the walk cannot count lines within: splicing inside one
-        would produce a file that does not parse, and refusing the insert is worse than leaving the
-        layout alone.
+        between the two would move the comment onto the inserted key. The walk is `_open_block_position`,
+        shared with the array splice, so the two cannot drift apart.
         """
         if not node.members:
             return _line_start(self._source, node.span.end - 1)
-        position = _line_start(self._source, node.members[0].span.start)
-        while position > 0:
-            previous = _line_start(self._source, position - 1)
-            # A comment on its own line above the member documents that member, so the block goes
-            # above the comment. `is_own_line_comment` answers from the parse rather than by reading
-            # the line, which would call a `/*` inside a `//` comment a block comment and stop early.
-            if not self._comments.is_own_line_comment(previous, position - 1):
-                break
-            position = previous
-        return position
+        return _open_block_position(self._source, self._comments, node.members[0].span.start)
 
-    def _rewrite(self, node: _AstNode, text: str, edits: list[_Edit]) -> None:
+    def _rewrite(self, node: _AstNode, text: str, edits: list[_Edit], refusal: str | None = None) -> None:
         """Replace a whole value, refusing when that would silently drop a comment.
 
         Rewriting a span is only safe while it holds no comment: the merged tree has no comments,
         so a re-parse check cannot notice them gone. Refusing turns a comment loss into a
-        conflict, which the caller surfaces rather than publishing a stripped file.
+        conflict, which the caller surfaces rather than publishing a stripped file. The refusal
+        names a changed binding only when the caller is rewriting one (`refusal`); any other value
+        gets the general text.
         """
         if self._comments.overlaps(node.span.start, node.span.end):
-            raise ContentParseError("cannot rewrite a value that contains a comment")
+            raise RenderRefused(refusal or VALUE_WITH_NOTE_REFUSED)
         edits.append(_Edit(node.span.start, node.span.end, text))
+
+    def _splice_array(self, node: _ArrayNode, leaf: Array, edits: list[_Edit], rule: ArrayRule | None) -> bool:
+        """Edit a one-element-per-line array to the merged elements, moving each binding with its own notes.
+
+        A binding's notes are the block of comment lines directly above it (no blank line between), the comments on
+        its own line, and the comments inside it. Each template element is matched to the merged element with the same
+        key: its identity under the array's rule, or its exact value when there is no rule; then, within a group, the
+        elements left on each side pair in order. The longest run of matches that keeps the order stays in place; every
+        other matched binding moves with its notes. A changed binding is rewritten in its own span, which refuses when a
+        comment is inside that span. A removed binding takes its own notes with it: the block directly above it, the
+        comments on its lines, and the comments inside it (`_owned_start`). A blank line ends the block, so a section
+        title stays. Without a rule a removal that would take any note is refused, because nothing can tell which
+        binding the note belonged to. The comma follows the final order, and a trailing comma is kept when the template
+        had one. Returns False for a layout this does not handle, so the caller rewrites the whole value.
+        """
+        if not node.elements or not _clean_multiline_array(self._source, node, self._comments):
+            return False
+        text = self._source
+        template = [_to_node(element) for element in node.elements]
+        wanted = list(leaf.elements)
+        pairs = _match(template, wanted, rule)
+        stay = _stable(pairs)
+        template_of = {m: t for t, m in pairs}
+        matched = {t for t, _ in pairs}
+        slots: list[_Slot] = []
+        for m, element in enumerate(wanted):
+            if m not in template_of:
+                slots.append(_Added(element))
+                continue
+            t = template_of[m]
+            slots.append(_Placed(t, None if template[t] == element else element, t in stay))
+        removed = [t for t in range(len(template)) if t not in matched]
+        moved = [t for t, _ in pairs if t not in stay]
+
+        trailing = _comma_after(self._comments, node.elements[-1]) is not None
+        indent = text[_line_start(text, node.elements[0].span.start) : node.elements[0].span.start]
+        multiline = any(
+            isinstance(element, _ObjectNode) and "\n" in text[element.span.start : element.span.end]
+            for element in node.elements
+        )
+        unit = _array_unit(text, node, indent) or self._indent
+        last = len(slots) - 1
+        for position, slot in enumerate(slots):
+            if not (isinstance(slot, _Placed) and slot.stay):
+                continue
+            if slot.replacement is not None:
+                # A changed element keeps its span; a comment inside it refuses the rewrite (a conflict).
+                self._rewrite(
+                    node.elements[slot.index],
+                    self._element_text(slot.replacement, indent, multiline, unit),
+                    edits,
+                    refusal=CHANGED_WITH_NOTE_REFUSED,
+                )
+            element = node.elements[slot.index]
+            comma = _comma_at(self._comments, element.span.end)
+            wants = position < last or trailing
+            if wants and comma is None:
+                edits.append(_Edit(element.span.end, element.span.end, ","))
+            if not wants and comma is not None:
+                edits.append(_Edit(comma, comma + 1, ""))
+
+        # Insertions go before the removals below, so at a shared offset the new lines come first.
+        pending: list[str] = []
+        anchor: int | None = None
+        insert_points: set[int] = set()
+        for position, slot in enumerate(slots):
+            wants = position < last or trailing
+            if isinstance(slot, _Placed) and slot.stay:
+                if pending:
+                    start = _open_block_position(text, self._comments, node.elements[slot.index].span.start)
+                    edits.append(_Edit(start, start, "".join(pending)))
+                    insert_points.add(start)
+                    pending = []
+                anchor = slot.index
+            elif isinstance(slot, _Added):
+                element_text = self._element_text(slot.value, indent, multiline, unit)
+                pending.append(indent + element_text + ("," if wants else "") + self._newline)
+            else:
+                pending.append(self._moved_line(node, slot, indent, multiline, unit, wants))
+        if pending:
+            if anchor is None:
+                start = _open_block_position(text, self._comments, node.elements[0].span.start)
+            else:
+                end = node.elements[anchor].span.end
+                start = _past_block_comment(self._comments, end, _next_line_start(text, end))
+            edits.append(_Edit(start, start, "".join(pending)))
+            insert_points.add(start)
+
+        deletions: list[tuple[int, int]] = []
+        for index in removed:
+            # A removed element takes its own notes with it: the comment block directly above it, the comments on its
+            # lines and the comments inside it (`_owned_start`). A blank line ends the block, so a section title stays.
+            element = node.elements[index]
+            start = _owned_start(text, self._comments, element.span.start)
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            if rule is None and self._comments.overlaps(start, end):
+                # Without a rule nothing says which binding a note belongs to, so a removal that would take one
+                # is refused rather than losing it.
+                raise RenderRefused(UNRULED_REMOVAL_REFUSED)
+            deletions.append((start, end))
+        for index in moved:
+            # A moved element carries the block of comment lines directly above it, so its notes move with it.
+            element = node.elements[index]
+            start = _owned_start(text, self._comments, element.span.start)
+            end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+            deletions.append((start, end))
+        for start, end in _widened_deletions(text, deletions, self._comments, insert_points):
+            edits.append(_Edit(start, end, ""))
+        return True
+
+    def _moved_line(self, node: _ArrayNode, slot: _Placed, indent: str, multiline: bool, unit: str, wants: bool) -> str:
+        """A matched element that changes place, re-emitted with its own text, comments and tail."""
+        text = self._source
+        element = node.elements[slot.index]
+        if slot.replacement is None:
+            core = text[element.span.start : element.span.end]
+        else:
+            if self._comments.overlaps(element.span.start, element.span.end):
+                raise RenderRefused(CHANGED_WITH_NOTE_REFUSED)
+            core = self._element_text(slot.replacement, indent, multiline, unit)
+        start = _line_start(text, element.span.start)
+        line_end = _line_end_outside_comment(self._comments, start, _next_line_start(text, element.span.end))
+        comma = _comma_at(self._comments, element.span.end)
+        if comma is not None and comma < line_end:
+            tail = text[element.span.end : comma] + text[comma + 1 : line_end]
+        else:
+            tail = text[element.span.end : line_end]
+        notes = text[_owned_start(text, self._comments, element.span.start) : start]
+        return notes + indent + core + ("," if wants else "") + tail.rstrip("\r\n") + self._newline
+
+    def _element_text(self, node: Node, indent: str, multiline: bool, unit: str) -> str:
+        """An array element's text: an object spread over lines, indented in the array's own unit."""
+        if multiline and isinstance(node, Object) and node.entries:
+            inner = indent + unit
+            members = [
+                inner + json.dumps(key, ensure_ascii=False) + ": " + self._element_text(value, inner, True, unit)
+                for key, value in node.entries
+            ]
+            return "{" + self._newline + ("," + self._newline).join(members) + self._newline + indent + "}"
+        return _leaf_text(node)
 
     def _matches(self, node: _AstNode, path: KeyPath) -> bool:
         children = self._children(path)
@@ -740,8 +897,7 @@ def _clean_multiline_object(text: str, node: _ObjectNode, comments: _Comments) -
 def _member_tail_clean(comments: _Comments, value_end: int) -> bool:
     """True when what follows a value to end of line is only a comma, comments, and whitespace."""
     text = comments.text
-    line_end = text.find("\n", value_end)
-    line_end = len(text) if line_end == -1 else line_end
+    line_end = _line_end(text, value_end)
     # The comments are masked out with the parse's own spans, so a `, // hides **/*.map` tail reads
     # as a comma rather than as text that only looks like syntax.
     return comments.without_comments(value_end, line_end).strip() in ("", ",")
@@ -757,18 +913,22 @@ class _Comments:
     and a settings file documents path globs in its comments.
     """
 
-    text: str
+    text: str = field(repr=False)
     spans: tuple[_Span, ...]
 
     def overlaps(self, start: int, end: int) -> bool:
         """True when a comment starts, ends, or lies inside ``[start, end)``."""
-        return any(span.start < end and span.end > start for span in self.spans)
+        # Spans do not overlap, so the first span that ends after `start` is the only candidate.
+        index = bisect.bisect_right(self._ends, start)
+        return index < len(self.spans) and self.spans[index].start < end
 
     def closes_after(self, start: int, limit: int) -> int | None:
         """The end of a comment opening in ``[start, limit)`` and closing at or after `limit`."""
-        for span in self.spans:
-            if start <= span.start < limit and span.end > limit:
-                return span.end
+        first = bisect.bisect_left(self._starts, start)
+        last = bisect.bisect_left(self._starts, limit)
+        # Of the spans opening before `limit`, only the last one can reach past it: the others end before it starts.
+        if last > first and self.spans[last - 1].end > limit:
+            return self.spans[last - 1].end
         return None
 
     def next_meaningful(self, position: int) -> int:
@@ -777,37 +937,70 @@ class _Comments:
         while True:
             while cursor < len(self.text) and self.text[cursor] in _WHITESPACE:
                 cursor += 1
-            span = next((item for item in self.spans if item.start <= cursor < item.end), None)
+            span = self._span_at(cursor)
             if span is None:
                 return cursor
             cursor = span.end
 
     def without_comments(self, start: int, end: int) -> str:
-        """The text of ``[start, end)`` with every comment in it blanked out."""
+        """The text of ``[start, end)`` with every comment in it removed."""
         pieces: list[str] = []
         cursor = start
-        for span in self.spans:
-            if span.end <= cursor or span.start >= end:
-                continue
+        index = bisect.bisect_right(self._ends, start)
+        while index < len(self.spans) and self.spans[index].start < end:
+            span = self.spans[index]
             pieces.append(self.text[cursor : max(cursor, span.start)])
             cursor = min(end, span.end)
+            index += 1
         pieces.append(self.text[cursor:end])
         return "".join(pieces)
 
-    def is_own_line_comment(self, line_start: int, line_end: int) -> bool:
-        """True when the line holds nothing but whitespace and a `//` comment that ends it.
+    def own_comment_start(self, line_start: int, line_end: int) -> int | None:
+        """Where the comment that makes a line comment-only starts, or `None` when the line holds code or is blank.
 
-        The comment has to *start* the line. A line can be the inside of a block comment and still
-        look like one — `/* fuzz` above, `still */ // note` here — and stepping the insertion over it
-        would put the new member inside the comment, where it parses as nothing.
+        Every character that is not a space must lie inside a comment. The comment may be a `//` line or a `/* … */`
+        block that opens on this line or on an earlier one, so a block spread over lines counts as one note. A block
+        that opens after code on an earlier line does not count: the code on that line would be taken with it.
         """
-        first = line_start
-        while first < line_end and self.text[first] in _SPACES:
-            first += 1
-        return any(
-            span.start == first and span.end >= line_end - 1 and self.text.startswith("//", span.start)
-            for span in self.spans
+        content = [i for i in range(line_start, line_end) if self.text[i] not in _SPACES and self.text[i] != "\r"]
+        if not content:
+            return None
+        covering = [self._span_at(i) for i in content]
+        first = covering[0]
+        if first is None or any(span is None for span in covering):
+            return None
+        before_block = self.text[_line_start(self.text, first.start) : first.start]
+        if first.start >= line_start or before_block.strip(" \t") == "":
+            return first.start
+        return None
+
+    def opened_above(self, line_start: int, line_end: int) -> int | None:
+        """Where the comment that covers a line's first character began, when that was on an earlier line.
+
+        `None` for a line whose first character is code, a space-only line, or a comment that begins on the line.
+        """
+        first = next(
+            (i for i in range(line_start, line_end) if self.text[i] not in _SPACES and self.text[i] != "\r"), None
         )
+        span = None if first is None else self._span_at(first)
+        return span.start if span is not None and span.start < line_start else None
+
+    @cached_property
+    def _starts(self) -> tuple[int, ...]:
+        """The start of each comment span; the parser records them in text order, so this is sorted."""
+        return tuple(span.start for span in self.spans)
+
+    @cached_property
+    def _ends(self) -> tuple[int, ...]:
+        """The end of each comment span, in the same order as `_starts`."""
+        return tuple(span.end for span in self.spans)
+
+    def _span_at(self, position: int) -> _Span | None:
+        index = bisect.bisect_right(self._starts, position) - 1
+        if index < 0:
+            return None
+        span = self.spans[index]
+        return span if position < span.end else None
 
 
 def _line_start(text: str, pos: int) -> int:
@@ -846,15 +1039,365 @@ def _line_end_outside_comment(comments: _Comments, start: int, end: int) -> int:
         limit = _next_line_start(comments.text, closing)
 
 
-def _comma_after(comments: _Comments, member: _MemberNode) -> int | None:
-    """The offset of the comma that follows `member`'s value, or `None` when there is none.
+def _widened_deletions(
+    text: str, spans: list[tuple[int, int]], comments: _Comments, insert_points: set[int]
+) -> list[tuple[int, int]]:
+    """The deletions, each widened over the blank lines it would leave beside a bracket or a blank line.
+
+    Two deletions that touch are one segment. Two deletions separated by exactly one blank line form a group. A group
+    is either joined or not, decided by `_gap_goes_with_group`: a blank line or the opening bracket above it, or the
+    closing bracket below it. A joined group is widened once, as one range from its first deletion to its last, so the
+    blank line between its parts goes with it. A group that is not joined is widened segment by segment, so the blank
+    line that separates two parts of the array that stay is kept. The neighbours that decide this need not be
+    bindings: a section title or a comment can stand there. Ranges that overlap after widening are merged last
+    (`_union`), so no two deletions overlap.
+    """
+    groups: list[list[tuple[int, int]]] = []
+    for start, end in sorted(spans):
+        if groups and start <= groups[-1][-1][1]:
+            last_start, last_end = groups[-1][-1]
+            groups[-1][-1] = (last_start, max(last_end, end))
+        elif groups and _single_blank_line(text, groups[-1][-1][1], start):
+            groups[-1].append((start, end))
+        else:
+            groups.append([(start, end)])
+    return _union([piece for group in groups for piece in _group_pieces(text, comments, insert_points, group)])
+
+
+def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges in order, with overlapping ones merged, so no two deletions overlap.
+
+    Ranges that only touch stay apart: an insertion at the offset where they meet would fall inside a merged range, and
+    an edit that starts inside an earlier one that carries text, or reaches past it, refuses the render (see
+    `_apply_edits`).
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _group_pieces(
+    text: str, comments: _Comments, insert_points: set[int], segments: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """The ranges one group of deletion segments becomes (see `_widened_deletions`)."""
+    first, last = segments[0][0], segments[-1][1]
+    if len(segments) == 1 or _gap_goes_with_group(text, comments, first, last):
+        return _widen(text, comments, insert_points, first, last)
+    pieces: list[tuple[int, int]] = []
+    for start, end in segments:
+        pieces.extend(_widen(text, comments, insert_points, start, end))
+    return pieces
+
+
+def _gap_goes_with_group(text: str, comments: _Comments, first: int, last: int) -> bool:
+    """True when the blank line between two parts of a group goes with the group.
+
+    That is when a blank line or the opening bracket stands above the group, or the closing bracket stands below it.
+    """
+    blank_above = first > 0 and _is_blank(text, comments, _line_start(text, first - 1), first - 1)
+    return blank_above or _opens_array(text, comments, first) or _bracket_below(text, comments, last)
+
+
+def _single_blank_line(text: str, gap_start: int, gap_end: int) -> bool:
+    """True when the text between two deletions is exactly one blank line."""
+    gap = text[gap_start:gap_end]
+    return gap.strip() == "" and gap.count("\n") == 1
+
+
+def _is_blank(text: str, comments: _Comments, line_start: int, line_end: int) -> bool:
+    """True for a line with nothing on it. A line inside a block comment holds that comment, so it is not blank."""
+    return text[line_start:line_end].strip() == "" and not comments.overlaps(line_start, line_end)
+
+
+def _line_end(text: str, position: int) -> int:
+    newline = text.find("\n", position)
+    return len(text) if newline == -1 else newline
+
+
+def _opens_array(text: str, comments: _Comments, start: int) -> bool:
+    """True when the nearest code above `start` is an opening bracket, so `start` is the array's first element."""
+    return start > 0 and _code_above(text, comments, start - 1).endswith("[")
+
+
+def _is_opening_line(text: str, comments: _Comments, line_end: int) -> bool:
+    """True when the line ending at `line_end` opens the array: its code ends in `[`.
+
+    A block comment that opens on that line and runs over the next ones belongs to it, so the lines of that comment are
+    walked up. A comment of its own on a line of its own, a section title, stands between the bracket and what follows,
+    so it ends the walk with no.
+    """
+    while line_end >= 0:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code.endswith("[")
+        opened = comments.opened_above(line_start, line_end)
+        if opened is None:
+            return False
+        line_end = _line_end(text, opened)
+    return False
+
+
+def _code_above(text: str, comments: _Comments, line_end: int) -> str:
+    """The code of the nearest line at or above `line_end` that holds any, with its comments taken out.
+
+    Lines that hold only comments are skipped, so a bracket followed by a block comment that runs over several
+    lines still counts as the line that opens the array. A blank line ends the search with nothing, as does the top.
+    """
+    while True:
+        line_start = _line_start(text, line_end)
+        code = comments.without_comments(line_start, line_end).strip()
+        if code:
+            return code
+        if _is_blank(text, comments, line_start, line_end) or line_start == 0:
+            return ""
+        line_end = line_start - 1
+
+
+def _bracket_below(text: str, comments: _Comments, position: int) -> bool:
+    """True when the first line at or below `position` that is not blank starts with the closing `]`.
+
+    Blank lines are skipped, because a deletion that leaves a blank line in front of the closing bracket leaves the
+    same blank line as one a deletion right before the bracket would. A line of comments before the bracket is not
+    skipped: it stays, so the bracket is not reached.
+    """
+    while position < len(text):
+        line_end = _line_end(text, position)
+        if not _is_blank(text, comments, position, line_end):
+            return comments.without_comments(position, line_end).strip().startswith("]")
+        position = _next_line_start(text, line_end)
+    return False
+
+
+def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, end: int) -> list[tuple[int, int]]:
+    """A deletion `[start, end)` and the blank lines it takes with it, as separate ranges.
+
+    A blank line that sits between two unaffected elements is left alone. Of the blank lines beside the deletion:
+
+    - The one right above it goes when the line that opens the array stands right above that blank line, so it would
+      sit against `[`; or when the closing `]` follows the deletion and no insertion goes in at its first offset.
+    - The one right below it goes when a blank line or the opening `[` is above the deletion, or the closing `]` is
+      below it, so it would sit beside another blank line or against a bracket. An insertion at the deletion's first
+      offset keeps it unless `]` follows (`closes or not inserted`): the blank line then separates the new binding from
+      what comes next, a section title say, and only against `]` does it have nothing to separate.
+
+    Brackets are read with their comments taken out, so `[ // cols` opens an array and `// [` does not. A blank line
+    above the deletion is its own range, not part of it, so an insertion at the same offset is not skipped. The lines
+    are read from the text as it stands, which is the text the deletion is made in.
+    """
+    after_end = _next_line_start(text, end)
+    after = text[end:after_end] if end < len(text) else None
+    blank_start = _line_start(text, start - 1) if start > 0 else 0
+    blank_before = start > 0 and _is_blank(text, comments, blank_start, start - 1)
+    blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
+    opens = _opens_array(text, comments, start)
+    closes = _bracket_below(text, comments, end)
+    # An insertion at this offset puts the new binding where the deleted one was. The blank line after the deletion then
+    # separates that binding from whatever follows (a section title, say) and must stay, unless the closing bracket
+    # follows: then it would sit against the bracket.
+    inserted = start in insert_points
+    pieces: list[tuple[int, int]] = []
+    if blank_before and ((closes and not inserted) or _is_opening_line(text, comments, blank_start - 1)):
+        pieces.append((blank_start, start))
+    if blank_after and (blank_before or opens or closes) and (closes or not inserted):
+        end = after_end
+    pieces.append((start, end))
+    return pieces
+
+
+def _comma_after(comments: _Comments, member: _MemberNode | _AstNode) -> int | None:
+    """The offset of the comma that follows a value, or `None` when there is none.
 
     A comment between the value and its comma is skipped, so `1 /* n */,` reads as followed by a
     comma; a line comment ends the search, because a comma cannot follow it on the line.
     """
-    position = comments.next_meaningful(member.value.span.end)
+    value = member.value if isinstance(member, _MemberNode) else member
+    return _comma_at(comments, value.span.end)
+
+
+def _comma_at(comments: _Comments, end: int) -> int | None:
+    """The offset of the comma that follows a value ending at `end`, or `None` (see `_comma_after`)."""
+    position = comments.next_meaningful(end)
     text = comments.text
     return position if position < len(text) and text[position] == "," else None
+
+
+# Refusals are fixed texts: a message that echoed a value or a key name would leak it into a conflict.
+# A changed value that holds a comment cannot be rewritten without losing it; the text names only the cause.
+VALUE_WITH_NOTE_REFUSED = (
+    "this value changed and has a comment inside it, so it cannot be written without losing that comment"
+)
+
+# A changed binding is rewritten whole, so a comment inside it would be lost; the text names the cause, never a value.
+CHANGED_WITH_NOTE_REFUSED = (
+    "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
+)
+
+# Two edits to one file overlap (an array element or an object member), so one of them would be dropped; the text names
+# only the cause.
+EDIT_OVERLAP_REFUSED = "two edits to this file overlap, so it cannot be written without losing one of them"
+
+UNRULED_REMOVAL_REFUSED = (
+    "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
+)
+
+
+@dataclass(frozen=True)
+class _Placed:
+    """A template element the merged array keeps (`stay`) or moves, with its new value when the merge changed it."""
+
+    index: int
+    replacement: Node | None
+    stay: bool
+
+
+@dataclass(frozen=True)
+class _Added:
+    """A value the merged array has and the template does not, placed where it falls in order."""
+
+    value: Node
+
+
+_Slot = _Placed | _Added
+
+
+def _key(identity: ElementId | None, node: Node) -> tuple[str, object]:
+    """Which binding a node is: its identity under the rule, or its exact value when the rule names none."""
+    return ("id", identity) if identity is not None else ("value", node)
+
+
+def _match(template: list[Node], wanted: list[Node], rule: ArrayRule | None) -> list[tuple[int, int]]:
+    """The `(template index, merged index)` pairs of elements that are the same binding, in template order.
+
+    Same key pairs first, in order of occurrence. Then, within a group, the bindings left on each side pair in order,
+    so a changed binding (its command changed, say) is rewritten in its own place rather than removed and re-added.
+    Each identity is computed once.
+    """
+    template_ids = [None if rule is None else element_identity(node, rule) for node in template]
+    wanted_ids = [None if rule is None else element_identity(node, rule) for node in wanted]
+    free: dict[tuple[str, object], deque[int]] = {}
+    for m, (node, identity) in enumerate(zip(wanted, wanted_ids, strict=True)):
+        free.setdefault(_key(identity, node), deque()).append(m)
+    pairs: dict[int, int] = {}
+    for t, (node, identity) in enumerate(zip(template, template_ids, strict=True)):
+        candidates = free.get(_key(identity, node))
+        if candidates:
+            pairs[t] = candidates.popleft()
+    if rule is not None:
+        taken = set(pairs.values())
+        left_by_group: dict[tuple[tuple[str, str | None], ...], deque[int]] = {}
+        for m, identity in enumerate(wanted_ids):
+            if identity is not None and m not in taken:
+                left_by_group.setdefault(element_group(identity, rule), deque()).append(m)
+        for t, identity in enumerate(template_ids):
+            if t in pairs or identity is None:
+                continue
+            candidates = left_by_group.get(element_group(identity, rule))
+            if candidates:
+                pairs[t] = candidates.popleft()
+    return sorted(pairs.items())
+
+
+def _stable(pairs: list[tuple[int, int]]) -> set[int]:
+    """The template indexes of the longest run of pairs whose merged indexes also ascend: those keep their place.
+
+    Every other pair moves. Found by longest increasing subsequence, so it is the fewest moves that keep the order.
+    """
+    tails: list[int] = []  # the smallest merged index that ends an increasing run of each length
+    tail_pairs: list[int] = []  # the pair index that ends that run
+    previous = [-1] * len(pairs)
+    for index, (_, m) in enumerate(pairs):
+        position = bisect.bisect_left(tails, m)
+        previous[index] = tail_pairs[position - 1] if position > 0 else -1
+        if position == len(tails):
+            tails.append(m)
+            tail_pairs.append(index)
+        else:
+            tails[position] = m
+            tail_pairs[position] = index
+    if not tail_pairs:
+        return set()
+    kept: set[int] = set()
+    index = tail_pairs[-1]
+    while index != -1:
+        kept.add(pairs[index][0])
+        index = previous[index]
+    return kept
+
+
+def _clean_multiline_array(text: str, node: _ArrayNode, comments: _Comments) -> bool:
+    """True when the array spans lines, its closing bracket is alone, and each element starts its own line.
+
+    Only then can elements be spliced by line. An array on one line, or one with two elements on a line, or
+    a comment before an element on its line, is rewritten whole instead, as before.
+    """
+    if "\n" not in text[node.span.start : node.span.end]:
+        return False
+    close = node.span.end - 1
+    if text[_line_start(text, close) : close].strip() != "":
+        return False
+    return all(
+        text[_line_start(text, element.span.start) : element.span.start].strip() == ""
+        and _member_tail_clean(comments, element.span.end)
+        and _comma_stays_on_its_line(text, comments, element)
+        for element in node.elements
+    )
+
+
+def _comma_stays_on_its_line(text: str, comments: _Comments, element: _AstNode) -> bool:
+    """True when an element's comma, if it has one, is on the element's own line rather than a line of its own.
+
+    A comma alone on a line would survive the removal of its element's line and leave the array invalid, so such a
+    layout is not spliced; the whole value is rewritten instead.
+    """
+    comma = _comma_at(comments, element.span.end)
+    return comma is None or "\n" not in text[element.span.end : comma]
+
+
+def _owned_start(text: str, comments: _Comments, element_start: int) -> int:
+    """Where an element's own notes begin: the block of comment lines directly above it, with no blank line between.
+
+    This is the one rule that decides which binding a note belongs to. A blank line, or a line of code, ends the block,
+    and a note past a blank line is a section title that belongs to no element. A `//` line and a `/* … */` block
+    both count, so a note written as a block moves with its element, goes with it when it is removed, or is refused.
+    """
+    position = _line_start(text, element_start)
+    while position > 0:
+        start = comments.own_comment_start(_line_start(text, position - 1), position - 1)
+        if start is None:
+            break
+        position = _line_start(text, start)
+    return position
+
+
+def _open_block_position(text: str, comments: _Comments, start: int) -> int:
+    """Where a block inserted before the element starting at `start` goes: above that element's own notes.
+
+    Inserting between a note and its element would hand the note to the new element, so the insertion point is the
+    start of the element's notes, given by the same ownership rule (`_owned_start`).
+    """
+    return _owned_start(text, comments, start)
+
+
+def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:
+    """The indent step the array's own multi-line objects use, read from their first member line.
+
+    A root array has no members of its own to read the step from, so the step comes from the elements: the
+    difference between an element's line and its first member's line. `None` when no element shows one.
+    """
+    for element in node.elements:
+        if not isinstance(element, _ObjectNode) or not element.members:
+            continue
+        first = element.members[0].span.start
+        member_indent = text[_line_start(text, first) : first]
+        # A one-line element puts `{ ` before its first member; that is not an indent step, so it is skipped.
+        if member_indent.strip() == "" and member_indent.startswith(indent) and len(member_indent) > len(indent):
+            return member_indent[len(indent) :]
+    return None
 
 
 def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
@@ -862,11 +1405,18 @@ def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
 
 
 def _apply_edits(text: str, edits: list[_Edit]) -> str:
-    """Apply the edits in offset order, skipping any that overlap an earlier one."""
+    """Apply the edits in offset order.
+
+    An edit that starts inside an earlier one is skipped only when it takes nothing with it: it removes text the earlier
+    edit already removed. One that carries text, or reaches past the earlier edit, would be lost without a trace, so it
+    refuses the render instead.
+    """
     pieces: list[str] = []
     cursor = 0
     for edit in sorted(edits, key=lambda item: item.start):
         if edit.start < cursor:
+            if edit.text or edit.end > cursor:
+                raise RenderRefused(EDIT_OVERLAP_REFUSED)
             continue
         pieces.append(text[cursor : edit.start])
         pieces.append(edit.text)
@@ -875,4 +1425,10 @@ def _apply_edits(text: str, edits: list[_Edit]) -> str:
     return "".join(pieces)
 
 
-__all__ = ["JsoncAdapter"]
+__all__ = [
+    "CHANGED_WITH_NOTE_REFUSED",
+    "EDIT_OVERLAP_REFUSED",
+    "UNRULED_REMOVAL_REFUSED",
+    "VALUE_WITH_NOTE_REFUSED",
+    "JsoncAdapter",
+]
