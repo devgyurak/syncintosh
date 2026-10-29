@@ -1123,19 +1123,6 @@ def _opens_array(text: str, comments: _Comments, start: int) -> bool:
     return start > 0 and _code_above(text, comments, start - 1).endswith("[")
 
 
-def _blank_opens(text: str, comments: _Comments, position: int) -> bool:
-    """True when the line right above `position` is blank and the line that opens the array stands right above it.
-
-    A blank line there would sit against the opening bracket if the edit at `position` took the element below it.
-    """
-    blank_start = _line_start(text, position - 1) if position > 0 else 0
-    return (
-        blank_start > 0
-        and _is_blank(text, comments, blank_start, position - 1)
-        and _is_opening_line(text, comments, blank_start - 1)
-    )
-
-
 def _is_opening_line(text: str, comments: _Comments, line_end: int) -> bool:
     """True when the line ending at `line_end` opens the array: its code ends in `[`.
 
@@ -1204,7 +1191,8 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
-    blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
+    blank_start = _line_start(text, start - 1) if start > 0 else 0
+    blank_before = start > 0 and _is_blank(text, comments, blank_start, start - 1)
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = _opens_array(text, comments, start)
     closes = _bracket_below(text, comments, end)
@@ -1213,8 +1201,8 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and ((closes and not inserted) or _blank_opens(text, comments, start)):
-        pieces.append((_line_start(text, start - 1), start))
+    if blank_before and ((closes and not inserted) or _is_opening_line(text, comments, blank_start - 1)):
+        pieces.append((blank_start, start))
     if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end
     pieces.append((start, end))
