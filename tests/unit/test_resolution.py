@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
@@ -441,6 +441,12 @@ def test_a_proposal_repr_never_shows_its_text() -> None:
 
 
 @given(base=_trees, local=_trees, remote=_trees, proposal=_trees)
+@example(
+    base=tree_from_value({"a": 1}),
+    local=tree_from_value({}),
+    remote=tree_from_value({"a": 2}),
+    proposal=tree_from_value([1]),
+)
 def test_a_proposal_settles_its_own_path_and_no_other(base, local, remote, proposal) -> None:
     # given
     plain = merge_tree(base, local, remote)
@@ -450,8 +456,14 @@ def test_a_proposal_settles_its_own_path_and_no_other(base, local, remote, propo
     # when
     chosen = merge_tree(base, local, remote, choices={target: proposal})
 
-    # then — every path outside the target keeps the value the plain merge gives it
-    outside = {path for path in {*plain.merged, *chosen.merged} if path[: len(target)] != target}
+    # then — every path outside the target keeps the value the plain merge gives it. An ancestor of the target is not
+    # outside: a proposal that puts a value under the target makes an ancestor's empty-container marker (`{}` or `[]`)
+    # go, rightly, so only paths that are neither under the target nor above it are compared.
+    outside = {
+        path
+        for path in {*plain.merged, *chosen.merged}
+        if path[: len(target)] != target and target[: len(path)] != path
+    }
     changed = [path for path in outside if chosen.merged.value(path) != plain.merged.value(path)]
     assert changed == []
 
