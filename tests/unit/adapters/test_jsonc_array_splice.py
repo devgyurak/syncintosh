@@ -1013,6 +1013,46 @@ def test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_bin
     assert (len(lines) > 1 and lines[1].strip() == "") == (lead and keep[0])
 
 
+@pytest.mark.parametrize(
+    ("template", "value", "rules", "expected"),
+    [
+        (
+            '{\n  "r": [\n\n    80,\n    100\n  ]\n}',
+            {"r": [90, 100]},
+            {},
+            '{\n  "r": [\n    90,\n    100\n  ]\n}',
+        ),
+        (
+            '[\n\n    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]',
+            [_a("z"), _b("y")],
+            {(): RULE},
+            '[\n\n    {"key": "a", "command": "z"},\n    { "key": "b", "command": "y" }\n]',
+        ),
+    ],
+    ids=["rule-less-array-loses-the-blank-line", "ruled-array-keeps-it"],
+)
+def test_the_first_value_of_an_array_changing_keeps_or_drops_the_blank_line_after_the_bracket_by_its_rule(
+    template: str, value: object, rules: dict[Any, Any], expected: str
+) -> None:
+    # when — the first value changes: without a rule that is a deletion and an insertion, with a rule the same group
+    # is rewritten where it stands
+    rendered = ADAPTER.render(tree_from_value(value), template, rules)
+
+    # then — this pins the known behavior, not a recommended one: the blank line after `[` goes in the first case only
+    assert rendered == expected
+
+
+def test_two_blank_lines_after_the_opening_bracket_both_stay_when_the_first_binding_goes() -> None:
+    # given — the template already had two blank lines after `[`
+    template = '[\n\n\n    { "key": "a", "command": "x" },\n    { "key": "b", "command": "y" }\n]'
+
+    # when — the first binding is removed
+    rendered = _render(template, [_b("y")])
+
+    # then — this pins the known behavior, not a recommended one: only a blank line right against `[` goes with it
+    assert rendered == '[\n\n\n    { "key": "b", "command": "y" }\n]'
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_removing_every_binding_under_a_section_title_leaves_no_blank_line_before_the_bracket(newline: str) -> None:
     # given — a section title, then two bindings separated by a blank line, all of which are removed
