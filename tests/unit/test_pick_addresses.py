@@ -207,9 +207,10 @@ def _related_doc(rng: random.Random) -> dict[str, object]:
 def _related_case(seed: int) -> tuple[bool, bool, bool, bool, list[tuple[Any, Any]]]:
     """One merge of two changed copies of a document, with some of its conflicts picked, and some left open.
 
-    Returns whether a group pick resolved at the top level, whether one resolved one level down, whether a key pick
-    resolved (a whole value, not a group), whether a pick resolved while another conflict stayed open (a partial pick),
-    and the addresses the merge added. A pick counts only when its own address is gone after the picks.
+    Returns whether a group pick resolved at the top level (a scalar's key pick is not a group, so it does not count
+    here), whether one resolved one level down, whether a key pick resolved (a whole value, at any depth), whether a
+    pick resolved while another conflict stayed open (a partial pick), and the addresses the merge added. A pick
+    counts only when its own address is gone after the picks.
     """
     rng = random.Random(seed)
     document = _related_doc(rng)
@@ -223,8 +224,8 @@ def _related_case(seed: int) -> tuple[bool, bool, bool, bool, list[tuple[Any, An
     )
     before, after = _addresses(first), _addresses(second)
     resolved = _resolved(choices, element_picks, before, after)
-    top = any(len(path) == 1 for path, _ in resolved)
-    nested = any(len(path) == 2 for path, _ in resolved)
+    top = any(len(path) == 1 and element is not None for path, element in resolved)
+    nested = any(len(path) == 2 and element is not None for path, element in resolved)
     key = any(element is None for _, element in resolved)
     partial = bool(resolved) and bool(after)
     return top, nested, key, partial, sorted(after - before, key=repr)
