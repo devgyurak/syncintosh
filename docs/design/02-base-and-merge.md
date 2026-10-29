@@ -178,8 +178,11 @@ decide about survives:
   already had two blank lines after `[` keeps both when the first binding goes. Pinned by
   `test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_an_edit_takes`,
   `test_a_blank_line_after_the_opening_bracket_that_no_edit_touches_stays` and
-  `test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays`; the
-  rule-less and two-blank-line cases have no test of their own.
+  `test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays`; the rule-less
+  case and its ruled contrast by
+  `test_the_first_value_of_an_array_changing_keeps_or_drops_the_blank_line_after_the_bracket_by_its_rule`,
+  and the two-blank-line case by `test_two_blank_lines_after_the_opening_bracket_both_stay_when_the_first_binding_goes`.
+  The last two pin the behavior as it is, not as a recommendation.
 - **Known limit: an array written with each comma at the start of its line is rewritten whole.** Element
   splicing needs a comma at the end of each element, so a comma-first array is replaced as one value, on
   one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
