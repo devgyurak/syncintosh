@@ -1249,8 +1249,9 @@ CHANGED_WITH_NOTE_REFUSED = (
     "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
 )
 
-# Two edits to one array overlap, so one of them would be dropped; the text names only the cause.
-EDIT_OVERLAP_REFUSED = "two edits to this array overlap, so it cannot be written without losing one of them"
+# Two edits to one file overlap (an array element or an object member), so one of them would be dropped; the text names
+# only the cause.
+EDIT_OVERLAP_REFUSED = "two edits to this file overlap, so it cannot be written without losing one of them"
 
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
