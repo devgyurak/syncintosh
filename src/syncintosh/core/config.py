@@ -14,7 +14,7 @@ a configuration cannot describe an item the manifest would reject. Standard libr
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
@@ -30,6 +30,7 @@ from syncintosh.core.manifest import (
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
 from syncintosh.core.presets import PresetGlob
+from syncintosh.core.profiles import ProfileSpec, duplicate_profile_names, profile_name_key
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class SyncConfig:
     items: tuple[LocalItem, ...]
     globs: tuple[LocalGlob, ...] = ()
     llm: LlmConfig = NO_LLM
+    profiles: tuple[LocalProfiles, ...] = ()
 
     @classmethod
     def create(
@@ -120,6 +122,7 @@ class SyncConfig:
         items: tuple[LocalItem, ...],
         globs: tuple[LocalGlob, ...] = (),
         llm: LlmConfig = NO_LLM,
+        profiles: tuple[LocalProfiles, ...] = (),
     ) -> SyncConfig:
         """Validate the machine-wide fields and that every machine-scope entry names this machine."""
         if not isinstance(remote, str) or remote == "":
@@ -130,11 +133,19 @@ class SyncConfig:
             [
                 *(item.path for item in items if item.scope == "machine" and item.machine != machine_id),
                 *(entry.glob.path for entry in globs if entry.scope == "machine" and entry.machine != machine_id),
+                *(entry.preset for entry in profiles if entry.scope == "machine" and entry.machine != machine_id),
             ]
         )
         if foreign:
             raise ConfigError(f"machine-scope entries must name this machine ({machine_id}): {foreign}")
-        return cls(remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs), llm=llm)
+        return cls(
+            remote=remote,
+            machine_id=machine_id,
+            items=tuple(items),
+            globs=tuple(globs),
+            llm=llm,
+            profiles=tuple(profiles),
+        )
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,58 @@ class LocalGlob:
         )
 
 
+@dataclass(frozen=True)
+class LocalProfiles:
+    """The profiles of one preset this machine allows a record to be written under.
+
+    `names` is `"*"` (every profile this machine has) or the profile names, compared the way
+    `collision_key` compares. It bounds **which profiles**; it does not say a profile exists. A write
+    still needs the name to resolve through this machine's own profile index (`core/profiles.py`),
+    so a name that arrived from the remote can never create a directory (decision D3, D5).
+
+    Security boundary: like `LocalGlob`, this is a local allowlist. A profile *id* from the remote is
+    not an entry here and never could be, because the logical path carries a name and the real
+    directory is looked up locally.
+    """
+
+    preset: str
+    spec: ProfileSpec
+    scope: Scope
+    machine: str | None
+    names: Literal["*"] | tuple[str, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        preset: str,
+        spec: ProfileSpec,
+        scope: Scope,
+        machine: str | None = None,
+        names: Literal["*"] | tuple[str, ...] = "*",
+    ) -> LocalProfiles:
+        """Validate the entry (and its preset/scope) with the manifest's own rules and freeze it."""
+        try:
+            validated_scope = validate_scope(scope)
+            preset_name = validate_preset(preset)
+            machine_id = validate_machine(machine, validated_scope)
+        except ManifestCorrupt as exc:
+            raise ConfigError(f"invalid tracked profiles: {exc}") from exc
+        if not isinstance(spec, ProfileSpec):
+            raise ConfigError(f"profiles need a layout, got {type(spec).__name__}")
+        if names != "*":
+            if isinstance(names, str) or not all(isinstance(name, str) and name != "" for name in names):
+                raise ConfigError(f"profile names must be '*' or a list of non-empty names, got {names!r}")
+            if duplicate_profile_names(names):
+                raise ConfigError(f"a profile is named twice: {list(duplicate_profile_names(names))}")
+            names = tuple(names)
+        return cls(preset=preset_name, spec=spec, scope=validated_scope, machine=machine_id, names=names)
+
+    def allows(self, name: str) -> bool:
+        """True when this entry covers the profile called `name`."""
+        return self.names == "*" or profile_name_key(name) in {profile_name_key(each) for each in self.names}
+
+
 def allows_path(config: SyncConfig, *, scope: Scope, machine: str | None, path: str) -> bool:
     """True when the local allowlist names this `(scope, machine, path)`.
 
@@ -199,7 +262,15 @@ def allows_path(config: SyncConfig, *, scope: Scope, machine: str | None, path: 
         (item.scope, item.machine) == (scope, machine) and collision_key(item.path) == folded for item in config.items
     ):
         return True
-    return any((entry.scope, entry.machine) == (scope, machine) and entry.glob.matches(path) for entry in config.globs)
+    if any((entry.scope, entry.machine) == (scope, machine) and entry.glob.matches(path) for entry in config.globs):
+        return True
+    return any(_allows_profile(entry, scope=scope, machine=machine, path=path) for entry in config.profiles)
+
+
+def _allows_profile(entry: LocalProfiles, *, scope: Scope, machine: str | None, path: str) -> bool:
+    """True when `path` is a logical profile path `entry` covers: its layout, a listed name, a listed file."""
+    parsed = entry.spec.parse(path)
+    return parsed is not None and (entry.scope, entry.machine) == (scope, machine) and entry.allows(parsed.name)
 
 
 def allows(config: SyncConfig, record: ManifestRecord) -> bool:
@@ -212,4 +283,4 @@ def allows(config: SyncConfig, record: ManifestRecord) -> bool:
     return allows_path(config, scope=record.scope, machine=record.machine, path=record.path)
 
 
-__all__ = ["NO_LLM", "LlmConfig", "LocalGlob", "LocalItem", "SyncConfig", "allows", "allows_path"]
+__all__ = ["NO_LLM", "LlmConfig", "LocalGlob", "LocalItem", "LocalProfiles", "SyncConfig", "allows", "allows_path"]

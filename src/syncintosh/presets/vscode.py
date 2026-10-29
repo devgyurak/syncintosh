@@ -81,12 +81,31 @@ from __future__ import annotations
 
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.core.profiles import ProfileFile, ProfileSpec
 from syncintosh.core.tree import KeyPath
 
 SETTINGS = "Library/Application Support/Code/User/settings.json"
 KEYBINDINGS = "Library/Application Support/Code/User/keybindings.json"
 SNIPPETS_JSON = "Library/Application Support/Code/User/snippets/*.json"
 SNIPPETS_GLOBAL = "Library/Application Support/Code/User/snippets/*.code-snippets"
+
+# Where VS Code keeps non-default profiles and the list of them. The list is read in memory for its
+# `userDataProfiles` key only; the file also holds window state and a telemetry machine id, and is never
+# collected (issue #22). `resource` is the name `useDefaultFlags` uses for what a profile may borrow.
+PROFILE_ROOT = "Library/Application Support/Code/User"
+PROFILE_HOME = f"{PROFILE_ROOT}/profiles"
+PROFILE_INDEX = f"{PROFILE_ROOT}/globalStorage/storage.json"
+PROFILES = ProfileSpec.create(
+    default_root=PROFILE_ROOT,
+    home=PROFILE_HOME,
+    index=PROFILE_INDEX,
+    files=(
+        ProfileFile.create(path="settings.json", resource="settings"),
+        ProfileFile.create(path="keybindings.json", resource="keybindings"),
+        ProfileFile.create(path="snippets/*.json", resource="snippets"),
+        ProfileFile.create(path="snippets/*.code-snippets", resource="snippets"),
+    ),
+)
 
 # Machine-local settings: the ones `userDataSync.getIgnoredSettings` excludes (a registration with
 # `ignoreSync`, or `scope: MACHINE` / `MACHINE_OVERRIDABLE`). They are cut on the collect side, so
@@ -157,12 +176,17 @@ VSCODE = Preset.create(
     bundle_id="com.microsoft.VSCode",
     download_url="https://code.visualstudio.com/download",
     cask="visual-studio-code",
+    profiles=PROFILES,
 )
 
 __all__ = [
     "EXCLUDED",
     "KEYBINDINGS",
     "NOISE",
+    "PROFILES",
+    "PROFILE_HOME",
+    "PROFILE_INDEX",
+    "PROFILE_ROOT",
     "SETTINGS",
     "SNIPPETS_GLOBAL",
     "SNIPPETS_JSON",

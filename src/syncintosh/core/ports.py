@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     # runtime import here would close the cycle (``AGENTS.md`` §4).
     from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
+    from syncintosh.core.profiles import ProfileMap, ProfileSpec
     from syncintosh.core.watch import FileEvent
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
@@ -515,6 +516,28 @@ class LiveFiles(Protocol):
 
     def remove(self, path: str) -> None:
         """Remove the file if present. Raises on any other failure."""
+        ...
+
+
+@runtime_checkable
+class ProfileIndex(Protocol):
+    """This machine's own list of an app's profiles, read at collect and apply time.
+
+    A profile's directory is a random id that differs between Macs, so the only trustworthy map from a
+    profile **name** to a directory is the app's own index on this machine (VS Code's
+    `globalStorage/storage.json`). The implementation reads it in memory, parses only the profile list,
+    and never writes it, seals it or copies it: the file also holds window state and a telemetry machine
+    id. `core` and `services` see a `ProfileMap` and never the file (issue #22).
+    """
+
+    def read(self, spec: ProfileSpec) -> ProfileMap:
+        """The profiles this machine has under `spec`.
+
+        An index that is missing, unreadable or corrupt returns `ProfileMap.unreadable(reason)` rather
+        than raising: the caller reports it and **keeps its records**, since a profile it cannot see is
+        not a profile that was deleted. A single malformed entry is skipped and reported in the map's
+        `problems`, not raised.
+        """
         ...
 
 
