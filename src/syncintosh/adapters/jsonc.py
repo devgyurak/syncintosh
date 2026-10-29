@@ -451,8 +451,8 @@ class _Diff:
             # The block goes after everything that survives — and after any removal, never inside
             # one. The padding before `}` sits between the last member and the brace, so a run that
             # emptied the object ends past that member's value; an insert placed there would be
-            # inside the deleted range, and the edit merge drops an edit that starts before the
-            # cursor. `{"a": 1, "b": 2}` handed `{c}` would then render as `{}` with no `c` in it.
+            # inside the deleted range, and `_apply_edits` refuses an edit that carries text and
+            # starts before the cursor. `{"a": 1, "b": 2}` handed `{c}` would then not render at all.
             natural = node.members[-1].value.span.end if node.members else node.span.end - 1
             position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
@@ -1068,7 +1068,8 @@ def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """The ranges in order, with overlapping ones merged, so no two deletions overlap.
 
     Ranges that only touch stay apart: an insertion at the offset where they meet would fall inside a merged range, and
-    an edit that starts inside an earlier one is not applied (see `_apply_edits`).
+    an edit that starts inside an earlier one that carries text, or reaches past it, refuses the render (see
+    `_apply_edits`).
     """
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
