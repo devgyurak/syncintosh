@@ -169,6 +169,22 @@ decide about survives:
 - **Two sides that reorder shared bindings differently are one conflict on the whole array.** The
   bindings that did not change decide the order, and no per-binding pick can settle it. The conflict
   says so, and that choosing a whole side drops the other side's added bindings.
+- **Known behavior: a blank line beside an array bracket is cleaned up only by an edit that touches it.**
+  A removal, move or replacement of the first binding takes the blank line after `[` with it, and the same
+  edit to the last binding takes the blank line before `]`, so no blank line is left against a bracket. An
+  insertion alone leaves them. An array with a rule rewrites a changed binding of the same group where it
+  stands, so the blank line stays; an array without a rule handles a changed element as a deletion plus an
+  insertion, so a blank line after `[` goes there too, as the one before `]` already did. A template that
+  already had two blank lines after `[` keeps both when the first binding goes. Pinned by
+  `test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_an_edit_takes`,
+  `test_a_blank_line_after_the_opening_bracket_that_no_edit_touches_stays` and
+  `test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays`; the
+  rule-less and two-blank-line cases have no test of their own.
+- **Known limit: an array written with each comma at the start of its line is rewritten whole.** Element
+  splicing needs a comma at the end of each element, so a comma-first array is replaced as one value, on
+  one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
+  This predates issue #21. `test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json` pins that
+  the result stays valid and merged; it does not pin the layout.
 - **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
   comes back from the tree rather than from the live file's own text, so a nested object's
   internal layout may differ from what the file had. A scalar value — the usual noise or excluded

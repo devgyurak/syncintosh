@@ -92,6 +92,8 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   per-binding pick cannot settle it and that a whole side drops the other side's additions. An array this
   rule cannot read (a non-object element, a missing `key` or `command`, two bindings with one identity)
   falls back to the whole-array conflict the file had before.
+  Layout limits of the rewrite (blank lines beside the brackets, a comma-first array) are listed in
+  [02-base-and-merge.md](02-base-and-merge.md).
 - A key that a machine never set simply does not arrive: a machine that has never had the file gets
   the synced settings without the machine-local ones, which then take VS Code's own defaults. That
   is what "not synced" means for a machine that never chose a value.
