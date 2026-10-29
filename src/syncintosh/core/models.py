@@ -7,10 +7,14 @@ afterwards (``AGENTS.md`` §2.7).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree
+from syncintosh.core.tree import Absent, ElementId, KeyPath, Leaf, Tree, element_label
+
+# Where a structural conflict sits: a key path, and the element of an identified array when the conflict is
+# one binding under it (`None` for a conflict on the whole path).
+ConflictAddress = tuple[KeyPath, ElementId | None]
 
 # Whether a value applies to every machine or only to the current one.
 Scope = Literal["common", "machine"]
@@ -40,12 +44,16 @@ class Conflict:
     # Set when the conflict is one element of an array merged by identity (`core/keyed_array.py`);
     # `None` for a conflict on the whole path.
     element: ElementId | None = None
+    # A fixed text saying why this conflict cannot be settled one element at a time, when it is a whole-array conflict
+    # the rule could have settled (`ORDER_CONFLICT_REASON`); empty otherwise. It never carries a value.
+    reason: str = ""
 
     def __repr__(self) -> str:
         # The sides are plaintext settings; a log or a traceback must not print them (§4). The
         # element identity is the field names and values that name it, never the array's content.
         return (
-            f"Conflict(path={self.path!r}, element={self.element!r}, base=<{_shape(self.base)}>, "
+            f"Conflict(path={self.path!r}, element={None if self.element is None else element_label(self.element)}, "
+            f"base=<{_shape(self.base)}>, "
             f"local=<{_shape(self.local)}>, remote=<{_shape(self.remote)}>)"
         )
 
@@ -54,7 +62,7 @@ class Conflict:
 class TreeMerge:
     """The outcome of a three-way, key-level merge over two typed trees."""
 
-    merged: Tree
+    merged: Tree = field(repr=False)
     conflicts: tuple[Conflict, ...]
 
     @property
@@ -72,7 +80,7 @@ class TextMerge:
     reported as conflicted (``docs/design/01-sync-model.md``).
     """
 
-    text: str
+    text: str = field(repr=False)
     conflicted: bool
 
 
@@ -81,14 +89,20 @@ class ContentMerge:
     """The outcome of a byte-level content merge for one record.
 
     `data` is the merged bytes when `conflicted` is False, and the local side (an unresolved
-    candidate) when it is True. `conflict_paths` names the key paths a structural merge found in
-    conflict — never their values — so a pending report can say what collided; it is empty for a
-    whole-file conflict (an undecodable, unparseable, or text merge).
+    candidate) when it is True. `conflict_addresses` names where a structural merge found a conflict —
+    a key path, and the element of an identified array when the conflict is one binding — never their
+    values, so a pending report can say what collided. It is empty for a whole-file conflict (an
+    undecodable, unparseable, or text merge).
     """
 
-    data: bytes
+    # The merged bytes are plaintext, so a repr never shows them; the addresses name a binding, which can carry a
+    # `when` clause, so they stay out of a repr too (a caller that prints them uses `element_label`).
+    data: bytes = field(repr=False)
     conflicted: bool
-    conflict_paths: tuple[KeyPath, ...] = ()
+    conflict_addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
+    # Why the merge could not settle the file key by key: a refusal the adapter named, or the fixed reason of an order
+    # conflict (`ORDER_CONFLICT_REASON`). Always a fixed text, never a value; empty when there is no such reason.
+    reason: str = ""
 
 
 @dataclass(frozen=True)

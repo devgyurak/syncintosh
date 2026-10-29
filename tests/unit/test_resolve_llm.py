@@ -16,8 +16,14 @@ from syncintosh.core.advice import Advice
 from syncintosh.core.errors import SyntaxInvalid
 from syncintosh.core.resolution import ConflictKind, ConflictView, Proposal
 from syncintosh.presets import BuiltinCatalog
+from syncintosh.presets.vscode import KEYBINDINGS
 from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
 from syncintosh.system.masking import TextMasker
+
+
+def _tag(text: str) -> str:
+    """A fixed tagger: these tests check the layout, not the tag."""
+    return f"<{len(text)}>"
 
 
 def _plain(output: str) -> str:
@@ -272,7 +278,7 @@ def test_a_refused_suggestion_is_shown_and_never_prompted(monkeypatch, capsys) -
     suggestion = Suggestion(view=_view(), choice=None, rationale="it is a merge", refused="does not parse")
 
     # when
-    accepted = _present_suggestion(suggestion)
+    accepted = _present_suggestion(suggestion, when_tag=_tag)
 
     # then
     assert accepted is False
@@ -296,7 +302,7 @@ def test_a_suggestion_with_a_new_url_shows_it_as_untrusted_before_the_accept_pro
     )
 
     # when
-    accepted = _present_suggestion(suggestion)
+    accepted = _present_suggestion(suggestion, when_tag=_tag)
 
     # then
     assert accepted is False
@@ -382,7 +388,7 @@ def test_the_approval_screen_shows_a_proposed_value_in_full() -> None:
     from syncintosh.cli.main import _pick_lines
 
     # when
-    lines = _pick_lines(_view(), Proposal('{"a": "x\u202ey"}'))
+    lines = _pick_lines(_view(), Proposal('{"a": "x\u202ey"}'), when_tag=_tag)
 
     # then — shown as its text, marked as the model's, with the override escaped
     assert "proposed by the model" in lines[0]
@@ -397,7 +403,7 @@ def test_a_file_proposal_is_shown_as_a_diff_on_the_approval_screen() -> None:
     view = _view(kind="file")
 
     # when
-    lines = _pick_lines(view, Proposal('{"a": 3}\n'))
+    lines = _pick_lines(view, Proposal('{"a": 3}\n'), when_tag=_tag)
 
     # then
     assert any(line.strip().startswith("-") or line.strip().startswith("+") for line in lines[1:])
@@ -497,3 +503,75 @@ def test_resolve_llm_with_yes_and_auto_apply_is_refused_before_anything_is_publi
     # then
     assert result.exit_code == 2
     assert "unseen" in result.output
+
+
+def _binding_view(text: str = "[]") -> ConflictView:
+    """A conflict on one binding group of the VS Code keybindings array: `key` `ctrl+k`, no `when`."""
+    return ConflictView(
+        kind="key",
+        file_id="f" * 32,
+        path=KEYBINDINGS,
+        key_path=(),
+        fingerprint="y" * 64,
+        base_text=text,
+        local_text=text,
+        remote_text=text,
+        element=(("key", "ctrl+k"), ("when", None)),
+    )
+
+
+def test_a_binding_proposal_naming_another_group_is_refused() -> None:
+    # when
+    problem = proposal_problem(
+        _binding_view(),
+        '[{"key": "ctrl+x", "command": "a"}]',
+        catalog=BuiltinCatalog.default(),
+        adapters={"jsonc": JsoncAdapter()},
+        validators={},
+    )
+
+    # then
+    assert problem == "the proposed value is not an array of this binding's group"
+
+
+def test_a_binding_proposal_of_its_own_group_may_be_offered() -> None:
+    # when & then
+    assert (
+        proposal_problem(
+            _binding_view(),
+            '[{"key": "ctrl+k", "command": "a"}]',
+            catalog=BuiltinCatalog.default(),
+            adapters={"jsonc": JsoncAdapter()},
+            validators={},
+        )
+        is None
+    )
+
+
+def test_a_binding_conflict_sent_to_the_model_carries_its_when_masked_and_never_a_digest() -> None:
+    # given — a binding whose `when` names an internal host
+    view = ConflictView(
+        kind="key",
+        file_id="f" * 32,
+        path=KEYBINDINGS,
+        key_path=(),
+        fingerprint="z" * 64,
+        base_text='[{"key": "ctrl+k", "command": "a", "when": "resourceHost == \'build.internal\'"}]',
+        local_text="[]",
+        remote_text="[]",
+        element=(("key", "ctrl+k"), ("when", "resourceHost == 'build.internal'")),
+    )
+    sent: list[str] = []
+
+    class Recording:
+        def advise(self, index, *, path, key, base, local, remote):
+            sent.append(key.text)
+            return
+
+    # when
+    _chooser(Recording(), lambda suggestion: True)(view)
+
+    # then — the model is not sent the digest, and the internal host does not reach it either
+    assert sent, "the advisor was asked"
+    assert "sha256:" not in sent[0]
+    assert "build.internal" not in sent[0]

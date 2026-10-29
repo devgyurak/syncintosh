@@ -14,14 +14,15 @@ as in-sync, exactly as `sync` would treat it (one implementation, ``AGENTS.md`` 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from syncintosh.core.config import SyncConfig
-from syncintosh.core.diff import changed_paths
+from syncintosh.core.diff import changed_addresses
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.manifest import FileFormat, ManifestRecord
+from syncintosh.core.models import ConflictAddress
 from syncintosh.core.ports import (
     Cipher,
     ContentAdapter,
@@ -33,7 +34,6 @@ from syncintosh.core.ports import (
     remote_ref,
 )
 from syncintosh.core.presets import ValidatorName
-from syncintosh.core.tree import KeyPath
 from syncintosh.services.sync import (
     _decode,
     _Presets,
@@ -61,9 +61,9 @@ class FileDiff:
 
     path: str
     status: DiffStatus
-    key_paths: tuple[KeyPath, ...] = ()
-    here: str | None = None
-    repo: str | None = None
+    addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
+    here: str | None = field(default=None, repr=False)
+    repo: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -136,27 +136,30 @@ def _diff_record(
     return FileDiff(
         record.path,
         "changed",
-        key_paths=_changed_key_paths(presets, view, repo_bytes, record.format),
+        addresses=_changed_addresses(presets, view, repo_bytes, record.format, record.path),
         here=None if view is None else _decode(view),
         repo=repo_text,
     )
 
 
-def _changed_key_paths(
-    presets: _Presets, view: bytes | None, repo_bytes: bytes | None, fmt: FileFormat
-) -> tuple[KeyPath, ...]:
+def _changed_addresses(
+    presets: _Presets, view: bytes | None, repo_bytes: bytes | None, fmt: FileFormat, path: str
+) -> tuple[ConflictAddress, ...]:
     """The differing key paths between the live projection and the repo object, or `()`.
 
-    Only a structural format with an adapter can be compared key by key; a `text`/`binary` record,
-    or one that no longer parses, reports the whole file as changed with no key paths.
+    An identified array reports the bindings that changed, by the preset's rule for it. Only a structural
+    format with an adapter can be compared key by key; a `text`/`binary` record, or one that no longer
+    parses, reports the whole file as changed with no key paths.
     """
     adapter = presets.adapter_for(fmt)
     left = None if view is None else _decode(view)
     right = None if repo_bytes is None else _decode(repo_bytes)
     if adapter is None or left is None or right is None:
         return ()
+    policy = presets.policy_for(path)
+    arrays = policy.array_rules if policy is not None else {}
     try:
-        return changed_paths(adapter.parse(left), adapter.parse(right))
+        return changed_addresses(adapter.parse(left), adapter.parse(right), arrays)
     except ContentParseError:
         return ()
 

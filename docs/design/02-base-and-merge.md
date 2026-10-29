@@ -37,6 +37,16 @@ synced, so a live file appears under a record this machine has never written —
 suppressed file comes back. It is resolved as adopt-local / adopt-remote, never by overwriting
 ([01-sync-model.md](01-sync-model.md)).
 
+**An identified array merges by element, not as one value.** A preset may declare an `ArrayRule`
+(`core/keyed_array.py`) for an array inside a file. The rule names the identity fields of an element and
+the group they fall in. The three-way decision is then made per group, with the same rule a key path gets:
+a group one side changed takes that side; a group both sides changed to the same contents is taken once;
+a group both sides changed differently is a conflict on that group alone. Local order is kept, and an
+addition goes after its nearest predecessor on its own side. Both sides reordering the shared elements
+differently is a whole-array conflict. An array the rule cannot read falls back to the whole-array compare.
+Each conflicting group is one choice (its fingerprint covers that group's bindings only), and a proposed
+value for a group must be an array whose every element belongs to that group.
+
 **The choice replaces the whole file and does not go through the content merge.** A first-sight
 record has no usable `base`: with `base = ∅` every key would look changed on both sides and
 conflict, and with a stale baseline the app's fresh defaults would win — the very outcome the
@@ -150,6 +160,34 @@ decide about survives:
   machine's changes.
 - **A comment above the first member stays with it.** A key inserted at the top of a multi-line
   object goes above that comment, not between the comment and the member it documents.
+- **A removed binding of a keyed array takes its notes with it.** The block of comment lines directly
+  above it (no blank line between; a `//` line, or a `/* */` block even when it spans several lines),
+  the comments on its own lines, and the comments inside it are removed with it. A blank line ends
+  the block, so a section title separated from the binding stays. A rule-less array cannot tell which
+  binding a note belongs to, so a removal that would take a note is refused with a fixed reason
+  instead. (An earlier version kept the block above a removed binding; issue #21 reversed that.)
+- **Two sides that reorder shared bindings differently are one conflict on the whole array.** The
+  bindings that did not change decide the order, and no per-binding pick can settle it. The conflict
+  says so, and that choosing a whole side drops the other side's added bindings.
+- **Known behavior: a blank line beside an array bracket is cleaned up only by an edit that touches it.**
+  A removal, move or replacement of the first binding takes the blank line after `[` with it, and the same
+  edit to the last binding takes the blank line before `]`, so no blank line is left against a bracket. An
+  insertion alone leaves them. An array with a rule rewrites a changed binding of the same group where it
+  stands, so the blank line stays; an array without a rule handles a changed element as a deletion plus an
+  insertion, so a blank line after `[` goes there too, as the one before `]` already did. A template that
+  already had two blank lines after `[` keeps both when the first binding goes. Pinned by
+  `test_a_blank_line_after_the_opening_bracket_goes_with_the_first_binding_an_edit_takes`,
+  `test_a_blank_line_after_the_opening_bracket_that_no_edit_touches_stays` and
+  `test_a_blank_line_after_the_opening_bracket_stays_exactly_when_the_first_binding_stays`; the rule-less
+  case and its ruled contrast by
+  `test_the_first_value_of_an_array_changing_keeps_or_drops_the_blank_line_after_the_bracket_by_its_rule`,
+  and the two-blank-line case by `test_two_blank_lines_after_the_opening_bracket_both_stay_when_the_first_binding_goes`.
+  The last two pin the behavior as it is, not as a recommendation.
+- **Known limit: an array written with each comma at the start of its line is rewritten whole.** Element
+  splicing needs a comma at the end of each element, so a comma-first array is replaced as one value, on
+  one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
+  This predates issue #21. `test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json` pins that
+  the result stays valid and merged; it does not pin the layout.
 - **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
   comes back from the tree rather than from the live file's own text, so a nested object's
   internal layout may differ from what the file had. A scalar value — the usual noise or excluded

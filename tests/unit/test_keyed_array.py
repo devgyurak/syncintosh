@@ -6,16 +6,33 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from syncintosh.core.keyed_array import ArrayRule, merge_keyed_array
+from syncintosh.core.diff import changed_addresses
+from syncintosh.core.keyed_array import (
+    ORDER_CONFLICT_REASON,
+    ArrayRule,
+    KeyedMerge,
+    OrderConflict,
+    accepts_group,
+    group_leaves,
+    merge_keyed_array,
+)
 from syncintosh.core.merge import merge_tree
-from syncintosh.core.tree import ABSENT, Array, Node, Tree, tree_from_value
+from syncintosh.core.resolution import Side
+from syncintosh.core.tree import ABSENT, Array, ElementId, Leaf, Node, Tree, element_label, tree_from_value
 
 # The rule a VS Code `keybindings.json` declares: an element is its key, command and when; the key and
 # the command must be present; the group is the (key, when) pair a binding is bound under.
 RULE = ArrayRule.create(identity=("key", "command", "when"), required=("key", "command"), group=("key", "when"))
+
+
+def _settled(base: Leaf, local: Leaf, remote: Leaf, rule: ArrayRule, picks=None) -> KeyedMerge:
+    """The keyed merge of an array that settles per element; any other outcome fails the test."""
+    outcome = merge_keyed_array(base, local, remote, rule, picks=picks)
+    assert isinstance(outcome, KeyedMerge)
+    return outcome
 
 
 def _array(elements: list[object]) -> Array:
@@ -48,7 +65,7 @@ def test_a_binding_added_on_one_side_is_kept_alongside_the_other_sides_binding()
     remote = _array([_binding("ctrl+a", "a"), _binding("ctrl+c", "c")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -63,7 +80,7 @@ def test_a_binding_added_on_the_same_key_with_a_different_when_is_kept_as_well()
     remote = _array([_binding("tab", "indent"), _binding("tab", "snippet", when="inSnippetMode")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -78,7 +95,7 @@ def test_two_different_commands_on_the_same_key_and_when_are_a_conflict_on_that_
     remote = _array([_binding("ctrl+k", "remote")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -93,7 +110,7 @@ def test_the_same_binding_added_on_both_sides_is_one_binding() -> None:
     remote = _array([_binding("ctrl+d", "d")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -108,7 +125,7 @@ def test_a_removal_on_one_side_with_the_other_side_unchanged_removes_the_binding
     remote = _array([_binding("ctrl+a", "a"), _binding("ctrl+b", "b"), _binding("ctrl+c", "c")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -123,7 +140,7 @@ def test_a_removal_that_overlaps_an_edit_of_the_same_group_is_a_conflict() -> No
     remote = _array([_binding("ctrl+a", "a", args=[1])])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -137,7 +154,7 @@ def test_a_change_to_one_binding_and_a_removal_of_another_in_the_same_group_is_a
     remote = _array([_binding("ctrl+a", "a")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -151,7 +168,7 @@ def test_a_missing_when_and_an_empty_when_name_different_groups() -> None:
     remote = _array([_binding("ctrl+e", "empty", when="")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -166,7 +183,7 @@ def test_keys_that_differ_only_in_case_are_different_groups_and_are_not_normaliz
     remote = _array([_binding("ctrl+a", "two")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -184,7 +201,7 @@ def test_a_remote_addition_lands_after_its_preceding_remote_sibling() -> None:
     remote = _array([_binding("a", "1"), _binding("c", "3"), _binding("b", "2")])
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
@@ -203,21 +220,26 @@ def test_a_reorder_on_one_side_alone_is_adopted() -> None:
     remote = base
 
     # when
-    result = merge_keyed_array(base, local, remote, RULE)
+    result = _settled(base, local, remote, RULE)
 
     # then
     assert result is not None
     assert _plain(result.merged) == [_binding("c", "3"), _binding("a", "1"), _binding("b", "2")]
 
 
-def test_both_sides_reordering_shared_bindings_differently_falls_back() -> None:
+def test_both_sides_reordering_shared_bindings_differently_is_an_order_conflict_with_its_reason() -> None:
     # given — both sides moved away from the base order, and to different ones
     base = _array([_binding("a", "1"), _binding("b", "2"), _binding("c", "3")])
     local = _array([_binding("b", "2"), _binding("a", "1"), _binding("c", "3")])
     remote = _array([_binding("a", "1"), _binding("c", "3"), _binding("b", "2")])
 
-    # when & then
-    assert merge_keyed_array(base, local, remote, RULE) is None
+    # when
+    outcome = merge_keyed_array(base, local, remote, RULE)
+
+    # then — an order conflict carries the fixed reason, which says a whole side would drop the other's additions
+    assert isinstance(outcome, OrderConflict)
+    assert outcome.reason == ORDER_CONFLICT_REASON
+    assert "drops the other side's added bindings" in ORDER_CONFLICT_REASON
 
 
 def test_a_remote_addition_alongside_a_local_reorder_is_not_an_order_conflict() -> None:
@@ -387,7 +409,7 @@ def test_merging_unchanged_bindings_is_idempotent(elements) -> None:
     array = _array(elements)
 
     # when
-    result = merge_keyed_array(array, array, array, RULE)
+    result = _settled(array, array, array, RULE)
 
     # then
     assert result is not None
@@ -401,7 +423,7 @@ def test_a_one_sided_change_always_wins(base, local) -> None:
     base_array, local_array = _array(base), _array(local)
 
     # when
-    result = merge_keyed_array(base_array, local_array, base_array, RULE)
+    result = _settled(base_array, local_array, base_array, RULE)
 
     # then
     assume(result is not None)
@@ -416,7 +438,7 @@ def test_a_one_sided_change_on_the_remote_always_wins(base, remote) -> None:
     base_array, remote_array = _array(base), _array(remote)
 
     # when
-    result = merge_keyed_array(base_array, base_array, remote_array, RULE)
+    result = _settled(base_array, base_array, remote_array, RULE)
 
     # then
     assume(result is not None)
@@ -431,7 +453,7 @@ def test_a_conflict_is_exactly_a_group_both_sides_changed_to_different_contents(
     base_array, local_array, remote_array = _array(base), _array(local), _array(remote)
 
     # when
-    result = merge_keyed_array(base_array, local_array, remote_array, RULE)
+    result = _settled(base_array, local_array, remote_array, RULE)
 
     # then
     assume(result is not None)
@@ -453,8 +475,8 @@ def test_swapping_the_sides_keeps_the_conflicting_groups(base, local, remote) ->
     base_array, local_array, remote_array = _array(base), _array(local), _array(remote)
 
     # when
-    forward = merge_keyed_array(base_array, local_array, remote_array, RULE)
-    backward = merge_keyed_array(base_array, remote_array, local_array, RULE)
+    forward = _settled(base_array, local_array, remote_array, RULE)
+    backward = _settled(base_array, remote_array, local_array, RULE)
 
     # then
     assume(forward is not None and backward is not None)
@@ -468,7 +490,7 @@ def test_the_same_change_on_both_sides_is_taken_once_without_a_conflict(base, lo
     base_array, local_array = _array(base), _array(local)
 
     # when
-    result = merge_keyed_array(base_array, local_array, local_array, RULE)
+    result = _settled(base_array, local_array, local_array, RULE)
 
     # then
     assume(result is not None)
@@ -480,3 +502,406 @@ def test_the_same_change_on_both_sides_is_taken_once_without_a_conflict(base, lo
 def _group_of(groups: dict[tuple[object, ...], list[dict[str, object]]], key: object, when: object) -> list[object]:
     """A group's elements as plain values, or an empty list, for comparing one group across sides."""
     return [dict(element) for element in groups.get((key, when), [])]
+
+
+# --- picks: a conflicting group settled by one side, or by a proposed array of its own bindings ------------
+
+
+def test_a_side_pick_settles_a_conflicting_group_to_that_side() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: "remote"})
+
+    # then
+    assert result is not None
+    assert result.conflicts == ()
+    assert _plain(result.merged) == [_binding("ctrl+k", "remote")]
+
+
+def test_a_proposed_array_of_the_same_group_settles_that_group() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+    proposal = _array([_binding("ctrl+k", "both")])
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: proposal})
+
+    # then
+    assert result is not None
+    assert result.conflicts == ()
+    assert _plain(result.merged) == [_binding("ctrl+k", "both")]
+
+
+def test_a_proposal_naming_another_group_stays_a_conflict() -> None:
+    # given — the proposal tries to move a binding into a group other than the one being settled
+    base = _array([_binding("ctrl+k", "old")])
+    local = _array([_binding("ctrl+k", "local")])
+    remote = _array([_binding("ctrl+k", "remote")])
+    group = (("key", "ctrl+k"), ("when", None))
+    proposal = _array([_binding("ctrl+k", "ok"), _binding("ctrl+x", "moved")])
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: proposal})
+
+    # then
+    assert result is not None
+    assert [conflict.element for conflict in result.conflicts] == [group]
+
+
+def test_accepts_group_refuses_a_non_array_and_admits_an_empty_one() -> None:
+    # given
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when & then
+    assert accepts_group(_array([]), RULE, group) is True
+    assert accepts_group(_array([_binding("ctrl+k", "a")]), RULE, group) is True
+    assert accepts_group(_array([_binding("ctrl+x", "a")]), RULE, group) is False
+    assert accepts_group(tree_from_value("scalar").value(()), RULE, group) is False
+
+
+def test_changed_addresses_names_only_the_binding_that_changed() -> None:
+    # given
+    left = tree_from_value({"keys": [_binding("a", "1"), _binding("b", "2")]})
+    right = tree_from_value({"keys": [_binding("a", "1"), _binding("b", "9")]})
+
+    # when
+    addresses = changed_addresses(left, right, {("keys",): RULE})
+
+    # then
+    assert addresses == ((("keys",), (("key", "b"), ("when", None))),)
+
+
+def test_a_picked_group_keeps_the_order_of_the_side_it_was_picked_from() -> None:
+    # given — local edits the first binding's args; remote edits the same group and moves it after the other
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b")])
+    local = _array([_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")])
+    remote = _array([_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked_local = _settled(base, local, remote, RULE, picks={group: "local"})
+
+    # then — local's group, in local's order, without a whole-array conflict or a stuck resolve
+    assert picked_local is not None
+    assert picked_local.conflicts == ()
+    assert _plain(picked_local.merged) == [_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")]
+
+
+def test_a_pick_of_the_side_whose_order_is_kept_settles_without_a_conflict() -> None:
+    # given
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b")])
+    local = _array([_binding("ctrl+k", "a", args=1), _binding("ctrl+k", "b")])
+    remote = _array([_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked_remote = _settled(base, local, remote, RULE, picks={group: "remote"})
+
+    # then — remote's group, in remote's order
+    assert picked_remote is not None
+    assert _plain(picked_remote.merged) == [_binding("ctrl+k", "b", args=2), _binding("ctrl+k", "a")]
+
+
+def test_a_proposed_binding_takes_the_place_of_the_group_it_replaces() -> None:
+    # given — the group for `ctrl+a` sits between `ctrl+b` and `ctrl+x`; the model proposes a new binding for it
+    base = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a"), _binding("ctrl+x", "b")])
+    local = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a", args=1), _binding("ctrl+x", "b")])
+    remote = _array([_binding("ctrl+b", "c"), _binding("ctrl+a", "a", args=2), _binding("ctrl+x", "b")])
+    group = (("key", "ctrl+a"), ("when", None))
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: _array([_binding("ctrl+a", "p")])})
+
+    # then — it stays between its neighbours; it is not appended to the end
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["c", "p", "b"]
+
+
+def test_a_proposal_keeps_the_key_order_of_the_binding_it_replaces() -> None:
+    # given — a model that returns the keys sorted; the user's own binding has `key` first
+    base = _array([_binding("ctrl+a", "a", args=1)])
+    local = _array([_binding("ctrl+a", "a2", args=1)])
+    remote = _array([_binding("ctrl+a", "a3", args=1)])
+    group = (("key", "ctrl+a"), ("when", None))
+    sorted_proposal = _array([{"args": 1, "command": "p", "key": "ctrl+a"}])
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: sorted_proposal})
+
+    # then
+    assert result is not None
+    assert list(_plain(result.merged)[0]) == ["key", "command", "args"]
+
+
+def test_a_when_clause_is_labelled_hidden_without_a_tagger_and_by_its_tag_with_one() -> None:
+    # given
+    element = (("key", "ctrl+k"), ("when", "resourcePath =~ /corp\\.internal/"))
+
+    # when
+    hidden = element_label(element)
+    tagged = element_label(element, when_tag=lambda text: "tag-7")
+
+    # then — the clause's text never shows; the key shows
+    assert hidden == '[key="ctrl+k", when=(hidden)]'
+    assert tagged == '[key="ctrl+k", when=tag-7]'
+    assert "corp" not in hidden and "corp" not in tagged
+
+
+def test_group_leaves_indexes_each_group_once_with_its_own_bindings() -> None:
+    # given
+    array = _array([_binding("a", "1"), _binding("a", "2"), _binding("b", "3", when="p")])
+    group = (("key", "a"), ("when", None))
+
+    # when
+    leaves = group_leaves(array, RULE)
+
+    # then
+    assert leaves is not None
+    assert leaves[group] == _array([_binding("a", "1"), _binding("a", "2")])
+    assert set(leaves) == {((("key", "a"), ("when", None))), ((("key", "b"), ("when", "p")))}
+
+
+def test_a_proposal_for_a_group_the_local_side_removed_stays_between_its_neighbours() -> None:
+    # given — local removed the `ctrl+k` binding; remote changed it; the model proposes a replacement for it
+    base = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k"), _binding("ctrl+y", "y")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+y", "y")])
+    remote = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k", args=1), _binding("ctrl+y", "y")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: _array([_binding("ctrl+k", "p")])})
+
+    # then — the proposal sits where the group was, not after `ctrl+y`
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p", "y"]
+
+
+def test_two_adjacent_removed_groups_get_their_proposals_in_order() -> None:
+    # given — local removed both neighbouring groups; remote edited both; the model proposes one binding for each
+    base = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "k"), _binding("ctrl+m", "m"), _binding("ctrl+y", "y")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+y", "y")])
+    remote = _array(
+        [
+            _binding("ctrl+x", "x"),
+            _binding("ctrl+k", "k", args=1),
+            _binding("ctrl+m", "m", args=1),
+            _binding("ctrl+y", "y"),
+        ]
+    )
+    k_group = (("key", "ctrl+k"), ("when", None))
+    m_group = (("key", "ctrl+m"), ("when", None))
+
+    # when
+    result = _settled(
+        base,
+        local,
+        remote,
+        RULE,
+        picks={k_group: _array([_binding("ctrl+k", "p1")]), m_group: _array([_binding("ctrl+m", "p2")])},
+    )
+
+    # then — the first proposal is not placed after the second
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p1", "p2", "y"]
+
+
+def test_an_unsettled_conflict_does_not_turn_an_unrelated_reorder_into_a_whole_array_conflict() -> None:
+    # given — `ctrl+k` conflicts (both sides changed it), and the two sides moved its bindings differently
+    base = _array([_binding("ctrl+k", "p"), _binding("ctrl+k", "q"), _binding("ctrl+z", "r")])
+    local = _array([_binding("ctrl+k", "q"), _binding("ctrl+k", "p", args=1), _binding("ctrl+z", "r")])
+    remote = _array([_binding("ctrl+z", "r"), _binding("ctrl+k", "p"), _binding("ctrl+k", "q", args=2)])
+
+    # when
+    result = _settled(base, local, remote, RULE)
+
+    # then — the conflict is that one group, and it can still be picked; the array is not a whole-array conflict
+    assert result is not None
+    assert [conflict.element for conflict in result.conflicts] == [(("key", "ctrl+k"), ("when", None))]
+
+
+def test_a_proposal_for_a_group_both_sides_added_goes_to_the_end() -> None:
+    # given — neither base nor a side held a binding in this group before both added one
+    base = _array([_binding("ctrl+x", "x")])
+    local = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "a1")])
+    remote = _array([_binding("ctrl+x", "x"), _binding("ctrl+k", "a2")])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: _array([_binding("ctrl+k", "p")])})
+
+    # then — there is no earlier place for it, so it is the last binding
+    assert result is not None
+    assert [binding["command"] for binding in _plain(result.merged)] == ["x", "p"]
+
+
+def test_a_settled_conflict_is_placed_in_the_chosen_side_order_even_when_both_sides_reordered() -> None:
+    # given — the two sides reordered the same group differently, and each changed a binding in it
+    base = _array([_binding("ctrl+k", "a"), _binding("ctrl+k", "b"), _binding("ctrl+z", "c")])
+    local = _array([_binding("ctrl+k", "b"), _binding("ctrl+k", "a", args=1), _binding("ctrl+z", "c")])
+    remote = _array([_binding("ctrl+k", "a"), _binding("ctrl+z", "c"), _binding("ctrl+k", "b", args=2)])
+    group = (("key", "ctrl+k"), ("when", None))
+
+    # when
+    picked = _settled(base, local, remote, RULE, picks={group: "local"})
+
+    # then — no whole-array conflict: the chosen side's order holds for its group
+    assert picked is not None
+    assert picked.conflicts == ()
+    assert [binding["command"] for binding in _plain(picked.merged)] == ["b", "a", "c"]
+    assert _plain(picked.merged)[1]["args"] == 1
+
+
+def test_the_merge_is_the_same_whatever_order_the_identities_are_visited_in() -> None:
+    # given — several groups conflict at once, so the order they are placed in could depend on how they are visited
+    base = _array([_binding("ctrl+a", "1"), _binding("ctrl+b", "2"), _binding("ctrl+c", "3"), _binding("ctrl+d", "4")])
+    local = _array(
+        [
+            _binding("ctrl+a", "1", args=1),
+            _binding("ctrl+b", "2", args=1),
+            _binding("ctrl+c", "3"),
+            _binding("ctrl+d", "4"),
+        ]
+    )
+    remote = _array(
+        [
+            _binding("ctrl+a", "1", args=2),
+            _binding("ctrl+b", "2", args=2),
+            _binding("ctrl+c", "3"),
+            _binding("ctrl+d", "4"),
+        ]
+    )
+
+    # when
+    first = _settled(base, local, remote, RULE)
+    second = _settled(base, local, remote, RULE)
+
+    # then
+    assert first is not None and second is not None
+    assert _plain(first.merged) == _plain(second.merged)
+    assert [conflict.element for conflict in first.conflicts] == [conflict.element for conflict in second.conflicts]
+
+
+_SIDE_COMMANDS = ("p", "q", "r", "s")
+
+
+@st.composite
+def _side(draw: st.DrawFn, base: list[str]) -> list[dict[str, object]]:
+    """A side of one `ctrl+k` group: some of the base bindings, in a random order, each with random args."""
+    chosen = draw(st.lists(st.sampled_from(base), unique=True, max_size=len(base)))
+    order = draw(st.permutations(chosen))
+    args = draw(st.lists(st.sampled_from([None, 1]), min_size=len(order), max_size=len(order)))
+    return [
+        _binding("ctrl+k", command, args=value) if value is not None else _binding("ctrl+k", command)
+        for command, value in zip(order, args, strict=True)
+    ]
+
+
+@given(data=st.data())
+def test_a_group_settled_to_a_side_reads_exactly_as_that_side_had_it(data: st.DataObject) -> None:
+    # given — one group, both sides changed it differently, and the person picks one side
+    base_commands: list[str] = data.draw(
+        st.lists(st.sampled_from(list(_SIDE_COMMANDS)), unique=True, min_size=1, max_size=4)
+    )
+    base_bindings = [_binding("ctrl+k", command) for command in base_commands]
+    local_bindings = data.draw(_side(base_commands))
+    remote_bindings = data.draw(_side(base_commands))
+    pick: Side = data.draw(st.sampled_from(("local", "remote")))
+    base, local, remote = _array(list(base_bindings)), _array(list(local_bindings)), _array(list(remote_bindings))
+    group = (("key", "ctrl+k"), ("when", None))
+    assume(local_bindings != remote_bindings and local_bindings != base_bindings and remote_bindings != base_bindings)
+
+    # when
+    result = _settled(base, local, remote, RULE, picks={group: pick})
+
+    # then — no whole-array conflict and no leftover conflict: the result is the chosen side's group, in its order
+    assume(result is not None)
+    assert result is not None
+    chosen = local_bindings if pick == "local" else remote_bindings
+    assert result.conflicts == ()
+    assert _plain(result.merged) == chosen
+
+
+_TWO_GROUP_POOL = [("ctrl+k", "p"), ("ctrl+k", "q"), ("ctrl+m", "r"), ("ctrl+m", "s"), ("ctrl+z", "t")]
+
+
+@st.composite
+def _two_group_side(draw: st.DrawFn, base: list[tuple[str, str]]) -> list[dict[str, object]]:
+    """A side over several groups: some base bindings, in a random order, with random args."""
+    chosen = draw(st.lists(st.sampled_from(base), unique=True, max_size=len(base)))
+    order = draw(st.permutations(chosen))
+    args = draw(st.lists(st.sampled_from([None, 1]), min_size=len(order), max_size=len(order)))
+    sides: list[dict[str, object]] = []
+    for (key, command), value in zip(order, args, strict=True):
+        binding: dict[str, object] = {"key": key, "command": command}
+        if value is not None:
+            binding["args"] = value
+        sides.append(binding)
+    return sides
+
+
+@settings(max_examples=600, deadline=None)
+@given(data=st.data())
+def test_settled_groups_read_in_their_chosen_side_order_with_several_groups(data: st.DataObject) -> None:
+    # given — several groups; the ones both sides changed differently are settled to a side picked at random
+    base_pairs: list[tuple[str, str]] = data.draw(
+        st.lists(st.sampled_from(_TWO_GROUP_POOL), unique=True, min_size=2, max_size=len(_TWO_GROUP_POOL))
+    )
+    base_bindings = [_binding(key, command) for key, command in base_pairs]
+    local_bindings = data.draw(_two_group_side(base_pairs))
+    remote_bindings = data.draw(_two_group_side(base_pairs))
+    base, local, remote = _array(list(base_bindings)), _array(list(local_bindings)), _array(list(remote_bindings))
+    keys = sorted({key for key, _ in base_pairs})
+    picks: dict[ElementId, Side | Array] = {
+        _group(key): data.draw(st.sampled_from(("local", "remote"))) for key in keys
+    }
+
+    # A whole-array order conflict — both sides reordered the bindings that did not change, relative to each other — is
+    # not settled by any group pick, and it is the same with or without picks (the anchors do not depend on them), so
+    # it is the one case this property leaves out. Every other case must settle, never return `None`.
+    assume(not isinstance(merge_keyed_array(base, local, remote, RULE), OrderConflict))
+
+    # when
+    result = _settled(base, local, remote, RULE, picks=picks)
+
+    # then — each group both sides changed reads in its picked side's order, and no conflict is left
+    assert result is not None
+    merged = _plain(result.merged)
+    assert result.conflicts == ()
+    assert _misordered_groups(base_bindings, local_bindings, remote_bindings, picks, merged, keys) == []
+
+
+def _group(key: str) -> ElementId:
+    """The group identity of the bindings under one key, with no `when` clause."""
+    return (("key", key), ("when", None))
+
+
+def _misordered_groups(
+    base_bindings: list[dict[str, object]],
+    local_bindings: list[dict[str, object]],
+    remote_bindings: list[dict[str, object]],
+    picks: dict[ElementId, Side | Array],
+    merged: list[dict[str, object]],
+    keys: list[str],
+) -> list[str]:
+    """Keys of the groups both sides changed differently whose merged order is not their picked side's."""
+
+    def group_of(bindings: list[dict[str, object]], key: str) -> list[dict[str, object]]:
+        return [binding for binding in bindings if binding["key"] == key]
+
+    both_changed = [
+        key
+        for key in keys
+        if group_of(local_bindings, key) != group_of(base_bindings, key)
+        and group_of(remote_bindings, key) != group_of(base_bindings, key)
+        and group_of(local_bindings, key) != group_of(remote_bindings, key)
+    ]
+    picked = {key: local_bindings if picks[_group(key)] == "local" else remote_bindings for key in both_changed}
+    return [key for key in both_changed if group_of(merged, key) != group_of(picked[key], key)]

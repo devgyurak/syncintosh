@@ -11,13 +11,14 @@ Pure: standard library only (``AGENTS.md`` §2.1).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
 from syncintosh.core.models import Scope
-from syncintosh.core.tree import KeyPath
+from syncintosh.core.tree import ElementId, KeyPath
 
 # A fingerprint is never stored or sent outside the run that made it. It is an unsalted digest of
 # the conflict's values, so writing it to disk or to a network would let anyone with a short value
@@ -42,11 +43,67 @@ ConflictKind = Literal["key", "file", "add/add", "delete/modify", "modify/modify
 
 
 def digest_of(value: object) -> str:
-    """A stable digest of a plain value, so a fingerprint never carries the value itself.
+    """A stable digest of a value, so a fingerprint never carries the value itself.
 
-    ``repr`` is deterministic for the scalar, tuple and dataclass values the merge produces.
+    The digest covers every value and its kind, through a structural encoding, not through `repr`: a `repr` may
+    hide a value (a setting's text is kept out of it on purpose), and then two different conflicts would share one
+    fingerprint, and a pick made for one would settle the other.
     """
-    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_encode(value).encode("utf-8")).hexdigest()
+
+
+class _Text:
+    """A literal piece of an encoding: a token, not a value, so the encoder never recurses into it."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _encode(value: object) -> str:
+    """The structural encoding of `value`, built with an explicit stack so a deeply nested value cannot exhaust
+    the recursion limit. Only a mapping key and a set member are encoded by a nested call, and only for their own
+    shape: a value's nesting never adds a level of recursion.
+
+    Each container is written with its kind and its delimiters, mapping keys and set members are written in sorted
+    order, and each scalar is written with its type name, so `1`, `1.0`, `"1"` and `True` all differ.
+    """
+    parts: list[str] = []
+    stack: list[object] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, _Text):
+            parts.append(item.text)
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            fields = dataclasses.fields(item)
+            parts.append(f"<{type(item).__name__}:")
+            stack.append(_Text(">"))
+            for field_ in reversed(fields):
+                stack.append(getattr(item, field_.name))
+                stack.append(_Text(f"{field_.name}="))
+        elif isinstance(item, Mapping):
+            # Each key is encoded once, for its order and its text; a key is a name, so its encoding is shallow.
+            keyed = sorted(((_encode(key), child) for key, child in item.items()), key=lambda pair: pair[0])
+            parts.append("{")
+            stack.append(_Text("}"))
+            for key_text, child in reversed(keyed):
+                stack.append(child)
+                stack.append(_Text(f"{key_text}:"))
+        elif isinstance(item, (tuple, list)):
+            parts.append(f"{type(item).__name__}[")
+            stack.append(_Text("]"))
+            for child in reversed(item):
+                stack.append(child)
+                stack.append(_Text(","))
+        elif isinstance(item, (set, frozenset)):
+            members = sorted(_encode(member) for member in item)
+            parts.append(f"{type(item).__name__}{{" + ",".join(members) + "}")
+        elif isinstance(item, bytes):
+            parts.append(f"bytes({item.hex()})")
+        else:
+            parts.append(f"{type(item).__name__}({item!r})")
+    return "".join(parts)
 
 
 def fingerprint(file_id: str, key_path: KeyPath | None, base: str, local: str, remote: str) -> str:
@@ -93,7 +150,8 @@ class ConflictView:
     file_id: str
     path: str
     key_path: KeyPath | None
-    fingerprint: str
+    # A fingerprint identifies a conflict for the pick that settles it; a repr shows it only as nothing (AGENTS.md §4).
+    fingerprint: str = field(repr=False)
     local_present: bool = True
     remote_present: bool = True
     # False when a side is not text (a binary file). Such a conflict is never shown to a model, and no text
@@ -103,6 +161,9 @@ class ConflictView:
     local_text: str = field(default="", repr=False)
     remote_text: str = field(default="", repr=False)
     diff: str = field(default="", repr=False)
+    # Set when the conflict is one binding group of an identified array (`core/keyed_array.py`); `key_path`
+    # names the array and this names the group. Its values are the group's bindings, never the whole array.
+    element: ElementId | None = field(default=None, repr=False)
 
 
 # Called with every conflict the cycle currently finds, and the picks this run already made. It

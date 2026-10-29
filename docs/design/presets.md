@@ -79,9 +79,21 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   other* key (`system/secret_scan.py`) — and it matches a *literal* password only: `$DB_PASS` and
   `${PGPASSWORD}` are references, which is the recommended way to keep the value out of the file,
   so a URL that uses them is not refused.
-- `keybindings.json` has **no** strip list: the merge compares an array whole, because a later
-  binding overrides an earlier one, so identifying entries by key would change behaviour. A change
-  to the same binding on both machines is therefore a whole-file conflict.
+- `keybindings.json` has **no** strip list, but its array merges **one binding at a time** (issue #21).
+  The preset declares an `ArrayRule` for the root array: identity `key`, `command`, `when`; required
+  `key` and `command`; group `key` and `when`. A binding is in the group of its `key` and `when`, and
+  a group one machine changed is taken from that machine. A group both machines changed differently is
+  a conflict on that binding alone, and the resolve chooser and the model are asked about that binding.
+  Order is kept: the local order stays, and an addition goes after its predecessor on its own side. Two
+  machines that add different bindings both keep them. `key` is compared exactly, so `Ctrl+A` and
+  `ctrl+a` are two groups, although VS Code reads them as one; the file text is never normalized.
+  A removed binding takes its notes with it (see [02-base-and-merge.md](02-base-and-merge.md)). Two
+  machines that reorder the shared bindings differently are one whole-array conflict, which says that a
+  per-binding pick cannot settle it and that a whole side drops the other side's additions. An array this
+  rule cannot read (a non-object element, a missing `key` or `command`, two bindings with one identity)
+  falls back to the whole-array conflict the file had before.
+  Layout limits of the rewrite (blank lines beside the brackets, a comma-first array) are listed in
+  [02-base-and-merge.md](02-base-and-merge.md).
 - A key that a machine never set simply does not arrive: a machine that has never had the file gets
   the synced settings without the machine-local ones, which then take VS Code's own defaults. That
   is what "not synced" means for a machine that never chose a value.

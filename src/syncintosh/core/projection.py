@@ -165,7 +165,7 @@ def _parse(adapter: ContentAdapter, text: str, policy: PresetFile) -> Tree:
 
 def _render(adapter: ContentAdapter, tree: Tree, template: str, policy: PresetFile) -> str:
     try:
-        return adapter.render(tree, template)
+        return adapter.render(tree, template, policy.array_rules)
     except ContentParseError as exc:
         raise ProjectionError(f"{policy.path}: cannot rewrite the file safely ({exc})") from exc
 

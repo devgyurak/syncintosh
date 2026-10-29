@@ -8,13 +8,17 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.advice import Advice, MaskedText
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
 from syncintosh.core.tree import KeyPath, Tree
+
+# The keyed tag of a `when` clause, as the machine that holds the key computes it. Core only calls it; the key never
+# enters core, and a call with no tagger shows the clause as hidden (`core/tree.py`, `element_label`).
+WhenTag = Callable[[str], str]
 
 if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a

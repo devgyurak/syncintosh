@@ -34,14 +34,18 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from syncintosh.core.errors import ScanAllowCorrupt
+from syncintosh.core.ports import WhenTag
 
 # The allowlist format version. Serialized verbatim, so a plain `int` constant, never an `Enum`.
 ALLOW_VERSION: Final = 1
+
+# How much of an HMAC tag of a `when` clause is shown: enough to tell two bindings under one key apart.
+WHEN_TAG_HEX_LEN: Final = 12
 
 # 128 bits of HMAC-SHA256 as lowercase hex. The value is copied from a refusal message into
 # `scan allow`, so it is kept short; a collision inside one machine's list is negligible and would
@@ -82,7 +86,7 @@ class ScanAllowEntry:
 
     path: str
     label: str
-    fingerprint: str
+    fingerprint: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not self.path:
@@ -188,26 +192,26 @@ def _parse_entry(raw: object, where: str) -> ScanAllowEntry:
     return ScanAllowEntry(path=path, label=label, fingerprint=digest)
 
 
-def load_scan_allow(path: Path) -> ScanAllow:
-    """Read the allowlist, creating it with a fresh key when it does not exist yet.
+def read_scan_allow(path: Path) -> ScanAllow | None:
+    """The allowlist as stored, or `None` when the file does not exist. Never creates the file.
 
-    The key has to be persisted the first time it is needed — a fingerprint only means something
-    if the same key produced it — so a missing file is written here rather than answered with an
-    ephemeral key that would change on the next run and leave the fingerprint meaningless. Lines
-    like this are why the loader is a factory rather than a constructor (``AGENTS.md`` §2.6).
+    A command that only shows something (a diff, a file merge) reads through here, so showing a difference cannot write
+    the allowlist. A file that is there but unreadable, or does not parse, raises `ScanAllowCorrupt`.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        allow = new_scan_allow()
-        save_scan_allow(allow, path)
-        return allow
-    except OSError as exc:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
         raise ScanAllowCorrupt(f"cannot read the scan allowlist {path}: {exc}") from exc
     try:
         parsed: Any = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is a ValueError, and so is the error for an integer with too many digits to convert.
         raise ScanAllowCorrupt(f"the scan allowlist {path} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # Nesting deeper than the parser can follow is refused like any other corruption, never a crash of a display.
+        raise ScanAllowCorrupt(f"the scan allowlist {path} is nested too deeply to read") from exc
     if not isinstance(parsed, dict):
         raise ScanAllowCorrupt(f"the scan allowlist {path} must contain a JSON object")
     if parsed.get("version") != ALLOW_VERSION:
@@ -228,6 +232,21 @@ def load_scan_allow(path: Path) -> ScanAllow:
     return ScanAllow(key=key, entries=entries)
 
 
+def load_scan_allow(path: Path) -> ScanAllow:
+    """Read the allowlist, creating it with a fresh key when it does not exist yet.
+
+    The key has to be persisted the first time it is needed — a fingerprint only means something
+    if the same key produced it — so a missing file is written here rather than answered with an
+    ephemeral key that would change on the next run and leave the fingerprint meaningless. Lines
+    like this are why the loader is a factory rather than a constructor (``AGENTS.md`` §2.6).
+    """
+    allow = read_scan_allow(path)
+    if allow is None:
+        allow = new_scan_allow()
+        save_scan_allow(allow, path)
+    return allow
+
+
 __all__ = [
     "ALLOWABLE_LABELS",
     "ALLOW_VERSION",
@@ -237,10 +256,51 @@ __all__ = [
     "FINGERPRINT_HEX_LEN",
     "KEY_BYTES",
     "URL_CREDENTIALS_LABEL",
+    "WHEN_TAG_HEX_LEN",
     "ScanAllow",
     "ScanAllowEntry",
+    "WhenTagging",
     "fingerprint",
     "load_scan_allow",
+    "machine_when_tag",
     "new_scan_allow",
+    "read_scan_allow",
     "save_scan_allow",
+    "when_tag_for",
 ]
+
+
+def when_tag_for(key: bytes) -> WhenTag:
+    """A tagger for `when` clauses under `key`: an HMAC under a domain label, cut to `WHEN_TAG_HEX_LEN` hex digits.
+
+    The domain label keeps the tag apart from a scan fingerprint, and without the key the tag is not a guessable digest
+    of the text, so a dictionary of likely `when` clauses cannot be checked against it.
+    """
+
+    def tag(text: str) -> str:
+        return hmac.new(key, b"when\x00" + text.encode("utf-8"), hashlib.sha256).hexdigest()[:WHEN_TAG_HEX_LEN]
+
+    return tag
+
+
+class WhenTagging(NamedTuple):
+    """This run's tagger for `when` clauses, and whether it had to use a key for this run only."""
+
+    tag: WhenTag
+    run_key: bool
+
+
+def machine_when_tag(path: Path) -> WhenTagging:
+    """This machine's tagger for `when` clauses, keyed with its stored scan key. Never creates the allowlist.
+
+    When the allowlist is missing or unusable, this run uses a fresh random key and says so (`run_key`): the tags
+    still tell two `when` clauses apart within one output, and nothing about that key is stored. A corrupt allowlist
+    fails the commands that write (sync loads it through `load_scan_allow`); a display must not fail on it.
+    """
+    try:
+        allow = read_scan_allow(path)
+    except ScanAllowCorrupt:
+        allow = None
+    if allow is None:
+        return WhenTagging(when_tag_for(os.urandom(KEY_BYTES)), run_key=True)
+    return WhenTagging(when_tag_for(allow.key), run_key=False)

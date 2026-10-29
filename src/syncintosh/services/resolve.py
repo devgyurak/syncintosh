@@ -18,12 +18,13 @@ from pathlib import Path, PurePosixPath
 
 from syncintosh.core.advice import Advice, MaskedText, new_host_tokens, rationale_for_display
 from syncintosh.core.errors import ConflictsNotCovered, ContentParseError, SyntaxInvalid
+from syncintosh.core.keyed_array import accepts_group
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import ConflictAdvisor, ContentAdapter, Masker, PresetCatalog, SyntaxValidator
 from syncintosh.core.presets import ProposedUrl, ValidatorName, proposed_urls
 from syncintosh.core.resolution import Choice, ConflictView, Decide, NamedChoice, Picks, Proposal, Side
-from syncintosh.core.tree import path_label
+from syncintosh.core.tree import element_label, path_label
 
 # Asked once the decisions are made, before anything is published: the conflicts and every pick the
 # run would publish. Returning `False` stops the run with nothing published.
@@ -200,6 +201,11 @@ def advised_chooser(
         # The key path goes with the texts: a model choosing among `14`, `16` and `13` with no name for the
         # setting would be guessing, and an auto-applied guess is the worst outcome.
         key = "" if view.key_path is None else path_label(view.key_path)
+        if view.element is not None:
+            # One binding group of an array: the answer is an array of that group's bindings, not one value. The
+            # `when` is sent as its text, not a digest; the masker covers it like any other text, and a digest of it
+            # would be a fingerprint, which a model must never be sent.
+            key += f" {element_label(view.element, when_text=True)} (a JSON array of this group's bindings)"
         path, key_text, base, local, remote = masker.mask(
             view.path, key, view.base_text, view.local_text, view.remote_text
         )
@@ -275,6 +281,15 @@ def proposal_problem(
             adapter.parse(text)
         except ContentParseError:
             return f"the proposed value does not parse as {policy.format}"
+    if view.element is not None and view.key_path is not None and adapter is not None:
+        # A binding group takes only bindings of that group; a proposal that names another group would move one.
+        rule = policy.array_rules.get(view.key_path)
+        try:
+            tree = adapter.parse(text)
+        except ContentParseError:
+            tree = None
+        if rule is None or tree is None or not accepts_group(tree.value(()), rule, view.element):
+            return "the proposed value is not an array of this binding's group"
     validator = validators.get(policy.validator) if policy.validator is not None else None
     if view.kind == "file" and validator is not None:
         try:

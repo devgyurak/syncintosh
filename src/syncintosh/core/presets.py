@@ -23,12 +23,13 @@ Standard library only (``AGENTS.md`` §2.1).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
+from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.tree import KeyPath
@@ -143,6 +144,10 @@ class PresetFile:
     `excluded` keys are the stricter set: a credential that must never enter the repo at all.
     The two share a mechanism but not a meaning — `noise` is convenience, `excluded` is a
     security invariant (``AGENTS.md`` §3.4) — so they stay separate.
+
+    `arrays` names the arrays inside the file that merge element by element instead of as one value (see
+    `core/keyed_array.py`). It is part of the local catalog only: the policy is read by path from the
+    preset that owns the file, never from a synced copy.
     """
 
     path: str
@@ -151,6 +156,12 @@ class PresetFile:
     excluded: frozenset[KeyPath]
     validator: ValidatorName | None
     glob: PresetGlob | None
+    arrays: tuple[tuple[KeyPath, ArrayRule], ...] = ()
+
+    @property
+    def array_rules(self) -> dict[KeyPath, ArrayRule]:
+        """The element-level rules by array path, as a fresh mapping the caller may not mutate in place."""
+        return dict(self.arrays)
 
     @classmethod
     def create(
@@ -161,6 +172,7 @@ class PresetFile:
         noise: Iterable[KeyPath] = (),
         excluded: Iterable[KeyPath] = (),
         validator: ValidatorName | None = None,
+        array_identity: Mapping[KeyPath, ArrayRule] | None = None,
     ) -> PresetFile:
         """Validate and freeze one preset file; never assign fields afterwards."""
         try:
@@ -191,6 +203,7 @@ class PresetFile:
             excluded=excluded_paths,
             validator=validator,
             glob=glob,
+            arrays=tuple(sorted((array_identity or {}).items(), key=lambda item: item[0])),
         )
 
     @property

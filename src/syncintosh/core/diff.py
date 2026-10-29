@@ -9,7 +9,41 @@ given two :class:`~syncintosh.core.tree.Tree` values, return the paths that disa
 
 from __future__ import annotations
 
-from syncintosh.core.tree import KeyPath, Tree
+from collections.abc import Mapping
+
+from syncintosh.core.keyed_array import ArrayRule, group_leaves
+from syncintosh.core.models import ConflictAddress
+from syncintosh.core.tree import ABSENT, ElementId, KeyPath, Leaf, Tree
+
+
+def changed_addresses(
+    left: Tree, right: Tree, arrays: Mapping[KeyPath, ArrayRule] | None = None
+) -> tuple[ConflictAddress, ...]:
+    """The changed places, with an identified array's changed bindings named instead of the whole array.
+
+    An array with a rule reports each binding group that differs (`(path, group)`), so a diff shows the
+    binding that changed rather than the file's whole array. An array with no rule, one the rule cannot
+    read, or one whose bindings are the same but whose order changed, reports `(path, None)` as before.
+    """
+    addresses: list[ConflictAddress] = []
+    for path in changed_paths(left, right):
+        rule = (arrays or {}).get(path)
+        groups = None if rule is None else _changed_groups(left.value(path), right.value(path), rule)
+        if groups:
+            addresses.extend((path, group) for group in groups)
+        else:
+            addresses.append((path, None))
+    return tuple(addresses)
+
+
+def _changed_groups(left: Leaf, right: Leaf, rule: ArrayRule) -> tuple[ElementId, ...] | None:
+    """The groups whose bindings differ between two arrays, or `None` when either cannot be identified."""
+    left_leaves = group_leaves(left, rule)
+    right_leaves = group_leaves(right, rule)
+    if left_leaves is None or right_leaves is None:
+        return None
+    groups = tuple(dict.fromkeys((*left_leaves, *right_leaves)))
+    return tuple(group for group in groups if left_leaves.get(group, ABSENT) != right_leaves.get(group, ABSENT))
 
 
 def changed_paths(left: Tree, right: Tree) -> tuple[KeyPath, ...]:
@@ -23,4 +57,4 @@ def changed_paths(left: Tree, right: Tree) -> tuple[KeyPath, ...]:
     return tuple(path for path in paths if left.value(path) != right.value(path))
 
 
-__all__ = ["changed_paths"]
+__all__ = ["changed_addresses", "changed_paths"]

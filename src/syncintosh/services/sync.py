@@ -45,10 +45,11 @@ from syncintosh.core.errors import (
     ProjectionError,
     SyntaxInvalid,
 )
+from syncintosh.core.keyed_array import ArrayRule, group_leaves
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.models import LedgerEntry, PendingState, Scope
+from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import (
@@ -70,6 +71,7 @@ from syncintosh.core.ports import (
     SecretScanner,
     SyncLock,
     SyntaxValidator,
+    WhenTag,
     remote_ref,
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
@@ -96,7 +98,7 @@ from syncintosh.core.resolution import (
     digest_of,
     fingerprint,
 )
-from syncintosh.core.tree import KeyPath, Node, Tree, path_label
+from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
 from syncintosh.services.repo_writer import write_repo
 
@@ -194,6 +196,8 @@ class _Presets:
     catalog: PresetCatalog
     adapters: Mapping[FileFormat, ContentAdapter]
     validators: Mapping[ValidatorName, SyntaxValidator]
+    # The keyed tag a conflict names a `when` clause by; `None` shows it as hidden (`core/tree.py`).
+    when_tag: WhenTag | None = None
 
     def policy_for(self, path: str) -> PresetFile | None:
         """The strip/validate policy for `path`, or `None` when no preset owns it."""
@@ -265,16 +269,16 @@ class _Collect:
 
     records: dict[str, ManifestRecord] = field(default_factory=dict)
     # The projected bytes that would be sealed: the object content, keyed by file_id.
-    contents: dict[str, bytes] = field(default_factory=dict)
+    contents: dict[str, bytes] = field(default_factory=dict, repr=False)
     # The projected form of each live file that existed at collect, keyed by file_id. Apply reuses
     # it instead of projecting again whenever the raw bytes are unchanged since collect — the
     # compare-and-swap already proves the file is the one this projection was made from.
-    views: dict[str, bytes] = field(default_factory=dict)
+    views: dict[str, bytes] = field(default_factory=dict, repr=False)
     # The bytes collect read from each live file, kept so apply can compare-and-swap a record it
     # is about to overwrite on an explicit adopt — even though it collected nothing for it. These
     # are the **raw** bytes, never the projection: an edit between collect and apply must abort
     # the write even when the edit touched only a key the preset strips.
-    seen: dict[str, bytes] = field(default_factory=dict)
+    seen: dict[str, bytes] = field(default_factory=dict, repr=False)
     # A local change whose ledger baseline is older than HEAD: it must be merged with HEAD's
     # content, not pushed over it.
     stale: list[_StaleChange] = field(default_factory=list)
@@ -302,7 +306,7 @@ class _StaleChange:
 
     record: ManifestRecord
     entry: LedgerEntry
-    live: bytes
+    live: bytes = field(repr=False)
 
 
 def _join(home: str, relpath: str) -> str:
@@ -421,8 +425,8 @@ class _Projected:
     (``AGENTS.md`` §4, "never log secrets").
     """
 
-    raw: bytes | None
-    view: bytes | None
+    raw: bytes | None = field(repr=False)
+    view: bytes | None = field(repr=False)
     failure: ProjectionFailure | None = None
 
 
@@ -822,18 +826,24 @@ def _collect_first_sight(
     state.collected.append(item.path)
 
 
-def _content_detail(paths: tuple[KeyPath, ...], reason: str) -> str:
+def _content_detail(
+    addresses: tuple[ConflictAddress, ...], reason: str, why: str = "", when_tag: WhenTag | None = None
+) -> str:
     """A pending-conflict detail that names the colliding key paths, never their values (§4).
 
+    A binding is named by its `key` and `when` (its group): those are the structure a person picks by, while
+    a binding's `command` and `args` are never named here.
+
     `path_label` renders each path the way a person reads the file, so a whole-document conflict —
-    an array like `keybindings.json`, compared as one value — prints `(document)` rather than
-    nothing, and two paths that differ (`"a.b"` as one key against `a` → `b`) do not print the same
-    string. The same label is what the `merge` command prints.
+    an array compared as one value — prints `(document)` rather than nothing, and two paths that differ
+    (`"a.b"` as one key against `a` → `b`) do not print the same string. A conflict on one binding of
+    an identified array names that binding too. The same label is what the `merge` command prints.
     """
-    named = dict.fromkeys(path_label(path) for path in paths)
-    if not named:
-        return reason
-    return f"{reason}: {', '.join(named)}"
+    named = dict.fromkeys(path_label(path, element, when_tag=when_tag) for path, element in addresses)
+    detail = reason if not named else f"{reason}: {', '.join(named)}"
+    # A refusal the adapter gave (its fixed text) is said, so the person knows why the conflict stays one. An order
+    # conflict is settled by choosing a whole side, not by a binding pick, and its reason says so.
+    return f"{detail} ({why})" if why else detail
 
 
 # --------------------------------------------------------------------------- resolve
@@ -851,7 +861,8 @@ class Resolution:
     reruns; every rerun answers at least one conflict the run had not answered before.
     """
 
-    picks: Picks = MappingProxyType({})
+    # Keyed by fingerprint, which identifies a conflict's values: a repr shows neither the keys nor the picks.
+    picks: Picks = field(default=MappingProxyType({}), repr=False)
     decide: Decide | None = None
     resolving: bool = False
     rounds: int = 0
@@ -897,7 +908,7 @@ def _subtree_text(subtree: dict[KeyPath, Node]) -> str:
     """A subtree as a person reads it: its JSON value, or a marker when the side has nothing there."""
     if not subtree:
         return "(absent)"
-    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(Tree.create(subtree).to_value(), ensure_ascii=False, default=str)
 
 
 def _subtree_digest(subtree: dict[KeyPath, Node]) -> str:
@@ -976,6 +987,52 @@ def _key_view(
     )
 
 
+def _element_step(element: ElementId) -> str:
+    """An array element's identity as one key-path step, so its fingerprint can never match a key's."""
+    return "\x00element:" + json.dumps([list(pair) for pair in element], ensure_ascii=False)
+
+
+def _group_text(leaf: Leaf) -> str:
+    """A group's bindings as a person reads them: their JSON, or a marker when the side has none."""
+    if isinstance(leaf, Absent):
+        return "(absent)"
+    return json.dumps(Tree.create({(): leaf}).to_value(), ensure_ascii=False, default=str)
+
+
+def _element_view(
+    file_id: str,
+    path: str,
+    key_path: KeyPath,
+    element: ElementId,
+    base_part: Leaf,
+    local_part: Leaf,
+    remote_part: Leaf,
+) -> ConflictView:
+    """One binding group of an identified array as a choice. Its digests cover the group's bindings only."""
+    return ConflictView(
+        kind="key",
+        file_id=file_id,
+        path=path,
+        key_path=key_path,
+        element=element,
+        fingerprint=fingerprint(
+            file_id,
+            (*key_path, _element_step(element)),
+            digest_of(base_part),
+            digest_of(local_part),
+            digest_of(remote_part),
+        ),
+        base_text=_group_text(base_part),
+        local_text=_group_text(local_part),
+        remote_text=_group_text(remote_part),
+    )
+
+
+def _group_index(leaf: Leaf, rule: ArrayRule) -> dict[ElementId, Leaf]:
+    """Every binding group of one side's array, indexed once; an unidentifiable array has none."""
+    return group_leaves(leaf, rule) or {}
+
+
 def _content_views(
     file_id: str,
     path: str,
@@ -984,14 +1041,41 @@ def _content_views(
     local: bytes,
     remote: bytes,
     adapter: ContentAdapter | None,
-    key_paths: tuple[KeyPath, ...],
+    arrays: Mapping[KeyPath, ArrayRule],
+    addresses: tuple[ConflictAddress, ...],
 ) -> tuple[ConflictView, ...]:
-    """The choices for one content conflict: one per conflicted key, or the whole file."""
-    trees = _parsed(adapter, base, local, remote) if adapter is not None and key_paths else None
+    """The choices for one content conflict: one per conflicted key or binding group, or the whole file."""
+    trees = _parsed(adapter, base, local, remote) if adapter is not None and addresses else None
     if trees is None:
         return (_whole_view(file_id, path, fmt, base, local, remote),)
     base_tree, local_tree, remote_tree = trees
-    return tuple(_key_view(file_id, path, key, base_tree, local_tree, remote_tree) for key in key_paths)
+    # Each array is indexed once per side, not scanned once per binding group it conflicts in.
+    indexed: dict[KeyPath, tuple[dict[ElementId, Leaf], dict[ElementId, Leaf], dict[ElementId, Leaf]]] = {}
+    views: list[ConflictView] = []
+    for key_path, element in dict.fromkeys(addresses):
+        if element is None:
+            views.append(_key_view(file_id, path, key_path, base_tree, local_tree, remote_tree))
+            continue
+        if key_path not in indexed:
+            rule = arrays[key_path]
+            indexed[key_path] = (
+                _group_index(base_tree.value(key_path), rule),
+                _group_index(local_tree.value(key_path), rule),
+                _group_index(remote_tree.value(key_path), rule),
+            )
+        base_leaves, local_leaves, remote_leaves = indexed[key_path]
+        views.append(
+            _element_view(
+                file_id,
+                path,
+                key_path,
+                element,
+                base_leaves.get(element, ABSENT),
+                local_leaves.get(element, ABSENT),
+                remote_leaves.get(element, ABSENT),
+            )
+        )
+    return tuple(views)
 
 
 def _content_pick(pick: Choice | None) -> Side | Proposal | None:
@@ -1013,6 +1097,11 @@ def _checked(
     return _Settled(data=None, detail="the merged result would not pass its syntax check", views=(whole,))
 
 
+# The rounds that settle a content conflict are a guard: no pick adds a conflict address (see `_settle_content`), so
+# the cap is a backstop for a merge that did.
+_MAX_SETTLE_ROUNDS = 8
+
+
 def _settle_content(
     *,
     presets: _Presets,
@@ -1031,8 +1120,18 @@ def _settle_content(
     A whole-file pick settles the file outright; otherwise each key pick settles its key, and what
     the merge still cannot settle is reported with the choices it needs. Every settled result,
     however it was settled, goes through the syntax check.
+
+    Picks are applied in rounds: each merge's views are read, the picks for views not yet settled are
+    applied, and the merge runs again, until a round applies no new pick or the cap is reached.
+
+    A pick does not add a conflict address: the addresses after a pick are a subset of those before it
+    (`tests/unit/test_pick_addresses.py`). A pick can still make a render refuse, with no address, and then
+    the file stays pending with the refusal's fixed reason. The rounds therefore guard against a merge that
+    adds an address after a pick, which the core does not do; the cap bounds them whatever the merge does.
     """
     adapter = presets.adapter_for(fmt)
+    policy = presets.policy_for(path)
+    arrays = policy.array_rules if policy is not None else {}
     whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
     if isinstance(whole, Proposal) and not _is_text(fmt, base, local, remote):
         # A text proposal cannot settle a binary file: it would replace the bytes with a string.
@@ -1041,19 +1140,44 @@ def _settle_content(
         settled = merge_content(base, local, remote, driver, adapter, choice=whole)
         if not settled.conflicted:
             return _checked(presets, settled.data, path, file_id, fmt, base, local, remote)
-    first = merge_content(base, local, remote, driver, adapter)
-    if not first.conflicted:
-        return _checked(presets, first.data, path, file_id, fmt, base, local, remote)
+    merged = merge_content(base, local, remote, driver, adapter, arrays=arrays)
     key_choices: dict[KeyPath, Side | Proposal] = {}
-    for view in _content_views(file_id, path, fmt, base, local, remote, adapter, first.conflict_paths):
-        key_pick = _content_pick(picks.get(view.fingerprint))
-        if view.key_path is not None and key_pick is not None:
-            key_choices[view.key_path] = key_pick
-    merged = merge_content(base, local, remote, driver, adapter, key_choices=key_choices) if key_choices else first
+    element_picks: dict[tuple[KeyPath, ElementId], Side | Proposal] = {}
+    applied: set[str] = set()
+    # The views are read again from each merge, so a conflict that a merge shows still gets its own pick. A pick adds no
+    # conflict address (see the docstring), so the loop is a guard: a round that applies no new pick stops it, and the
+    # cap bounds it.
+    for _ in range(_MAX_SETTLE_ROUNDS):
+        if not merged.conflicted:
+            return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
+        new_picks = False
+        for view in _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses):
+            pick = _content_pick(picks.get(view.fingerprint))
+            if view.key_path is None or pick is None or view.fingerprint in applied:
+                continue
+            applied.add(view.fingerprint)
+            new_picks = True
+            if view.element is None:
+                key_choices[view.key_path] = pick
+            else:
+                element_picks[(view.key_path, view.element)] = pick
+        if not new_picks:
+            break
+        merged = merge_content(
+            base,
+            local,
+            remote,
+            driver,
+            adapter,
+            key_choices=key_choices,
+            arrays=arrays,
+            element_picks=element_picks,
+        )
     if not merged.conflicted:
         return _checked(presets, merged.data, path, file_id, fmt, base, local, remote)
-    views = _content_views(file_id, path, fmt, base, local, remote, adapter, merged.conflict_paths)
-    return _Settled(data=None, detail=_content_detail(merged.conflict_paths, reason), views=views)
+    views = _content_views(file_id, path, fmt, base, local, remote, adapter, arrays, merged.conflict_addresses)
+    detail = _content_detail(merged.conflict_addresses, reason, merged.reason, presets.when_tag)
+    return _Settled(data=None, detail=detail, views=views)
 
 
 def _record_fingerprint(conflict: RecordConflict) -> str:
@@ -1854,13 +1978,14 @@ def sync(
     adopt: AdoptChoice | None = None,
     resolving: bool = False,
     decide: Decide | None = None,
+    when_tag: WhenTag | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
 
     `resolving` runs the cycle that `resolve` settles a pending state with; `decide` answers the
     conflicts that cycle finds (see `Resolution`). A plain sync passes neither.
     """
-    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
+    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators, when_tag=when_tag)
     lock.acquire()
     try:
         if resolving:
