@@ -839,6 +839,17 @@ def test_an_insertion_where_two_deletions_meet_is_not_lost() -> None:
     assert result == "X9"
 
 
+def test_a_removal_beside_a_blank_line_still_takes_the_insertions_where_its_ranges_meet() -> None:
+    # given — the only binding stands below a blank line at the opening bracket, so its removal is two touching ranges
+    template = '[\n\n    { "key": "c", "command": "x" },\n]'
+
+    # when — it is replaced by two bindings, which are inserted where those ranges meet
+    rendered = _render(template, [{"key": "d", "command": "z"}, {"key": "f", "command": "z"}])
+
+    # then — both land, and the blank line against the bracket goes with the removed binding
+    assert rendered == '[\n    {"key": "d", "command": "z"},\n    {"key": "f", "command": "z"},\n]'
+
+
 @pytest.mark.parametrize(
     "edits",
     [
