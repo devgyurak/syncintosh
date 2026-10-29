@@ -1,0 +1,28 @@
+{
+	"telemetry.machineId": "0000000000000000000000000000000000000000000000000000000000000000",
+	"windowsState": {
+		"lastActiveWindow": {
+			"folder": "file:///Users/example/project"
+		}
+	},
+	"userDataProfiles": [
+		{
+			"name": "Work",
+			"location": "-3f2a1b",
+			"icon": "briefcase"
+		},
+		{
+			"name": "Writing",
+			"location": "7c91e0aa",
+			"useDefaultFlags": {
+				"settings": true,
+				"keybindings": false,
+				"snippets": true
+			}
+		},
+		{
+			"name": "Agents",
+			"location": "builtin/agents"
+		}
+	]
+}

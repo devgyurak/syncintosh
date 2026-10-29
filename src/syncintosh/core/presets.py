@@ -272,7 +272,7 @@ class Preset:
             stray = [file.path for file in profiles.files if profiles.default_path(file.path) not in owned]
             if stray:
                 raise ConfigError(f"preset {name!r}: profile files without a default counterpart: {stray}")
-            if any(collision_key(file.path) == collision_key(profiles.index) for file in files):
+            if any(file.matches(profiles.index) for file in files):
                 # The index is read in memory for the profile list only; it also holds window state and a
                 # telemetry machine id, so a preset must never be able to collect and seal it.
                 raise ConfigError(f"preset {name!r}: the profile index must not be a tracked file")
