@@ -451,8 +451,8 @@ class _Diff:
             # The block goes after everything that survives — and after any removal, never inside
             # one. The padding before `}` sits between the last member and the brace, so a run that
             # emptied the object ends past that member's value; an insert placed there would be
-            # inside the deleted range, and the edit merge drops an edit that starts before the
-            # cursor. `{"a": 1, "b": 2}` handed `{c}` would then render as `{}` with no `c` in it.
+            # inside the deleted range, and `_apply_edits` refuses an edit that carries text and
+            # starts before the cursor. `{"a": 1, "b": 2}` handed `{c}` would then not render at all.
             natural = node.members[-1].value.span.end if node.members else node.span.end - 1
             position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
@@ -1068,7 +1068,8 @@ def _union(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """The ranges in order, with overlapping ones merged, so no two deletions overlap.
 
     Ranges that only touch stay apart: an insertion at the offset where they meet would fall inside a merged range, and
-    an edit that starts inside an earlier one is not applied (see `_apply_edits`).
+    an edit that starts inside an earlier one that carries text, or reaches past it, refuses the render (see
+    `_apply_edits`).
     """
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
@@ -1120,19 +1121,6 @@ def _line_end(text: str, position: int) -> int:
 def _opens_array(text: str, comments: _Comments, start: int) -> bool:
     """True when the nearest code above `start` is an opening bracket, so `start` is the array's first element."""
     return start > 0 and _code_above(text, comments, start - 1).endswith("[")
-
-
-def _blank_opens(text: str, comments: _Comments, position: int) -> bool:
-    """True when the line right above `position` is blank and the line that opens the array stands right above it.
-
-    A blank line there would sit against the opening bracket if the edit at `position` took the element below it.
-    """
-    blank_start = _line_start(text, position - 1) if position > 0 else 0
-    return (
-        blank_start > 0
-        and _is_blank(text, comments, blank_start, position - 1)
-        and _is_opening_line(text, comments, blank_start - 1)
-    )
 
 
 def _is_opening_line(text: str, comments: _Comments, line_end: int) -> bool:
@@ -1203,7 +1191,8 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     """
     after_end = _next_line_start(text, end)
     after = text[end:after_end] if end < len(text) else None
-    blank_before = start > 0 and _is_blank(text, comments, _line_start(text, start - 1), start - 1)
+    blank_start = _line_start(text, start - 1) if start > 0 else 0
+    blank_before = start > 0 and _is_blank(text, comments, blank_start, start - 1)
     blank_after = after is not None and after != "" and _is_blank(text, comments, end, _line_end(text, end))
     opens = _opens_array(text, comments, start)
     closes = _bracket_below(text, comments, end)
@@ -1212,8 +1201,8 @@ def _widen(text: str, comments: _Comments, insert_points: set[int], start: int, 
     # follows: then it would sit against the bracket.
     inserted = start in insert_points
     pieces: list[tuple[int, int]] = []
-    if blank_before and ((closes and not inserted) or _blank_opens(text, comments, start)):
-        pieces.append((_line_start(text, start - 1), start))
+    if blank_before and ((closes and not inserted) or _is_opening_line(text, comments, blank_start - 1)):
+        pieces.append((blank_start, start))
     if blank_after and (blank_before or opens or closes) and (closes or not inserted):
         end = after_end
     pieces.append((start, end))
@@ -1248,8 +1237,9 @@ CHANGED_WITH_NOTE_REFUSED = (
     "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
 )
 
-# Two edits to one array overlap, so one of them would be dropped; the text names only the cause.
-EDIT_OVERLAP_REFUSED = "two edits to this array overlap, so it cannot be written without losing one of them"
+# Two edits to one file overlap (an array element or an object member), so one of them would be dropped; the text names
+# only the cause.
+EDIT_OVERLAP_REFUSED = "two edits to this file overlap, so it cannot be written without losing one of them"
 
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
