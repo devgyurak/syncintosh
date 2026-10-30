@@ -312,3 +312,15 @@ def test_a_diff_does_not_read_through_a_symlinked_file(tmp_path: Path) -> None:
 
     # then
     assert (entry.status, entry.here) == ("deferred", None)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [f"{HOME}/-3f2a1b/settings.json", f"{HOME}/@Cafe%CC%81/settings.json", f"{HOME}/@wo%72k/settings.json"],
+)
+def test_resolve_alone_refuses_a_reserved_path_that_is_not_logical(path: str) -> None:
+    # when
+    result = _paths(_work()).resolve(path)
+
+    # then — never handed back as a real path, even if a caller forgot to ask the catalog first
+    assert isinstance(result, Unresolved)

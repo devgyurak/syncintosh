@@ -30,6 +30,8 @@ from syncintosh.core.watch import ProfileTargets, WatchFilter
 from syncintosh.services.doctor import Check
 
 _NOT_TRACKED = "this machine does not track profiles for this app"
+_NO_PRESET = ""
+_NOT_A_PATH = "this is not a path the app's profile layout allows"
 _UNREADABLE = "the app's profile list could not be read, so profile files are left as they are"
 
 
@@ -83,6 +85,11 @@ class LivePaths:
         """The real path for `path`, or why a logical one has none here."""
         found = self.logical(path)
         if found is None:
+            if not self.catalog.knows(_NO_PRESET, path):
+                # Under a profiles home but not a well-formed logical path (a raw id, or an element written
+                # from a decomposed name). A name that is not built in claims nothing, so `knows` is False only
+                # for such a reserved path. Callers gate on `knows` already; this keeps `resolve` safe alone.
+                return Unresolved(_NOT_A_PATH)
             return Located(path)
         spec, parsed = found
         view = next((candidate for candidate in self.views if candidate.spec == spec), None)
