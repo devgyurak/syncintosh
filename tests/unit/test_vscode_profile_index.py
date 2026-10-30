@@ -175,3 +175,14 @@ def test_a_name_equal_to_another_profiles_directory_is_not_a_clash() -> None:
 
     # then
     assert (entries, problems) == ([("a1", "b2"), ("Other", "a1")], [])
+
+
+@pytest.mark.parametrize("flags", [{"": True}, {"settings": True, "": False}])
+def test_an_empty_flag_key_skips_only_that_profile(flags: dict) -> None:
+    # when
+    entries, problems, readable = _read(
+        [{"name": "Work", "location": "abc", "useDefaultFlags": flags}, {"name": "Home", "location": "def"}]
+    )
+
+    # then — the rest of the list survives, and the skipped one is reported once without its content
+    assert (entries, len(problems), readable) == ([("Home", "def")], 1, True)

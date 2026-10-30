@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from syncintosh.core.errors import ConfigError
 from syncintosh.core.ports import DenyList
 from syncintosh.core.profiles import ProfileMap, ProfileSpec
 
@@ -58,17 +59,22 @@ class SystemProfileIndex:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
             return ProfileMap.unreadable("the profile index is not valid JSON")
-        parsed = self._parse(document)
-        if not parsed.readable:
-            return parsed
-        kept, problems = [], list(parsed.problems)
-        for entry in parsed.entries:
-            reason = self._unsafe(spec, entry.directory)
-            if reason is None:
-                kept.append(entry)
-            else:
-                problems.append(f"skipped profile {entry.name!r}: {reason}")
-        return ProfileMap.create(tuple(kept), tuple(problems))
+        try:
+            parsed = self._parse(document)
+            if not parsed.readable:
+                return parsed
+            kept, problems = [], list(parsed.problems)
+            for entry in parsed.entries:
+                reason = self._unsafe(spec, entry.directory)
+                if reason is None:
+                    kept.append(entry)
+                else:
+                    problems.append(f"skipped profile {entry.name!r}: {reason}")
+            return ProfileMap.create(tuple(kept), tuple(problems))
+        except ConfigError:
+            # The port promises not to raise: a document the parser cannot make sense of is one more unreadable
+            # index, and its detail (which may quote the file) is not repeated.
+            return ProfileMap.unreadable("the profile index could not be understood")
 
     def _unsafe(self, spec: ProfileSpec, directory: str) -> str | None:
         """Why the profile's directory may not resolve, or `None` when it is safe."""

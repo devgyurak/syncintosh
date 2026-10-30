@@ -213,3 +213,23 @@ def test_an_index_under_a_symlinked_parent_that_leaves_home_is_refused(tmp_path:
 
     # then
     assert (profiles.readable, profiles.entries) == (False, ())
+
+
+def test_a_parser_that_raises_a_domain_error_gives_an_unreadable_map(tmp_path: Path) -> None:
+    # given — a parser that cannot understand the document
+    from syncintosh.core.errors import ConfigError
+
+    def broken(_document):
+        raise ConfigError("some detail that must not be echoed")
+
+    _write_index(tmp_path, FIXTURE.read_text(encoding="utf-8"))
+
+    # when
+    profiles = SystemProfileIndex(str(tmp_path), SystemDenyList(), broken).read(SPEC)
+
+    # then — the port's contract is that it never raises, and the detail stays out of the report
+    assert (profiles.readable, profiles.entries, profiles.problems) == (
+        False,
+        (),
+        ("the profile index could not be understood",),
+    )

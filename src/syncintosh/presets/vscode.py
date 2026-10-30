@@ -236,7 +236,9 @@ def _entry_of(raw: object) -> tuple[ProfileEntry | None, str | None]:
     directory = _directory_of(location)
     if directory is None:
         return None, f"skipped profile {name!r}: its location is not a single profile id"
-    if not isinstance(flags, Mapping) or not all(isinstance(value, bool) for value in flags.values()):
+    if not isinstance(flags, Mapping) or not all(
+        isinstance(key, str) and key != "" and isinstance(value, bool) for key, value in flags.items()
+    ):
         # Not knowing what a profile borrows would mean collecting a file VS Code never reads.
         return None, f"skipped profile {name!r}: useDefaultFlags is not a map of booleans"
     return ProfileEntry.create(
