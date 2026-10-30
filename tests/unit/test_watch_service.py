@@ -36,6 +36,9 @@ class _FakeWatch:
     def stop(self) -> None:
         self.stopped = True
 
+    def retarget(self, directories) -> None:
+        self.retargeted = tuple(directories)
+
     def rebuilt(self) -> bool:
         rebuilt, self._rebuilt = self._rebuilt, False
         return rebuilt
@@ -271,6 +274,9 @@ class _RaisingWatch:
 
     def stop(self) -> None: ...
 
+    def retarget(self, directories) -> None:
+        self.retargeted = tuple(directories)
+
     def rebuilt(self) -> bool:
         return False
 
@@ -329,3 +335,55 @@ def test_an_error_from_watch_start_ends_the_command_with_a_domain_error() -> Non
         )
     assert run.calls == 0
     assert errors == []
+
+
+def _run_with_refresh(refresh) -> tuple[_FakeWatch, list[BaseException]]:
+    stop = threading.Event()
+    watcher = _FakeWatch([(FileEvent(".zshrc"),)], stop)
+    errors: list[BaseException] = []
+    watch(
+        watch=watcher,
+        targets=_targets(),
+        run=_Run([], stop),
+        quiet_seconds=0.0,
+        clock=lambda: 0.0,
+        stop=stop,
+        on_error=errors.append,
+        refresh=refresh,
+    )
+    return watcher, errors
+
+
+def test_a_changed_set_of_targets_retargets_the_observer_after_a_sync() -> None:
+    # given — a sync that adds a profile's directory to what is worth watching
+    config = SyncConfig.create(
+        remote="r",
+        machine_id="m",
+        items=(LocalItem.create(path="d/.zshrc", preset="zsh", scope="common", format="text"),),
+    )
+
+    # when
+    watcher, errors = _run_with_refresh(lambda: WatchFilter.create(config))
+
+    # then
+    assert (watcher.retargeted, errors) == (("d",), [])
+
+
+def test_an_unchanged_set_of_targets_does_not_retarget() -> None:
+    # when
+    watcher, _ = _run_with_refresh(_targets)
+
+    # then
+    assert hasattr(watcher, "retargeted") is False
+
+
+def test_a_refresh_that_fails_is_reported_and_the_watch_continues() -> None:
+    # given
+    def broken() -> WatchFilter:
+        raise OSError("gone")
+
+    # when
+    watcher, errors = _run_with_refresh(broken)
+
+    # then
+    assert ([str(e) for e in errors], watcher.stopped) == (["gone"], True)

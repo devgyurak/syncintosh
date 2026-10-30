@@ -534,6 +534,15 @@ def test_a_preset_refuses_a_glob_that_covers_its_profile_index() -> None:
         Preset.create(name="app", files=files, profiles=spec)
 
 
+@pytest.mark.parametrize("preset", ["vscode", "zsh", "community"])
+def test_a_raw_id_path_is_unknown_to_every_preset_name(preset: str) -> None:
+    # when
+    known = CATALOG.knows(preset, f"{HOME}/-3f2a1b/settings.json")
+
+    # then — a name that is not built in makes no claim, but it cannot claim a reserved path either
+    assert known is False
+
+
 # --------------------------------------------------------------------------- NFC
 
 

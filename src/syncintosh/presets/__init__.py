@@ -129,10 +129,26 @@ class BuiltinCatalog:
         allowlist alone decides; a built-in name must own the path, so a record that arrived
         claiming `zsh` cannot be applied to an arbitrary file.
         """
+        if any(self._reserved(each, path) for each in self.presets):
+            # Under a profiles home only a logical path is a path at all. A raw id there would be collected
+            # with no policy, whatever the record's preset name claims (a non-built-in name makes no claim).
+            return False
         builtin = self.get(preset)
         if builtin is None:
             return True
         return self._owns(builtin, path)
+
+    @staticmethod
+    def _reserved(preset: Preset, path: str) -> bool:
+        """True when `path` is under `preset`'s profiles home but is not a logical profile path."""
+        spec = preset.profiles
+        if spec is None:
+            return False
+        parts, home = (
+            [collision_key(part) for part in path.split("/")],
+            [collision_key(p) for p in spec.home.split("/")],
+        )
+        return parts[: len(home)] == home and len(parts) > len(home) and spec.parse(path) is None
 
     def preset_for(self, path: str) -> Preset | None:
         """The built-in preset that owns `path`, or `None` when none does.

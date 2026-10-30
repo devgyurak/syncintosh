@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
+from syncintosh.core.config import LocalGlob, LocalItem, LocalProfiles, SyncConfig
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import duplicate_paths
 from syncintosh.core.ports import FileIdSource, PresetCatalog
@@ -50,10 +50,15 @@ def new_machine_config(
     """
     items: list[LocalItem] = []
     globs: list[LocalGlob] = []
+    profiles: list[LocalProfiles] = []
     for name in dict.fromkeys(preset_names):
         preset = catalog.get(name)
         if preset is None:
             raise ConfigError(f"unknown preset {name!r}")
+        if preset.profiles is not None:
+            # Every profile this machine has, by name. Which ones exist is read at sync time from the app's
+            # own list; naming "*" here allows them, it does not create any (decision D3, D5).
+            profiles.append(LocalProfiles.create(preset=preset.name, spec=preset.profiles, scope="common", names="*"))
         for file in preset.files:
             if file.is_glob:
                 globs.append(LocalGlob.create(path=file.path, preset=preset.name, scope="common", format=file.format))
@@ -64,7 +69,9 @@ def new_machine_config(
         # Two entries for one file would carry two records and write it twice, which the manifest's
         # path-collision rule then reports as a conflict on every sync.
         raise ConfigError(f"these paths would be tracked twice: {list(duplicated)}")
-    return SyncConfig.create(remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs))
+    return SyncConfig.create(
+        remote=remote, machine_id=machine_id, items=tuple(items), globs=tuple(globs), profiles=tuple(profiles)
+    )
 
 
 __all__ = ["mint_machine_id", "new_machine_config"]
