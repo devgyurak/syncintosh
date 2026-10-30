@@ -58,6 +58,7 @@ SETTINGS_TEXT = (
 )
 KEYBINDINGS_TEXT = b'[\n  { "key": "cmd+k cmd+s", "command": "workbench.action.openGlobalKeybindings" }\n]\n'
 SNIPPET_TEXT = b'{\n  "log": { "prefix": "log", "body": ["console.log($1)"] }\n}\n'
+SPEC_PATH_SETTINGS = vscode.PROFILES.logical_path("Work", "settings.json")
 PROFILE_FILES = {"settings.json": SETTINGS_TEXT, "keybindings.json": KEYBINDINGS_TEXT, "snippets/js.json": SNIPPET_TEXT}
 
 
@@ -352,7 +353,8 @@ def test_a_resource_the_profile_borrows_from_the_default_profile_is_not_written(
 
     # then — the borrowed file is left alone and reported; the others still sync
     assert (_profile_dir(b, "7c91e0aa") / "settings.json").read_bytes() == b'{"mine": true}\n'
-    assert [d for d in report.deferred if "default profile's settings" in d.reason] != []
+    borrowed = [d for d in report.deferred if "default profile's settings" in d.reason]
+    assert [d.path for d in borrowed] == [SPEC_PATH_SETTINGS]
     assert (_profile_dir(b, "7c91e0aa") / "keybindings.json").read_bytes() == KEYBINDINGS_TEXT
 
 

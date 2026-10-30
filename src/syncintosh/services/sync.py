@@ -2429,7 +2429,9 @@ def _cycle(
         created=tuple(collected.created),
         collected=tuple(collected.collected),
         applied=applied.applied,
-        deferred=(*collected.deferred, *applied.deferred),
+        # The same deferral can be found twice (collect lists a profile's borrowed file, and apply meets its
+        # record); one row is enough, in the order it first appeared.
+        deferred=tuple(dict.fromkeys((*collected.deferred, *applied.deferred))),
         suppressed=tuple(collected.suppressed),
         symlinks=tuple(dict.fromkeys((*collected.symlinks, *applied.symlinks))),
         aborted=applied.aborted,
