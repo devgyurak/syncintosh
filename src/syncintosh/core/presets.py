@@ -32,6 +32,7 @@ from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
 from syncintosh.core.paths import collision_key, duplicate_paths
+from syncintosh.core.profiles import ProfileSpec
 from syncintosh.core.tree import KeyPath
 
 # The syntax checkers a preset may name. A value is serialized verbatim, so it is a `Literal`
@@ -238,6 +239,7 @@ class Preset:
     bundle_id: str | None
     download_url: str | None
     cask: str | None
+    profiles: ProfileSpec | None = None
 
     @classmethod
     def create(
@@ -248,6 +250,7 @@ class Preset:
         bundle_id: str | None = None,
         download_url: str | None = None,
         cask: str | None = None,
+        profiles: ProfileSpec | None = None,
     ) -> Preset:
         """Validate and freeze a preset; never assign fields afterwards."""
         if not isinstance(name, str) or name == "":
@@ -261,7 +264,19 @@ class Preset:
             raise ConfigError(f"preset {name!r} names one path twice: {list(duplicated)}")
         if download_url is not None and urlsplit(download_url).scheme != "https":
             raise ConfigError(f"preset {name!r}: download URL must be https, got {download_url!r}")
-        return cls(name=name, files=files, bundle_id=bundle_id, download_url=download_url, cask=cask)
+        if profiles is not None:
+            # A profile reuses the default profile's policy for each of its files (decision D4), so a file
+            # a profile may hold must be one this preset owns: otherwise the lookup would find no policy
+            # and the file would be collected unstripped.
+            owned = {file.path for file in files}
+            stray = [file.path for file in profiles.files if profiles.default_path(file.path) not in owned]
+            if stray:
+                raise ConfigError(f"preset {name!r}: profile files without a default counterpart: {stray}")
+            if any(collision_key(file.path) == collision_key(profiles.index) for file in files):
+                # The index is read in memory for the profile list only; it also holds window state and a
+                # telemetry machine id, so a preset must never be able to collect and seal it.
+                raise ConfigError(f"preset {name!r}: the profile index must not be a tracked file")
+        return cls(name=name, files=files, bundle_id=bundle_id, download_url=download_url, cask=cask, profiles=profiles)
 
 
 @dataclass(frozen=True)

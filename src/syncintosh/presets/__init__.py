@@ -100,9 +100,27 @@ class BuiltinCatalog:
 
         Matched on path — never on the preset name a record carries — so a synced record cannot
         choose a weaker policy by naming a different preset (``docs/design/03-manifest.md``). A
-        glob entry matches by its directory and last element.
+        glob entry matches by its directory and last element. A profile's logical path takes the
+        policy of its default-profile counterpart; this is the one place that mapping lives, so a
+        later rule that refines a profile's policy (issue #23) has one lookup to extend.
         """
-        return next((file for preset in self.presets for file in preset.files if file.matches(path)), None)
+        return next(
+            (file for preset in self.presets for file in preset.files if file.matches(self._policy_path(preset, path))),
+            None,
+        )
+
+    @staticmethod
+    def _policy_path(preset: Preset, path: str) -> str:
+        """The path whose policy `path` takes: its default-profile counterpart for a profile path, else itself."""
+        parsed = preset.profiles.parse(path) if preset.profiles is not None else None
+        return path if parsed is None else parsed.default_path
+
+    @staticmethod
+    def _owns(preset: Preset, path: str) -> bool:
+        """True when `preset` owns `path`, directly or as a logical profile path of its own layout."""
+        return any(file.matches(path) for file in preset.files) or (
+            preset.profiles is not None and preset.profiles.parse(path) is not None
+        )
 
     def knows(self, preset: str, path: str) -> bool:
         """True when `path` is one `preset` may name here.
@@ -114,7 +132,7 @@ class BuiltinCatalog:
         builtin = self.get(preset)
         if builtin is None:
             return True
-        return any(file.matches(path) for file in builtin.files)
+        return self._owns(builtin, path)
 
     def preset_for(self, path: str) -> Preset | None:
         """The built-in preset that owns `path`, or `None` when none does.
@@ -123,10 +141,7 @@ class BuiltinCatalog:
         file expanded from `snippets/*.json` still reports the preset, its download page, and its
         cask — and never on the `preset` name a record arrived with (``AGENTS.md`` §3.6).
         """
-        return next(
-            (preset for preset in self.presets if any(file.matches(path) for file in preset.files)),
-            None,
-        )
+        return next((preset for preset in self.presets if self._owns(preset, path)), None)
 
 
 __all__ = ["BUILTIN_PRESETS", "BuiltinCatalog"]
