@@ -207,7 +207,12 @@ def _directory_of(location: object, profiles_homes: Collection[str]) -> str | No
     """
     if isinstance(location, str):
         return location if PROFILE_ID.fullmatch(location) else None
-    if isinstance(location, Mapping) and location.get("scheme") == "file" and isinstance(location.get("path"), str):
+    if (
+        isinstance(location, Mapping)
+        and location.get("scheme") == "file"
+        and not location.get("authority")
+        and isinstance(location.get("path"), str)
+    ):
         parent, _, directory = location["path"].rpartition("/")
         if parent in profiles_homes and PROFILE_ID.fullmatch(directory):
             return directory
