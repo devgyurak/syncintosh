@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -219,7 +220,7 @@ def test_a_parser_that_raises_a_domain_error_gives_an_unreadable_map(tmp_path: P
     # given — a parser that cannot understand the document
     from syncintosh.core.errors import ConfigError
 
-    def broken(_document):
+    def broken(_document, _homes):
         raise ConfigError("some detail that must not be echoed")
 
     _write_index(tmp_path, FIXTURE.read_text(encoding="utf-8"))
@@ -233,3 +234,33 @@ def test_a_parser_that_raises_a_domain_error_gives_an_unreadable_map(tmp_path: P
         (),
         ("the profile index could not be understood",),
     )
+
+
+def test_the_parser_is_told_this_machines_profiles_home(tmp_path: Path) -> None:
+    # given
+    seen: list[tuple[str, ...]] = []
+
+    def spy(document, homes):
+        seen.append(homes)
+        return vscode.read_profiles(document, homes)
+
+    _write_index(tmp_path, FIXTURE.read_text(encoding="utf-8"))
+
+    # when
+    SystemProfileIndex(str(tmp_path), SystemDenyList(), spy).read(SPEC)
+
+    # then — the home as written and as the filesystem resolves it
+    written = str(tmp_path / SPEC.home)
+    assert seen == [tuple(dict.fromkeys((written, os.path.realpath(written))))]
+
+
+def test_an_old_uri_pointing_at_another_root_is_skipped_through_the_reader(tmp_path: Path) -> None:
+    # given
+    uri = {"scheme": "file", "path": "/Volumes/Other/Code/User/profiles/abc"}
+    _write_index(tmp_path, json.dumps({"userDataProfiles": [{"name": "Work", "location": uri}]}))
+
+    # when
+    profiles = _index(tmp_path).read(SPEC)
+
+    # then
+    assert (profiles.readable, profiles.entries, len(profiles.problems)) == (True, (), 1)

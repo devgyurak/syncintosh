@@ -103,15 +103,65 @@ def test_a_location_that_is_not_one_profile_id_is_skipped_and_reported(location:
     assert (entries, len(problems), readable) == ([], 1, True)
 
 
-def test_an_old_uri_location_is_read_when_it_ends_in_user_profiles_id() -> None:
+MINE = "/Users/example/Library/Application Support/Code/User/profiles"
+
+
+def _read_uri(uri: object, *homes: str) -> tuple[list[tuple[str, str]], int]:
+    profiles = read_profiles({"userDataProfiles": [{"name": "Old", "location": uri}]}, homes)
+    return [(e.name, e.directory) for e in profiles.entries], len(profiles.problems)
+
+
+def test_an_old_uri_location_is_read_when_it_is_exactly_this_machines_profiles_home() -> None:
     # given — the old shape: a URI object (scheme, path, ...)
-    uri = {"$mid": 1, "path": "/Users/example/Library/Application Support/Code/User/profiles/1a2b3c", "scheme": "file"}
+    uri = {"$mid": 1, "path": f"{MINE}/1a2b3c", "scheme": "file"}
 
     # when
-    entries, problems, _ = _read([{"name": "Old", "location": uri}])
+    result = _read_uri(uri, MINE)
 
     # then
-    assert (entries, problems) == ([("Old", "1a2b3c")], [])
+    assert result == ([("Old", "1a2b3c")], 0)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        # another user-data-dir (`--user-data-dir`, a portable install) that merely ends the same way
+        {"scheme": "file", "path": "/Volumes/Other/User/profiles/1a2b3c"},
+        {"scheme": "file", "path": "/Users/other/Library/Application Support/Code/User/profiles/1a2b3c"},
+        # not a local file
+        {"scheme": "vscode-remote", "path": f"{MINE}/1a2b3c"},
+        {"path": f"{MINE}/1a2b3c"},
+        # a deeper or a differently spelled path
+        {"scheme": "file", "path": f"{MINE}/1a2b3c/"},
+        {"scheme": "file", "path": f"{MINE}/x/1a2b3c"},
+        {"scheme": "file", "path": MINE.upper() + "/1a2b3c"},
+    ],
+)
+def test_an_old_uri_location_elsewhere_is_skipped_and_reported(uri: dict) -> None:
+    # when
+    result = _read_uri(uri, MINE)
+
+    # then
+    assert result == ([], 1)
+
+
+def test_an_old_uri_location_is_skipped_when_no_home_is_given() -> None:
+    # when — fail closed: with nothing to compare against, a URI proves nothing
+    result = _read_uri({"scheme": "file", "path": f"{MINE}/1a2b3c"})
+
+    # then
+    assert result == ([], 1)
+
+
+def test_a_uri_is_read_against_either_spelling_of_the_home() -> None:
+    # given — the home as written and as the filesystem resolves it
+    real = "/private/Users/example/Library/Application Support/Code/User/profiles"
+
+    # when
+    result = _read_uri({"scheme": "file", "path": f"{real}/1a2b3c"}, MINE, real)
+
+    # then
+    assert result == ([("Old", "1a2b3c")], 0)
 
 
 @pytest.mark.parametrize(
