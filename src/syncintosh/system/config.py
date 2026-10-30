@@ -14,8 +14,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from syncintosh.core.config import NO_LLM, LlmConfig, LocalGlob, LocalItem, SyncConfig
+from syncintosh.core.config import NO_LLM, LlmConfig, LocalGlob, LocalItem, LocalProfiles, SyncConfig
 from syncintosh.core.errors import ConfigError
+from syncintosh.core.ports import PresetCatalog
 from syncintosh.system.paths import MachinePaths
 
 _ITEM_KEYS = frozenset({"path", "preset", "scope", "machine", "format"})
@@ -55,8 +56,37 @@ def _parse_glob(raw: object, where: str) -> LocalGlob:
     )
 
 
-def load_config(path: Path | None = None) -> SyncConfig:
-    """Read and validate `config.json`, defaulting to this machine's config path."""
+_PROFILES_KEYS = frozenset({"preset", "scope", "machine", "names"})
+
+
+def _parse_profiles(raw: object, where: str, catalog: PresetCatalog) -> LocalProfiles:
+    """One `profiles` entry. The layout comes from the built-in preset by name, never from the file."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a JSON object")
+    unknown = sorted(raw.keys() - _PROFILES_KEYS)
+    if unknown:
+        raise ConfigError(f"{where} has unknown fields: {unknown}")
+    if "preset" not in raw or "scope" not in raw or "names" not in raw:
+        raise ConfigError(f"{where} must name preset, scope, and names")
+    preset = catalog.get(raw["preset"]) if isinstance(raw["preset"], str) else None
+    if preset is None or preset.profiles is None:
+        raise ConfigError(f"{where}: {raw['preset']!r} is not a built-in preset with profiles")
+    names = raw["names"]
+    return LocalProfiles.create(
+        preset=preset.name,
+        spec=preset.profiles,
+        scope=raw["scope"],
+        machine=raw.get("machine"),
+        names="*" if names == "*" else tuple(names) if isinstance(names, list) else names,
+    )
+
+
+def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) -> SyncConfig:
+    """Read and validate `config.json`, defaulting to this machine's config path.
+
+    `catalog` resolves a `profiles` entry's preset to its layout; it defaults to the shipped catalog, which is
+    imported only when the file has such an entry, so a plain config pays nothing for it.
+    """
     resolved = path if path is not None else MachinePaths.default().config_file
     try:
         text = resolved.read_text(encoding="utf-8")
@@ -77,8 +107,24 @@ def load_config(path: Path | None = None) -> SyncConfig:
         raise ConfigError(f"config {resolved} must hold a `globs` list")
     globs = tuple(_parse_glob(raw, f"globs[{index}]") for index, raw in enumerate(globs_raw))
     llm = _parse_llm(parsed.get("llm"), resolved)
+    profiles_raw = parsed.get("profiles", [])
+    if not isinstance(profiles_raw, list):
+        raise ConfigError(f"config {resolved} must hold a `profiles` list")
+    if profiles_raw and catalog is None:
+        from syncintosh.presets import BuiltinCatalog
+
+        catalog = BuiltinCatalog.default()
+    profiles = tuple(
+        _parse_profiles(raw, f"profiles[{index}]", catalog)  # ty: ignore[invalid-argument-type]  # set above when the list is non-empty
+        for index, raw in enumerate(profiles_raw)
+    )
     return SyncConfig.create(
-        remote=parsed.get("remote"), machine_id=parsed.get("machine_id"), items=items, globs=globs, llm=llm
+        remote=parsed.get("remote"),
+        machine_id=parsed.get("machine_id"),
+        items=items,
+        globs=globs,
+        llm=llm,
+        profiles=profiles,
     )
 
 
@@ -131,9 +177,23 @@ def config_to_mapping(config: SyncConfig) -> dict[str, Any]:
         "items": [_entry(i.path, i.preset, i.scope, i.machine, i.format) for i in config.items],
         "globs": [_entry(g.glob.path, g.preset, g.scope, g.machine, g.format) for g in config.globs],
     }
+    if config.profiles:
+        # Written only when present, so a config that never tracked profiles keeps its exact shape.
+        mapping["profiles"] = [_profiles_mapping(entry) for entry in config.profiles]
     if config.llm != NO_LLM:
         # Written only when set, so a config that never used the feature keeps its exact shape.
         mapping["llm"] = _llm_mapping(config.llm)
+    return mapping
+
+
+def _profiles_mapping(entry: LocalProfiles) -> dict[str, Any]:
+    mapping: dict[str, Any] = {
+        "preset": entry.preset,
+        "scope": entry.scope,
+        "names": entry.names if entry.names == "*" else list(entry.names),
+    }
+    if entry.machine is not None:
+        mapping["machine"] = entry.machine
     return mapping
 
 

@@ -178,6 +178,20 @@ would publish a record that every machine's apply then refuses — including the
 it, so it would never get a ledger entry and every later sync would ask for `--adopt` again.
 Collect refuses it and reports it, so nothing is published in the first place.
 
+### Profile paths in the local allowlist
+
+A profile file's record path is **logical** — `…/profiles/@<percent-encoded name>/<file>` — because the
+real directory is a per-machine id. The manifest schema is unchanged, and a build that predates this
+refuses the path at the catalog check (no preset owns it), which is the fail-closed direction. The local
+allowlist adds a `profiles` entry (`{preset, scope, names: "*" | [names]}`, `core/config.LocalProfiles`):
+a profile record is written only when this machine's config allows the **name**, and the name resolves
+through this machine's own profile list. A record that carries a raw profile id is owned by no preset and
+is refused. Every live read and write goes through one resolver (`services/profile_paths.py`); a logical
+path with no real one — the profile is missing, the list is unreadable, a resource is borrowed — ends in a
+deferral and is never read or written under its logical text. When the list cannot be read, **records are
+kept** and the ledger baseline is left as it was: a live file that cannot be seen is not a deletion.
+The real directory is re-checked (symlink, denied, outside `$HOME`) immediately before each write.
+
 ### Directory globs in the local allowlist
 
 The local allowlist is the config's `items` (exact paths) plus its `globs` (directory patterns). A

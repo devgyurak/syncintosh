@@ -364,7 +364,7 @@ def test_watch_wires_the_loop_and_runs_it(tmp_path, monkeypatch) -> None:
 
     # then — the loop was handed the watcher, the filter, and a sync call, and returned cleanly
     assert result.exit_code == 0
-    assert set(ran) == {"watch", "targets", "run", "quiet_seconds", "poll_seconds", "on_report", "on_error"}
+    assert set(ran) == {"watch", "targets", "run", "quiet_seconds", "poll_seconds", "on_report", "on_error", "refresh"}
     assert "watching" in _combined(result)
 
 

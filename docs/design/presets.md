@@ -104,11 +104,42 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   the directory and the two suffixes rather than exact paths; a snippet the other machine created is
   written here only because this machine's own config names the same glob
   ([01-sync-model.md](01-sync-model.md), "Preset globs").
-- **Out of scope:** a non-default profile (`User/profiles/<id>/`, refused by the apply-side catalog
-  check rather than guessed at), `settingsSync.ignoredSettings`, `tasks.json`, `mcp.json` (its server
-  `env` and `headers` need their own exclusion pass before it can be collected safely), Insiders,
-  portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which
-  are not under the `$HOME` user directory).
+- **Profiles** (issue #22) are matched **by name**, because a profile's directory is a random id
+  (`hash(uuid).toString(16)`, a signed int32, so it can start with `-`) that two Macs do not share. A
+  record's path is **logical**: `…/Code/User/profiles/@<name>/<file>`, the name encoded with
+  `quote(name, safe="")`, so `/` `*` `?` `@` `%` can never change the path's shape. Each profile
+  contributes one record per file (`settings.json`, `keybindings.json`, and the two snippet globs), and a
+  profile's file takes the **default profile's** policy: the same noise keys, the same `http.proxyAuthorization`
+  exclusion, the keybindings array rule, and the JSON check. The real directory is looked up on each
+  machine from VS Code's own list, `User/globalStorage/storage.json` → `userDataProfiles`
+  (`{name, location, icon?, useDefaultFlags?}`; `location` is the id, or an older URI object whose path ends
+  in `User/profiles/<id>`). That file is read **in memory, for that key only** — it also holds window state
+  and a telemetry machine id — and is never collected, sealed or tracked. Evidence: source-verified
+  (the approved Step 0 exception, as for the rest of this preset): `microsoft/vscode` `main` `a48dd23e2ac5`,
+  `userDataProfile.ts`, `userDataProfilesManifestSync.ts` and `stateService.ts`.
+  - A profile is synced only when **this machine's config allows its name** (`profiles` entry,
+    `names: "*"` or a list; `init --preset vscode` writes `"*"`) **and** the name resolves in the local list.
+    A profile id from a record is never an allowlist: a raw-id path (`…/profiles/-3f2a1b/settings.json`) is
+    owned by no preset and is refused.
+  - A profile this Mac lacks is a **non-blocking deferral** ("create the profile "Work" in the app"). syncintosh
+    never creates a profile directory and never edits `storage.json`; once the person creates the profile,
+    the next sync applies it. A profile that is listed but has no folder yet waits too.
+  - A resource the profile **borrows** from the default one (`useDefaultFlags`) is not collected and not
+    written: VS Code does not read the profile's own copy of it.
+  - `builtin/*` (the Agents profile) and malformed entries are skipped and reported; two profiles whose names
+    fold to one (`collision_key`), or that share a directory, are both skipped. A missing, unreadable or corrupt
+    list resolves **no** profile, is reported, and keeps every record: a profile that cannot be seen is not a
+    deleted one. A profile directory that is a symbolic link, a denied path, or leaves `$HOME` is refused.
+  - **Known limit:** renaming a profile leaves the old name's record behind (a record is removed only by
+    untracking it). Tracked as a follow-up.
+  - To add profiles to an existing config by hand, add
+    `"profiles": [{"preset": "vscode", "scope": "common", "names": "*"}]` to `config.json`. A `preset add`
+    command is a follow-up.
+- **Out of scope:** `settingsSync.ignoredSettings` (issue #23 extends the single policy lookup a profile file
+  goes through, `BuiltinCatalog.policy_for`), `tasks.json`, `mcp.json` (its server `env` and `headers`
+  need their own exclusion pass before it can be collected safely), `extensions.json`, `prompts/`, Insiders,
+  portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not
+  under the `$HOME` user directory).
 
 ## How a row gets filled
 

@@ -45,6 +45,20 @@ class FileEvent:
 
 
 @dataclass(frozen=True)
+class ProfileTargets:
+    """What the profiles add to a watch, as real `$HOME`-relative paths.
+
+    `paths` and `globs` are the files of the profiles this machine has; `indexes` are the app's own profile
+    lists. An event on an index is a reason to sync (and to look again at which profiles exist), because a
+    profile created in the app appears there first (issue #22).
+    """
+
+    paths: tuple[str, ...] = ()
+    globs: tuple[PresetGlob, ...] = ()
+    indexes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WatchFilter:
     """The paths a watch cares about: this machine's exact items and its directory globs.
 
@@ -55,13 +69,15 @@ class WatchFilter:
 
     paths: tuple[str, ...]
     globs: tuple[PresetGlob, ...]
+    indexes: tuple[str, ...] = ()
 
     @classmethod
-    def create(cls, config: SyncConfig) -> WatchFilter:
+    def create(cls, config: SyncConfig, profiles: ProfileTargets = ProfileTargets()) -> WatchFilter:  # noqa: B008 — a frozen value
         """Build the filter from the machine's own config; never from a record."""
         return cls(
-            paths=tuple(item.path for item in config.items),
-            globs=tuple(entry.glob for entry in config.globs),
+            paths=(*(item.path for item in config.items), *profiles.paths),
+            globs=(*(entry.glob for entry in config.globs), *profiles.globs),
+            indexes=profiles.indexes,
         )
 
     def matches(self, event: FileEvent) -> bool:
@@ -70,7 +86,7 @@ class WatchFilter:
 
     def _names(self, path: str) -> bool:
         folded = collision_key(path)
-        if any(collision_key(candidate) == folded for candidate in self.paths):
+        if any(collision_key(candidate) == folded for candidate in (*self.paths, *self.indexes)):
             return True
         return any(entry.matches(path) for entry in self.globs)
 
@@ -83,7 +99,7 @@ class WatchFilter:
         reports events with.
         """
         seen: dict[str, str] = {}
-        for path in self.paths:
+        for path in (*self.paths, *self.indexes):
             parent = path.rpartition("/")[0]
             seen.setdefault(collision_key(parent), parent)
         for entry in self.globs:
@@ -128,4 +144,11 @@ class Debounce:
         self.last = None
 
 
-__all__ = ["DEFAULT_MAX_SECONDS", "DEFAULT_QUIET_SECONDS", "Debounce", "FileEvent", "WatchFilter"]
+__all__ = [
+    "DEFAULT_MAX_SECONDS",
+    "DEFAULT_QUIET_SECONDS",
+    "Debounce",
+    "FileEvent",
+    "ProfileTargets",
+    "WatchFilter",
+]

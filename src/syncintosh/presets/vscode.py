@@ -62,16 +62,24 @@ a credential shape the scan does not know would be sealed. That is the accepted 
 heuristic backstop (``AGENTS.md`` §6), and the reason the `scheme://user:pass@` pattern was added
 with this preset.
 
+## Profiles (issue #22)
+
+A non-default profile lives under `User/profiles/<id>/`, and `<id>` is `hash(generateUuid()).toString(16)` —
+a signed int32 that may start with `-` and differs between Macs. Records therefore carry a logical path
+(`…/profiles/@<name>/<file>`, `core/profiles.py`) and the real directory is looked up on each machine from
+`User/globalStorage/storage.json`, key `userDataProfiles`, entries `{name, location, icon?, useDefaultFlags?}`.
+Sources (`microsoft/vscode` `main` `a48dd23e2ac5`): `src/vs/platform/userDataProfile/common/userDataProfile.ts`,
+`.../node/userDataProfile.ts`, `userDataProfilesManifestSync.ts`, `userDataProfilesManifestMerge.ts`,
+`state/node/stateService.ts`, and vscode-docs `configure/profiles.md`. Not inspected on a real machine (the
+approved exception, as above). `read_profiles` reads only that key; `storage.json` is never collected.
+
 ## What is out of scope
 
-- A non-default profile (`User/profiles/<id>/`) has its own `settings.json`; a local catalog
-  cannot tell which profile a path belongs to. Refused by the apply-side catalog check rather
-  than guessed at.
 - `settingsSync.ignoredSettings` is not consulted: reproducing VS Code's own ignore list would
   mean reading a setting the sync never applies, and it is a follow-up (issue #6, V3).
 - A snippet file is synced as ordinary JSONC with no strip list, and the secret scan is the backstop
-  for a credential inlined in a `body`. `tasks.json`, `mcp.json`, Insiders, portable mode,
-  `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under
+  for a credential inlined in a `body`. `tasks.json`, `mcp.json`, `extensions.json`, `prompts/`, Insiders,
+  portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under
   the `$HOME` user directory) are not tracked. `mcp.json` in particular holds server `env` and
   `headers`, which are credentials, and it needs its own exclusion pass before it can be collected
   safely.

@@ -113,6 +113,18 @@ config names a glob** (`core/config.LocalGlob`). The file is per-machine — thi
 `javascript.json`, that one has `python.json` — so an exact allowlist item cannot express it, and the
 glob is what bounds what a record that arrived from the repo may touch (``docs/design/03-manifest.md``).
 
+## Profiles
+
+An app's non-default profiles (VS Code, issue #22) are addressed by **name** in the manifest and by
+**directory** on disk. Each cycle reads the app's own profile list once (`ProfileIndex`, in memory, never
+sealed), and collect, apply, the ledger settle and `diff` all build a live path through one resolver
+(`services/profile_paths.py`). Collect lists only profiles this machine has and its config allows;
+apply defers a record for a profile this machine lacks (non-blocking, with what to do) and never creates a
+profile directory. A profile's `snippets/` glob is expanded inside that profile's own directory, after the
+directory passes the symlink/deny/escape checks. `syncintosh watch` follows the profile files and the
+profile list, and looks again after each sync, so a profile created in the app is picked up
+(``docs/design/03-manifest.md``, "Profile paths in the local allowlist").
+
 ## Change detection is against the apply ledger
 
 Step 4 must not compare the live files with `HEAD`. Apply runs *after* the push, so between

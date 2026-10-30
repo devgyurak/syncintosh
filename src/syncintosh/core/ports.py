@@ -8,7 +8,7 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.advice import Advice, MaskedText
@@ -556,6 +556,14 @@ class FileWatch(Protocol):
 
     def stop(self) -> None:
         """Stop watching and release the observer. Safe to call when it was never started."""
+        ...
+
+    def retarget(self, directories: Iterable[str]) -> None:
+        """Observe `directories` from now on (`$HOME`-relative), replacing the set the watch started with.
+
+        Called when the set of tracked paths changes while the watch runs (a profile was created in the
+        app). A directory that does not exist yet is picked up when it appears, the same as at start.
+        """
         ...
 
     def rebuilt(self) -> bool:

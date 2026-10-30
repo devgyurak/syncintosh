@@ -47,6 +47,7 @@ def doctor(
     plist_entry_point: str | None,
     expected_entry_point: str | None,
     job_loaded: bool | None = None,
+    extra: tuple[Check, ...] = (),
 ) -> DoctorReport:
     """Run every check and return the report. A check never raises; it reports its failure."""
     return DoctorReport(
@@ -56,6 +57,7 @@ def doctor(
             _check_lock(lock),
             _check_remote(transport, remote),
             _check_generations(transport, store, branch),
+            *extra,
         )
     )
 

@@ -273,3 +273,18 @@ def test_a_failing_observer_start_is_cleaned_up_and_re_raised(tmp_path, monkeypa
     with pytest.raises(RuntimeError, match="already scheduled"):
         watcher.start()
     assert created[0].stopped is True
+
+
+def test_retargeting_replaces_the_directories_the_watch_observes(tmp_path) -> None:
+    # given — a watcher started on nothing
+    watcher = WatchdogFileWatch(home=str(tmp_path), directories=())
+    watcher.start()
+    (tmp_path / "profiles").mkdir()
+
+    # when — a directory is added after the start, as when a profile is created in the app
+    watcher.retarget(["profiles"])
+    watcher.wait(0.0)
+
+    # then — the change is reported as a rebuild, so the caller syncs once
+    assert watcher.rebuilt() is True
+    watcher.stop()

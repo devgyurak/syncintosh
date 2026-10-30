@@ -66,6 +66,7 @@ from syncintosh.core.ports import (
     MergeDriver,
     PendingStore,
     PresetCatalog,
+    ProfileIndex,
     RepoFiles,
     RingCodec,
     SecretScanner,
@@ -100,6 +101,7 @@ from syncintosh.core.resolution import (
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
+from syncintosh.services.profile_paths import LivePaths, Located, Unresolved, open_live_paths, profile_directory
 from syncintosh.services.repo_writer import write_repo
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
@@ -489,6 +491,8 @@ _GLOB_FULL = "the glob is full, so this new file is not published"
 # Why a glob's directory was refused: it is a symlink (which would list another tree under this
 # preset's policy), a dangerous path, or outside `$HOME`. Checked before the directory is listed.
 _GLOB_DIRECTORY_UNSAFE = "the glob's directory is a symbolic link or a dangerous path"
+_PROFILE_DIRECTORY_UNSAFE = "the profile's directory is a symbolic link or a dangerous path"
+_PROFILE_FOLDER_MISSING = "the profile has no folder on this machine yet; open the profile in the app once"
 
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
@@ -602,6 +606,7 @@ class _Expanded:
 
     items: tuple[LocalItem, ...]
     refusals: tuple[Refusal, ...]
+    deferrals: tuple[Deferral, ...] = ()
 
 
 def _unsafe_glob_directories(config: SyncConfig, live: LiveFiles, deny: DenyList, home: str) -> tuple[PresetGlob, ...]:
@@ -622,6 +627,123 @@ def _unsafe_glob_directories(config: SyncConfig, live: LiveFiles, deny: DenyList
         if directory and live.is_symlink(_join(home, directory)):
             unsafe.append(entry.glob)
     return tuple(unsafe)
+
+
+def _bounded(
+    glob: PresetGlob, matched: tuple[str, ...], head_records: tuple[ManifestRecord, ...]
+) -> tuple[tuple[str, ...], tuple[Refusal, ...]]:
+    """The files of a glob that may be published, and a non-blocking refusal for each one held back.
+
+    A **soft** guard: a file already published keeps being collected, so an edit to it is never
+    held back. New files fill the slots that are left, and only the ones past that are held — each
+    reported by name, and only when there are any. A hard "refuse the whole glob" was a dead end: two
+    machines syncing at once published 300 between them, and after that every cycle refused the glob
+    with its local edits never leaving the machine.
+    """
+    published = {collision_key(record.path) for record in head_records if glob.matches(record.path)}
+    known = tuple(path for path in matched if collision_key(path) in published)
+    fresh = tuple(path for path in matched if collision_key(path) not in published)
+    room = MAX_GLOB_EXPANSION - len(published)
+    held = fresh[room:] if room >= 0 else fresh
+    return (*known, *fresh[: max(room, 0)]), tuple(Refusal(path, _GLOB_FULL, blocking=False) for path in held)
+
+
+def _expand_profiles(
+    config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str, paths: LivePaths
+) -> _Expanded:
+    """The logical items of every allowed profile this machine really has.
+
+    One item per profile per file (decision D4), with the logical path a record carries; the live path
+    is `paths.resolve`'s; the directory a glob lists is joined by `profile_directory`, the one place that
+    does. A file whose resource the profile borrows from the default profile is **not** collected
+    (decision D6) and is reported. A snippet glob lists the profile's own
+    `snippets` directory, after that directory passes the same symlink/deny/escape checks a glob
+    directory gets. Problems the profile index reported (a collision, a malformed entry, an unreadable
+    list) are surfaced as non-blocking rows, so a person can see why a profile is missing.
+    """
+    head_records = () if head is None else tuple(head.records.values())
+    items: list[LocalItem] = []
+    refusals: list[Refusal] = []
+    deferrals: list[Deferral] = []
+    for entry in config.profiles:
+        view = next((candidate for candidate in paths.views if candidate.spec == entry.spec), None)
+        if view is None:
+            continue
+        spec = view.spec
+        refusals.extend(Refusal(spec.index, problem, blocking=False) for problem in view.profiles.problems)
+        for profile in view.profiles.entries:
+            if not entry.allows(profile.name):
+                continue
+            for file in spec.files:
+                logical = spec.logical_path(profile.name, file.path)
+                # The default profile's own entry for this file: the pattern text of a glob is not itself a
+                # path the catalog can match, so the preset's file is looked up by its declared path.
+                owner = paths.catalog.get(entry.preset)
+                policy = (
+                    None
+                    if owner is None
+                    else next(
+                        (candidate for candidate in owner.files if candidate.path == spec.default_path(file.path)), None
+                    )
+                )
+                if policy is None:
+                    continue
+                if file.resource in profile.borrowed:
+                    reason = f'the profile "{profile.name}" uses the default profile\'s {file.resource}'
+                    deferrals.append(Deferral(logical, reason))
+                    continue
+                if policy.glob is None:
+                    items.append(
+                        LocalItem.create(
+                            path=logical,
+                            preset=entry.preset,
+                            scope=entry.scope,
+                            machine=entry.machine,
+                            format=policy.format,
+                        )
+                    )
+                    continue
+                directory = profile_directory(spec, profile.directory) + (
+                    "/" + file.path.rpartition("/")[0] if "/" in file.path else ""
+                )
+                if (
+                    deny.is_denied(home, directory)
+                    or deny.escapes(home, directory)
+                    or live.is_symlink(_join(home, directory))
+                ):
+                    refusals.append(Refusal(logical, _PROFILE_DIRECTORY_UNSAFE))
+                    continue
+                pattern = PresetGlob.create(logical)
+                matched, held = _bounded(pattern, pattern.expand(live.list_dir(_join(home, directory))), head_records)
+                refusals.extend(held)
+                items.extend(
+                    LocalItem.create(
+                        path=path, preset=entry.preset, scope=entry.scope, machine=entry.machine, format=policy.format
+                    )
+                    for path in matched
+                )
+    return _Expanded(items=tuple(items), refusals=tuple(refusals), deferrals=tuple(deferrals))
+
+
+def _real_path_refusal(live: LiveFiles, deny: DenyList, home: str, logical: str, located: Located) -> Refusal | None:
+    """Why a profile file's **real** path may not be used, or `None`.
+
+    Checked on the resolved path at every read and write, not only when the index was read: the index is
+    a snapshot, and a directory can become a symlink or a denied path between it and a write. A path that
+    is not a profile file has no profile directory, and the ordinary checks already cover it.
+    """
+    if located.profile_directory is None:
+        return None
+    if deny.is_denied(home, located.path):
+        return Refusal(logical, _DENIED)
+    if deny.escapes(home, located.path):
+        return Refusal(logical, _ESCAPES)
+    parent = located.path.rpartition("/")[0]
+    if live.is_symlink(_join(home, located.profile_directory)) or (
+        parent != located.profile_directory and live.is_symlink(_join(home, parent))
+    ):
+        return Refusal(logical, _PROFILE_DIRECTORY_UNSAFE)
+    return None
 
 
 def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str) -> _Expanded:
@@ -654,19 +776,10 @@ def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, de
         if entry.glob.path in unsafe:
             refusals.append(Refusal(entry.glob.path, _GLOB_DIRECTORY_UNSAFE))
             continue
-        matched = entry.glob.expand(live.list_dir(_join(home, entry.glob.directory)))
-        published = {collision_key(record.path) for record in head_records if entry.glob.matches(record.path)}
-        known = tuple(path for path in matched if collision_key(path) in published)
-        fresh = tuple(path for path in matched if collision_key(path) not in published)
-        # A **soft** guard: a file already published keeps being collected, so an edit to it is never
-        # held back. New files fill the slots that are left, and only the ones past that are held —
-        # each reported by name, and only when there are any. A hard "refuse the whole glob" was a
-        # dead end: two machines syncing at once published 300 between them, and after that every
-        # cycle refused the glob with its local edits never leaving the machine.
-        room = MAX_GLOB_EXPANSION - len(published)
-        held = fresh[room:] if room >= 0 else fresh
-        refusals.extend(Refusal(path, _GLOB_FULL, blocking=False) for path in held)
-        matched = (*known, *fresh[: max(room, 0)])
+        matched, held = _bounded(
+            entry.glob, entry.glob.expand(live.list_dir(_join(home, entry.glob.directory))), head_records
+        )
+        refusals.extend(held)
         items.extend(
             LocalItem.create(
                 path=path,
@@ -691,12 +804,16 @@ def _collect(
     adopt: AdoptChoice | None,
     source: FileIdSource,
     presets: _Presets,
+    paths: LivePaths | None = None,
 ) -> _Collect:
     """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
+    paths = paths or LivePaths(catalog=presets.catalog)
     state = _Collect(records={} if head is None else dict(head.records))
     expanded = _expand_globs(config, head, live, deny, home)
-    state.refused.extend(expanded.refusals)
-    for item in expanded.items:
+    profiled = _expand_profiles(config, head, live, deny, home, paths)
+    state.refused.extend((*expanded.refusals, *profiled.refusals))
+    state.deferred.extend(profiled.deferrals)
+    for item in (*expanded.items, *profiled.items):
         if deny.is_denied(home, item.path):
             # The dangerous-path check comes first so a private key or a cloud credential is
             # reported as what it is, whatever its preset happens to own.
@@ -709,7 +826,17 @@ def _collect(
             # later sync would ask for `--adopt` again. Refused here, and reported.
             state.refused.append(Refusal(item.path, UNOWNED_PATH))
             continue
-        live_path = _join(home, item.path)
+        located = paths.resolve(item.path)
+        if isinstance(located, Unresolved):
+            # A logical path with no real one here is never read: it ends as a report, and its record
+            # (if any) stays in the manifest untouched.
+            state.deferred.append(Deferral(item.path, located.reason))
+            continue
+        unsafe_profile = _real_path_refusal(live, deny, home, item.path, located)
+        if unsafe_profile is not None:
+            state.refused.append(unsafe_profile)
+            continue
+        live_path = _join(home, located.path)
         if live.is_symlink(live_path):
             # Collection copies regular files, never follows a link (AGENTS.md §2.4). Following
             # it would also leave the file with no baseline, so every later target edit would
@@ -1693,6 +1820,7 @@ def _apply(
     adopt: AdoptChoice | None,
     backup: Backup,
     guard_overwrites: bool = False,
+    paths: LivePaths | None = None,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
@@ -1710,6 +1838,7 @@ def _apply(
     already tracks, and is one the local catalog lets that preset name
     (``docs/design/03-manifest.md``). A refusal is reported, never silent.
     """
+    paths = paths or LivePaths(catalog=presets.catalog)
     applied: list[str] = []
     deferred: list[Deferral] = []
     symlinks: list[str] = []
@@ -1732,6 +1861,19 @@ def _apply(
         if any(glob.matches(record.path) for glob in unsafe):
             refused.append(Refusal(record.path, _GLOB_DIRECTORY_UNSAFE))
             continue
+        located = paths.resolve(record.path)
+        if isinstance(located, Unresolved):
+            deferred.append(Deferral(record.path, located.reason))
+            continue
+        unsafe_profile = _real_path_refusal(live, deny, home, record.path, located)
+        if unsafe_profile is not None:
+            refused.append(unsafe_profile)
+            continue
+        if located.profile_directory is not None and not live.exists(_join(home, located.profile_directory)):
+            # The profile is registered but its folder is not here yet. Creating it would hand the app a
+            # profile it did not make, so the file waits (decision D5).
+            deferred.append(Deferral(record.path, _PROFILE_FOLDER_MISSING))
+            continue
         policy = presets.policy_for(record.path)
         if policy is not None and policy.format != record.format:
             # The record names a format the local catalog does not use for this path. Apply must
@@ -1741,7 +1883,7 @@ def _apply(
             unprojectable.append(_refusal(record.path, "format-mismatch"))
             continue
         stripped_policy: PresetFile | None = policy if policy is not None and policy.stripped else None
-        live_path = _join(home, record.path)
+        live_path = _join(home, located.path)
         if live.is_symlink(live_path):
             symlinks.append(record.path)
             continue
@@ -1795,7 +1937,9 @@ def _apply(
             preset = presets.catalog.preset_for(record.path)
             bundle_id = None if preset is None else preset.bundle_id
             installed = None if bundle_id is None else _installed(apps, installed_cache, bundle_id)
-            parent_exists = live.exists(str(Path(live_path).parent))
+            # A profile file's profile folder was checked above, so the app is there for it: its own
+            # `snippets/` may be missing, and creating that inside a profile that exists is ordinary.
+            parent_exists = located.profile_directory is not None or live.exists(str(Path(live_path).parent))
             if _missing_file_decision(installed, parent_exists=parent_exists) == _DEFER:
                 deferred.append(_deferral(record.path, preset, installed))
                 continue
@@ -1898,6 +2042,7 @@ def _settle_ledger(
     presets: _Presets,
     config: SyncConfig,
     home: str,
+    paths: LivePaths | None = None,
 ) -> dict[str, LedgerEntry]:
     """Rewrite the ledger so the next cycle sees in-agreement files as a normal baseline.
 
@@ -1908,6 +2053,7 @@ def _settle_ledger(
     compare, so a file whose only difference is a stripped key stays settled instead of being
     re-collected on every cycle.
     """
+    paths = paths or LivePaths(catalog=presets.catalog)
     settled: dict[str, LedgerEntry] = {}
     unsafe = _unsafe_glob_directories(config, live, deny, home)
     for file_id, record in target_manifest.records.items():
@@ -1919,7 +2065,16 @@ def _settle_ledger(
             # Settling would read the file through the symlinked directory — the same path apply
             # refused to write. Nothing is sealed or pushed, but a refused path is not read either.
             continue
-        live_path = _join(home, record.path)
+        located = paths.resolve(record.path)
+        if isinstance(located, Unresolved) or _real_path_refusal(live, deny, home, record.path, located) is not None:
+            # No real path to read (the profile is not here, the index is unreadable, or its directory is
+            # unsafe). The baseline is kept as it was: a profile this machine cannot see is not one it
+            # deleted, so nothing is marked removed (``docs/design/03-manifest.md``).
+            old = ledger.get(file_id)
+            if old is not None:
+                settled[file_id] = old
+            continue
+        live_path = _join(home, located.path)
         if live.is_symlink(live_path):
             old = ledger.get(file_id)
             if old is not None:
@@ -1979,6 +2134,7 @@ def sync(
     resolving: bool = False,
     decide: Decide | None = None,
     when_tag: WhenTag | None = None,
+    profiles: ProfileIndex | None = None,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
 
@@ -1995,6 +2151,8 @@ def sync(
             raise PendingConflict(
                 "a previous sync stopped with unresolved conflicts; resolve them before syncing again"
             )
+        # Read once per run: every live path of the cycle is resolved against this one view of the profiles.
+        paths = open_live_paths(config, catalog, profiles)
         return _cycle(
             transport=transport,
             files=files,
@@ -2016,6 +2174,7 @@ def sync(
             branch=branch,
             adopt=adopt,
             resolution=Resolution(decide=decide, resolving=resolving),
+            paths=paths,
         )
     finally:
         lock.release()
@@ -2067,6 +2226,7 @@ def _cycle(
     branch: str,
     adopt: AdoptChoice | None,
     resolution: Resolution,
+    paths: LivePaths,
     _restarted: bool = False,
 ) -> SyncReport:
     def again(next_resolution: Resolution, restarted: bool) -> SyncReport:
@@ -2091,6 +2251,7 @@ def _cycle(
             branch=branch,
             adopt=adopt,
             resolution=next_resolution,
+            paths=paths,
             _restarted=restarted,
         )
 
@@ -2112,6 +2273,7 @@ def _cycle(
         adopt=adopt,
         source=source,
         presets=presets,
+        paths=paths,
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
@@ -2246,6 +2408,7 @@ def _cycle(
         adopt=adopt,
         backup=Backup.create(local_commit, records=backup_records),
         guard_overwrites=guard_overwrites,
+        paths=paths,
     )
     ledger_store.save(
         _settle_ledger(
@@ -2257,6 +2420,7 @@ def _cycle(
             presets=presets,
             config=config,
             home=home,
+            paths=paths,
         )
     )
     return SyncReport(

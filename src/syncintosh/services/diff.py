@@ -30,22 +30,25 @@ from syncintosh.core.ports import (
     GitTransport,
     LiveFiles,
     PresetCatalog,
+    ProfileIndex,
     SyntaxValidator,
     remote_ref,
 )
 from syncintosh.core.presets import ValidatorName
+from syncintosh.services.profile_paths import LivePaths, Unresolved, open_live_paths
 from syncintosh.services.sync import (
     _decode,
     _Presets,
     _project_file,
     _read_manifest,
+    _real_path_refusal,
     _record_refusal,
     _sha256,
     _verified_object,
 )
 
 # How a tracked path stands relative to the repo side.
-DiffStatus = Literal["in-sync", "changed", "missing-here"]
+DiffStatus = Literal["in-sync", "changed", "missing-here", "deferred"]
 
 # How the repo side is chosen: the remote tracking ref when it exists, else this machine's HEAD.
 _REPO_SIDE = "the repo side is this machine's HEAD (nothing fetched yet)"
@@ -64,6 +67,8 @@ class FileDiff:
     addresses: tuple[ConflictAddress, ...] = field(default=(), repr=False)
     here: str | None = field(default=None, repr=False)
     repo: str | None = field(default=None, repr=False)
+    # Why a path cannot be compared here (a profile this machine lacks): a fixed phrase, never file content.
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,9 +96,11 @@ def diff_repo(
     catalog: PresetCatalog,
     adapters: Mapping[FileFormat, ContentAdapter],
     validators: Mapping[ValidatorName, SyntaxValidator],
+    profiles: ProfileIndex | None = None,
 ) -> DiffReport:
     """Compare every tracked path's live file with the repo side. Never writes anything."""
     presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
+    paths = open_live_paths(config, catalog, profiles)
     head = transport.head()
     remote = transport.resolve(remote_ref(branch))
     repo_commit = remote or head
@@ -110,7 +117,7 @@ def diff_repo(
             # A path this machine does not track or may not write is not part of *this* machine's
             # diff; `sync` reports it, `diff` stays quiet about it.
             continue
-        entries.append(_diff_record(transport, cipher, live, presets, home, repo_commit, file_id, record))
+        entries.append(_diff_record(transport, cipher, live, presets, home, repo_commit, file_id, record, paths, deny))
     return DiffReport(entries=tuple(entries), source=source)
 
 
@@ -123,10 +130,24 @@ def _diff_record(
     repo_commit: str | None,
     file_id: str,
     record: ManifestRecord,
+    paths: LivePaths,
+    deny: DenyList,
 ) -> FileDiff:
+    located = paths.resolve(record.path)
+    if isinstance(located, Unresolved):
+        return FileDiff(record.path, "deferred", reason=located.reason)
+    unsafe = _real_path_refusal(live, deny, home, record.path, located)
+    if unsafe is not None:
+        # The real directory may have become a symlink or a protected path since the list was read; a
+        # diff must not read through it (and `--values` would print what it found).
+        return FileDiff(record.path, "deferred", reason=unsafe.reason)
+    if live.is_symlink(str(Path(home) / located.path)):
+        # Collect and apply never follow a link, so a diff must not either: `--values` would print whatever
+        # the link points at.
+        return FileDiff(record.path, "deferred", reason="the file is a symbolic link")
     repo_bytes = _verified_object(transport, cipher, repo_commit, file_id, record.sha256)
     repo_text = None if repo_bytes is None else _decode(repo_bytes)
-    raw = live.read(str(Path(home) / record.path))
+    raw = live.read(str(Path(home) / located.path))
     if raw is None:
         return FileDiff(record.path, "missing-here", repo=repo_text)
     projected = _project_file(presets, raw, record.path, record.format)

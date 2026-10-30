@@ -49,6 +49,7 @@ def watch(
     stop: threading.Event | None = None,
     on_report: Callable[[SyncReport], None] | None = None,
     on_error: Callable[[Exception], None] | None = None,
+    refresh: Callable[[], WatchFilter] | None = None,
 ) -> None:
     """Watch until `stop` is set (or forever), syncing after each settled burst.
 
@@ -98,9 +99,30 @@ def watch(
                 continue
             debounce.clear()
             _run_once(run, debounce=debounce, clock=clock, on_report=on_report, on_error=on_error)
+            if refresh is not None:
+                # A sync can change what is worth watching (a profile created in the app, or a new one
+                # the other Mac sent), so the targets are read again after it.
+                targets = _refreshed(refresh, targets, watch, on_error)
             last_run = clock()
     finally:
         watch.stop()
+
+
+def _refreshed(
+    refresh: Callable[[], WatchFilter],
+    current: WatchFilter,
+    watch: FileWatch,
+    on_error: Callable[[Exception], None] | None,
+) -> WatchFilter:
+    """The filter to use next: the fresh one, or `current` when it could not be built (reported, not fatal)."""
+    try:
+        fresh = refresh()
+    except (DomainError, OSError) as exc:
+        _report_error(on_error, exc)
+        return current
+    if fresh != current:
+        watch.retarget(fresh.directories())
+    return fresh
 
 
 def _run_once(

@@ -10,6 +10,7 @@ functions, so importing this module keeps CLI startup fast (``AGENTS.md`` §4).
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -96,6 +97,29 @@ def _launchd_daemon(home):
     from syncintosh.system.daemon import LaunchdDaemon
 
     return LaunchdDaemon(home)
+
+
+@functools.cache
+def _shown_catalog():
+    from syncintosh.presets import BuiltinCatalog
+
+    return BuiltinCatalog.default()
+
+
+def _shown(path: str) -> str:
+    """A tracked path as a person reads it: a profile file becomes `vscode profile "Work": settings.json`.
+
+    Display only. Selectors such as `resolve --local` still take the record path, which `_selectable` appends.
+    """
+    from syncintosh.services.profile_paths import describe_with
+
+    return describe_with(_shown_catalog(), path)
+
+
+def _selectable(path: str) -> str:
+    """`_shown`, plus the record path in parentheses when it differs, so it can be passed to a selector."""
+    shown = _shown(path)
+    return shown if shown == path else f"{shown} ({path})"
 
 
 def _fail(exc: DomainError) -> None:
@@ -331,11 +355,15 @@ def daemon_uninstall() -> None:
 @app.command()
 def doctor() -> None:
     """Check that this machine's install can actually sync. Exits 1 when a check fails."""
+    from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.services.profile_paths import open_live_paths, profile_summary
     from syncintosh.system.config import load_config
     from syncintosh.system.daemon import entry_point
+    from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.lock import FileLock
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.pending import DirectoryPendingStore
+    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.vcs.git import GitCLITransport
 
     paths = MachinePaths.default()
@@ -343,6 +371,8 @@ def doctor() -> None:
         config = load_config(paths.config_file)
         transport = GitCLITransport(paths.repo_dir)
         daemon = _launchd_daemon(paths.home)
+        index = SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles)
+        summary = profile_summary(config, open_live_paths(config, BuiltinCatalog.default(), index))
         report = doctor_service(
             transport=transport,
             store=_key_store(config.remote),
@@ -354,6 +384,7 @@ def doctor() -> None:
             plist_entry_point=daemon.recorded_entry_point(),
             expected_entry_point=entry_point(),
             job_loaded=daemon.is_loaded(),
+            extra=() if summary is None else (summary,),
         )
     except DomainError as exc:
         _fail(exc)
@@ -373,11 +404,12 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     """
     from syncintosh.adapters.jsonc import JsoncAdapter
     from syncintosh.crypto.cipher import EnvelopeCipher
-    from syncintosh.presets import BuiltinCatalog
+    from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.paths import MachinePaths
+    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.vcs.git import GitCLITransport
 
     paths = MachinePaths.default()
@@ -397,6 +429,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             catalog=BuiltinCatalog.default(),
             adapters={"jsonc": JsoncAdapter()},
             validators=validators(),
+            profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         )
     except DomainError as exc:
         _fail(exc)
@@ -444,7 +477,9 @@ def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
     for entry in report.entries:
         keys = ", ".join(path_label(path, element, when_tag=when_tag) for path, element in entry.addresses)
         suffix = f" [{keys}]" if keys else ""
-        _say(f"{entry.status}: {entry.path}{suffix}")
+        _say(f"{entry.status}: {_shown(entry.path)}{suffix}")
+        if entry.reason:
+            _say(f"  {entry.reason}")
     if not values:
         return
     for entry in report.entries:
@@ -453,8 +488,8 @@ def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
         for line in difflib.unified_diff(
             entry.repo.splitlines(),
             entry.here.splitlines(),
-            fromfile=f"{entry.path} (repo)",
-            tofile=f"{entry.path} (here)",
+            fromfile=f"{_shown(entry.path)} (repo)",
+            tofile=f"{_shown(entry.path)} (here)",
             lineterm="",
         ):
             _say(line)
@@ -724,7 +759,7 @@ def _present_suggestion(suggestion: Suggestion, *, when_tag: WhenTag) -> bool:
 
     view = suggestion.view
     console = Console()
-    heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
+    heading = f"[bold]{escape(_selectable(view.path))}[/]  {view.kind}"
     if view.key_path is not None:
         heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=when_tag))}"
     console.print(heading)
@@ -766,7 +801,7 @@ def _show_conflict(console: Console, view: ConflictView, *, when_tag: WhenTag) -
     """Print one conflict's place and its values. Every value is escaped, so file text is never markup."""
     from rich.markup import escape
 
-    heading = f"[bold]{escape(view.path)}[/]  {view.kind}"
+    heading = f"[bold]{escape(_selectable(view.path))}[/]  {view.kind}"
     if view.key_path is not None:
         heading += f"  key {escape(path_label(view.key_path, view.element, when_tag=when_tag))}"
     console.print(heading)
@@ -805,7 +840,7 @@ def _pick_lines(view: ConflictView, pick: Choice, *, when_tag: WhenTag) -> list[
     from syncintosh.core.advice import visible
     from syncintosh.core.resolution import Proposal
 
-    place = f"  {view.path}  {view.kind}"
+    place = f"  {_selectable(view.path)}  {view.kind}"
     if view.key_path is not None:
         place += f"  key {path_label(view.key_path, view.element, when_tag=when_tag)}"
     if not isinstance(pick, Proposal):
@@ -828,13 +863,14 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
-    from syncintosh.presets import BuiltinCatalog
+    from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
     from syncintosh.system.pending import DirectoryPendingStore
+    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.system.scan_allow import load_scan_allow, when_tag_for
     from syncintosh.system.secret_scan import PatternSecretScanner
@@ -868,6 +904,8 @@ def _sync_ports(config, paths) -> dict:
         "lock": FileLock(paths.lock_file),
         "deny": SystemDenyList(),
         "apps": MdfindAppDetector(),
+        # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
+        "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         "source": SecureFileIdSource(),
         "config": config,
         "home": str(paths.home),
@@ -893,8 +931,8 @@ def watch(
     `syncintosh daemon install` runs this under launchd with `--poll`, so a change on another Mac
     also arrives without a local edit.
     """
-    from syncintosh.core.watch import WatchFilter
     from syncintosh.services import watch as watch_service
+    from syncintosh.services.profile_paths import watch_targets
     from syncintosh.system.config import load_config
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.watcher import WatchdogFileWatch
@@ -906,7 +944,16 @@ def watch(
     except DomainError as exc:
         _fail(exc)
         return
-    targets = WatchFilter.create(config)
+
+    # Re-read after every sync: a profile created in the app (or one the other Mac sent) adds files to
+    # watch, and the app's own profile list is followed too.
+    current_targets = functools.partial(watch_targets, config, ports["catalog"], ports["profiles"])
+
+    try:
+        targets = current_targets()
+    except DomainError as exc:
+        _fail(exc)
+        return
 
     def run() -> SyncReport:
         return sync_service(**ports)
@@ -931,6 +978,7 @@ def watch(
             poll_seconds=poll,
             on_report=lambda report: _render(report, config),
             on_error=error,
+            refresh=current_targets,
         )
     except KeyboardInterrupt:
         typer.echo("stopped watching")
@@ -946,12 +994,12 @@ def _render(report: SyncReport, config) -> None:
     if report.first_sight:
         _say("these files exist here and in the repo with different content:")
         for path in report.first_sight:
-            _say(f"  {path}")
+            _say(f"  {_shown(path)}")
         _say("re-run with `sync --adopt local` (keep these) or `sync --adopt remote` (take the repo's)")
     if report.conflicts:
         _say("conflicts stopped the sync; nothing was applied:", err=True)
         for conflict in report.conflicts:
-            _say(f"  {conflict.path or conflict.file_id}: {conflict.detail}", err=True)
+            _say(f"  {_shown(conflict.path) if conflict.path else conflict.file_id}: {conflict.detail}", err=True)
     for label, paths in (
         ("created", report.created),
         ("collected", report.collected),
@@ -962,11 +1010,11 @@ def _render(report: SyncReport, config) -> None:
         ("aborted (edited during sync; re-sync)", report.aborted),
     ):
         for path in paths:
-            _say(f"{label}: {path}")
+            _say(f"{label}: {_shown(path)}")
     for deferral in report.deferred:
         # A deferral is not a failure (the next sync on a machine that has the app writes it), so it
         # goes to stdout, with the app's own download page when that is why it was deferred.
-        _say(f"deferred ({deferral.reason}): {deferral.path}")
+        _say(f"deferred ({deferral.reason}): {_shown(deferral.path)}")
         if deferral.download_url:
             _say(f"  download: {deferral.download_url}")
         if deferral.cask:
@@ -974,15 +1022,15 @@ def _render(report: SyncReport, config) -> None:
     for refusal in report.refused:
         if refusal.blocking:
             # The reason is a fixed phrase, never file content (``AGENTS.md`` §4).
-            _say(f"refused ({refusal.reason}): {refusal.path}", err=True)
+            _say(f"refused ({refusal.reason}): {_shown(refusal.path)}", err=True)
         else:
             # Not `skipped`: that word already means a dangerous path here, and the two call for very
             # different reactions. The reason is shown too, so "the glob is full" is not mistaken for
             # "this machine does not track the path".
-            _say(f"not synced ({refusal.reason}): {refusal.path}")
+            _say(f"not synced ({refusal.reason}): {_shown(refusal.path)}")
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
-            _say(f"{label} ({refusal.reason}): {refusal.path}", err=True)
+            _say(f"{label} ({refusal.reason}): {_shown(refusal.path)}", err=True)
     if report.unchanged:
         _say("nothing changed")
     elif report.published_commit:

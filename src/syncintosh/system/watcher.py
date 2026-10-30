@@ -198,6 +198,10 @@ class WatchdogFileWatch:
         # The first scheduling is not a change: there was nothing to miss before it.
         self._rebuilt = False
 
+    def retarget(self, directories: Iterable[str]) -> None:
+        """Watch `directories` instead; the next `wait` re-schedules the observer if the set changed."""
+        self._directories = tuple(directories)
+
     def stop(self) -> None:
         """Stop the observer and join its thread. Safe to call when it was never started."""
         self._stop_observer()
