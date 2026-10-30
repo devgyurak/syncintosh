@@ -138,6 +138,11 @@ class SyncConfig:
         )
         if foreign:
             raise ConfigError(f"machine-scope entries must name this machine ({machine_id}): {foreign}")
+        repeated = sorted({entry.preset for entry in profiles if [e.preset for e in profiles].count(entry.preset) > 1})
+        if repeated:
+            # Two entries for one preset would collect the same real files twice, as two records that differ
+            # only in scope.
+            raise ConfigError(f"a preset may have one profiles entry: {repeated}")
         return cls(
             remote=remote,
             machine_id=machine_id,

@@ -552,3 +552,37 @@ def test_both_spellings_of_a_name_give_one_logical_path(name: str) -> None:
 
     # then
     assert len(paths) == 1
+
+
+# --------------------------------------------------------------------------- one entry per preset
+
+
+def _other_spec() -> ProfileSpec:
+    return ProfileSpec.create(
+        default_root="App/User",
+        home="App/User/profiles",
+        index="App/User/storage.json",
+        files=(ProfileFile.create(path="settings.json", resource="settings"),),
+    )
+
+
+def test_two_profiles_entries_for_one_preset_are_refused() -> None:
+    # given
+    common = LocalProfiles.create(preset="vscode", spec=SPEC, scope="common", names="*")
+    machine = LocalProfiles.create(preset="vscode", spec=SPEC, scope="machine", machine="mac", names=("Work",))
+
+    # when & then
+    with pytest.raises(ConfigError, match="vscode"):
+        SyncConfig.create(remote="r", machine_id="mac", items=(), profiles=(common, machine))
+
+
+def test_profiles_entries_for_different_presets_are_allowed() -> None:
+    # given
+    first = LocalProfiles.create(preset="vscode", spec=SPEC, scope="common", names="*")
+    second = LocalProfiles.create(preset="app", spec=_other_spec(), scope="common", names="*")
+
+    # when
+    config = SyncConfig.create(remote="r", machine_id="mac", items=(), profiles=(first, second))
+
+    # then
+    assert [entry.preset for entry in config.profiles] == ["vscode", "app"]
