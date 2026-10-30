@@ -112,8 +112,8 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   profile's file takes the **default profile's** policy: the same noise keys, the same `http.proxyAuthorization`
   exclusion, the keybindings array rule, and the JSON check. The real directory is looked up on each
   machine from VS Code's own list, `User/globalStorage/storage.json` → `userDataProfiles`
-  (`{name, location, icon?, useDefaultFlags?}`; `location` is the id, or an older URI object whose path ends
-  in `User/profiles/<id>`). That file is read **in memory, for that key only** — it also holds window state
+  (`{name, location, icon?, useDefaultFlags?}`; `location` is the id, or an older `file` URI object whose path is exactly this machine's
+  profiles home plus the id; a URI elsewhere, or one that names a host, is skipped). That file is read **in memory, for that key only** — it also holds window state
   and a telemetry machine id — and is never collected, sealed or tracked. Evidence: source-verified
   (the approved Step 0 exception, as for the rest of this preset): `microsoft/vscode` `main` `a48dd23e2ac5`,
   `userDataProfile.ts`, `userDataProfilesManifestSync.ts` and `stateService.ts`.
@@ -131,10 +131,10 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
     list resolves **no** profile, is reported, and keeps every record: a profile that cannot be seen is not a
     deleted one. A profile directory that is a symbolic link, a denied path, or leaves `$HOME` is refused.
   - **Known limit:** renaming a profile leaves the old name's record behind (a record is removed only by
-    untracking it). Tracked as a follow-up.
+    untracking it). Tracked in #67.
   - To add profiles to an existing config by hand, add
     `"profiles": [{"preset": "vscode", "scope": "common", "names": "*"}]` to `config.json`. A `preset add`
-    command is a follow-up.
+    command is tracked in #68.
 - **Out of scope:** `settingsSync.ignoredSettings` (issue #23 extends the single policy lookup a profile file
   goes through, `BuiltinCatalog.policy_for`), `tasks.json`, `mcp.json` (its server `env` and `headers`
   need their own exclusion pass before it can be collected safely), `extensions.json`, `prompts/`, Insiders,
