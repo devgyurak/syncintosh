@@ -28,6 +28,7 @@ Standard library only (``AGENTS.md`` §2.1).
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
@@ -47,11 +48,18 @@ PROFILE_ID: Final = re.compile(r"-?[0-9a-f]+")
 
 
 def encode_profile_name(name: str) -> str:
-    """The path element a profile name becomes, marker included (`@Work`, `@a%2Fb`)."""
+    """The path element a profile name becomes, marker included (`@Work`, `@a%2Fb`).
+
+    The name is NFC-normalized first, so the decomposed and composed spellings of one name share an element.
+    `decode_profile_name` re-encodes and compares, so an element written from a decomposed name is not canonical
+    and is refused.
+    """
     if not isinstance(name, str) or name == "":
         raise ConfigError(f"a profile name must be a non-empty string, got {name!r}")
     try:
-        return PROFILE_MARK + quote(name, safe="", errors="strict")
+        # NFC first: macOS treats two spellings of a name as one, and `tracking_key` cannot fold what sits
+        # inside a percent escape, so two spellings would otherwise become two records for one directory.
+        return PROFILE_MARK + quote(unicodedata.normalize("NFC", name), safe="", errors="strict")
     except UnicodeEncodeError as exc:
         raise ConfigError("a profile name must be valid UTF-8 text") from exc
 
