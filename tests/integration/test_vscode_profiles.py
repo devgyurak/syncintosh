@@ -412,3 +412,32 @@ def test_a_symlinked_profile_directory_is_refused(tmp_path, memory_key_store) ->
     # then — nothing is written through the link, and the profile is reported as skipped
     assert list(outside.iterdir()) == []
     assert [r for r in report.refused if "symbolic link" in r.reason] != []
+
+
+# --------------------------------------------------------------------------- a malformed index entry
+
+
+def test_a_malformed_index_entry_does_not_stop_the_sync(tmp_path, memory_key_store) -> None:
+    # given — both Macs track the default profile's settings; B's profile list has one broken entry (an empty
+    # `useDefaultFlags` key) beside a good one
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write(a, f"{USER}/settings.json", SETTINGS_TEXT)
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    (b.home / USER).mkdir(parents=True)
+    _register(
+        b,
+        {"name": "Work", "location": "abc", "useDefaultFlags": {"": True}},
+        {"name": "Home", "location": "def"},
+    )
+
+    # when — the sync completes instead of raising ConfigError
+    report = _run(b)
+
+    # then — the default profile still synced, and the broken entry is only reported, without blocking
+    assert b'"editor.tabSize": 4' in (b.home / USER / "settings.json").read_bytes()
+    assert [r for r in report.refused if not r.blocking and r.path == vscode.PROFILE_INDEX] != []
+    assert [r for r in (*report.refused, *report.unprojectable, *report.invalid) if r.blocking] == []
