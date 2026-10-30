@@ -7,7 +7,9 @@ The VS Code layout used here is the shipped one (`presets/vscode.py`); its facts
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Literal
+from urllib.parse import quote
 
 import pytest
 from hypothesis import given
@@ -20,6 +22,7 @@ from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import PresetCatalog, ProfileIndex
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.profiles import (
+    PROFILE_MARK,
     ProfileEntry,
     ProfileFile,
     ProfileMap,
@@ -95,7 +98,7 @@ def test_an_encoded_name_round_trips(name: str) -> None:
     element = encode_profile_name(name)
 
     # then
-    assert (decode_profile_name(element), "/" in element) == (name, False)
+    assert (decode_profile_name(element), "/" in element) == (unicodedata.normalize("NFC", name), False)
 
 
 @given(NAMES, st.sampled_from([f.path for f in SPEC.files if "*" not in f.path]))
@@ -104,7 +107,7 @@ def test_a_logical_path_is_a_valid_manifest_path_for_any_name(name: str, relativ
     path = SPEC.logical_path(name, relative)
 
     # then
-    assert (validate_path(path), SPEC.parse(path).name) == (path, name)  # ty: ignore[unresolved-attribute]
+    assert (validate_path(path), SPEC.parse(path).name) == (path, unicodedata.normalize("NFC", name))  # ty: ignore[unresolved-attribute]
 
 
 @given(NAMES)
@@ -538,3 +541,75 @@ def test_a_raw_id_path_is_unknown_to_every_preset_name(preset: str) -> None:
 
     # then — a name that is not built in makes no claim, but it cannot claim a reserved path either
     assert known is False
+
+
+# --------------------------------------------------------------------------- NFC
+
+
+@given(NAMES)
+def test_nfc_and_nfd_spellings_encode_to_one_element(name: str) -> None:
+    # when
+    nfc, nfd = (
+        encode_profile_name(unicodedata.normalize("NFC", name)),
+        encode_profile_name(unicodedata.normalize("NFD", name)),
+    )
+
+    # then
+    assert nfc == nfd
+
+
+@pytest.mark.parametrize("name", ["Café", "작업"])
+def test_an_nfd_encoded_element_is_not_a_logical_path(name: str) -> None:
+    # given — the element a build that did not normalize would have written for the decomposed spelling
+    nfd = unicodedata.normalize("NFD", name)
+    element = PROFILE_MARK + quote(nfd, safe="")
+    path = f"{HOME}/{element}/settings.json"
+
+    # when
+    verdict = (decode_profile_name(element), SPEC.parse(path), CATALOG.knows("vscode", path))
+
+    # then
+    assert verdict == (None, None, False)
+
+
+@pytest.mark.parametrize("name", ["Café", "작업"])
+def test_both_spellings_of_a_name_give_one_logical_path(name: str) -> None:
+    # when
+    paths = {SPEC.logical_path(unicodedata.normalize(form, name), "settings.json") for form in ("NFC", "NFD")}
+
+    # then
+    assert len(paths) == 1
+
+
+# --------------------------------------------------------------------------- one entry per preset
+
+
+def _other_spec() -> ProfileSpec:
+    return ProfileSpec.create(
+        default_root="App/User",
+        home="App/User/profiles",
+        index="App/User/storage.json",
+        files=(ProfileFile.create(path="settings.json", resource="settings"),),
+    )
+
+
+def test_two_profiles_entries_for_one_preset_are_refused() -> None:
+    # given
+    common = LocalProfiles.create(preset="vscode", spec=SPEC, scope="common", names="*")
+    machine = LocalProfiles.create(preset="vscode", spec=SPEC, scope="machine", machine="mac", names=("Work",))
+
+    # when & then
+    with pytest.raises(ConfigError, match="vscode"):
+        SyncConfig.create(remote="r", machine_id="mac", items=(), profiles=(common, machine))
+
+
+def test_profiles_entries_for_different_presets_are_allowed() -> None:
+    # given
+    first = LocalProfiles.create(preset="vscode", spec=SPEC, scope="common", names="*")
+    second = LocalProfiles.create(preset="app", spec=_other_spec(), scope="common", names="*")
+
+    # when
+    config = SyncConfig.create(remote="r", machine_id="mac", items=(), profiles=(first, second))
+
+    # then
+    assert [entry.preset for entry in config.profiles] == ["vscode", "app"]

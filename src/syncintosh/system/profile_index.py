@@ -11,16 +11,19 @@ a denied path, or one that leaves `$HOME` once resolved is dropped and reported 
 file is the app's own, but its `location` values are still text from disk, and a planted one must not
 steer a later write.
 
-The format-specific reading is injected (`read_profiles` for VS Code) so this module names no app.
+The format-specific reading is injected (`read_profiles` for VS Code) so this module names no app. It is
+given this machine's profiles home, which is what an old-format URI location must equal.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from syncintosh.core.errors import ConfigError
 from syncintosh.core.ports import DenyList
 from syncintosh.core.profiles import ProfileMap, ProfileSpec
 
@@ -31,7 +34,7 @@ MAX_INDEX_BYTES = 4 * 1024 * 1024
 class SystemProfileIndex:
     """Reads the profile list under `home` through `parse`; constructing it does no I/O."""
 
-    def __init__(self, home: str, deny: DenyList, parse: Callable[[Any], ProfileMap]) -> None:
+    def __init__(self, home: str, deny: DenyList, parse: Callable[[Any, tuple[str, ...]], ProfileMap]) -> None:
         self._home = home
         self._deny = deny
         self._parse = parse
@@ -58,17 +61,25 @@ class SystemProfileIndex:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
             return ProfileMap.unreadable("the profile index is not valid JSON")
-        parsed = self._parse(document)
-        if not parsed.readable:
-            return parsed
-        kept, problems = [], list(parsed.problems)
-        for entry in parsed.entries:
-            reason = self._unsafe(spec, entry.directory)
-            if reason is None:
-                kept.append(entry)
-            else:
-                problems.append(f"skipped profile {entry.name!r}: {reason}")
-        return ProfileMap.create(tuple(kept), tuple(problems))
+        try:
+            # The profiles home as written and as the filesystem resolves it, so an old-format URI location can
+            # be compared with this machine's own folder and with nothing else.
+            written = str(Path(self._home) / spec.home)
+            parsed = self._parse(document, tuple(dict.fromkeys((written, os.path.realpath(written)))))
+            if not parsed.readable:
+                return parsed
+            kept, problems = [], list(parsed.problems)
+            for entry in parsed.entries:
+                reason = self._unsafe(spec, entry.directory)
+                if reason is None:
+                    kept.append(entry)
+                else:
+                    problems.append(f"skipped profile {entry.name!r}: {reason}")
+            return ProfileMap.create(tuple(kept), tuple(problems))
+        except ConfigError:
+            # The port promises not to raise: a document the parser cannot make sense of is one more unreadable
+            # index, and its detail (which may quote the file) is not repeated.
+            return ProfileMap.unreadable("the profile index could not be understood")
 
     def _unsafe(self, spec: ProfileSpec, directory: str) -> str | None:
         """Why the profile's directory may not resolve, or `None` when it is safe."""

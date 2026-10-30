@@ -87,7 +87,7 @@ approved exception, as above). `read_profiles` reads only that key; `storage.jso
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from syncintosh.core.errors import ConfigError
@@ -201,29 +201,28 @@ VSCODE = Preset.create(
 )
 
 _PROFILES_KEY = "userDataProfiles"
-# The suffix an old-format `location` URI's `path` must end in. The directory names are VS Code's own
-# (`User`, `profiles`); the id after them is checked like a new-format `location`.
-_URI_PARENT = ("User", "profiles")
 
 
-def _directory_of(location: object) -> str | None:
+def _directory_of(location: object, profiles_homes: Collection[str]) -> str | None:
     """The profile's directory id from a `location`, or `None` when it is not a single-element id.
 
     Current VS Code writes `location` as a string relative to `profiles/`, which is the id itself. An older
     build wrote a URI object, and VS Code's reader accepts both (`isString(p.location) ? joinPath(profilesHome,
-    p.location) : URI.revive(...)`), so this does too, but only when the URI's path ends in
-    `User/profiles/<id>` — a URI that points anywhere else is not a profile directory of this layout.
+    p.location) : URI.revive(...)`), so this does too, but only for a `file` URI whose path is exactly
+    `<this machine's profiles home>/<id>`. A URI that points anywhere else — another `--user-data-dir`, a
+    portable install — would otherwise be mapped onto this machine's folder of the same id. With no home to
+    compare against, a URI proves nothing and is refused.
     """
     if isinstance(location, str):
         return location if PROFILE_ID.fullmatch(location) else None
-    if isinstance(location, Mapping) and isinstance(location.get("path"), str):
-        *_, user, profiles, directory = ["", "", *location["path"].split("/")]
-        if (user, profiles) == _URI_PARENT and PROFILE_ID.fullmatch(directory):
+    if isinstance(location, Mapping) and location.get("scheme") == "file" and isinstance(location.get("path"), str):
+        parent, _, directory = location["path"].rpartition("/")
+        if parent in profiles_homes and PROFILE_ID.fullmatch(directory):
             return directory
     return None
 
 
-def _entry_of(raw: object) -> tuple[ProfileEntry | None, str | None]:
+def _entry_of(raw: object, profiles_homes: Collection[str]) -> tuple[ProfileEntry | None, str | None]:
     """One `userDataProfiles` item as an entry, or the reason it was skipped (never both).
 
     The reason names the profile at most; it never echoes the item, which may carry a path or an icon.
@@ -241,10 +240,12 @@ def _entry_of(raw: object) -> tuple[ProfileEntry | None, str | None]:
     if isinstance(location, str) and location.startswith("builtin/"):
         # Built-in profiles (Agents) ship with the app and are not the user's to sync.
         return None, f"skipped built-in profile {name!r}"
-    directory = _directory_of(location)
+    directory = _directory_of(location, profiles_homes)
     if directory is None:
         return None, f"skipped profile {name!r}: its location is not a single profile id"
-    if not isinstance(flags, Mapping) or not all(isinstance(value, bool) for value in flags.values()):
+    if not isinstance(flags, Mapping) or not all(
+        isinstance(key, str) and key != "" and isinstance(value, bool) for key, value in flags.items()
+    ):
         # Not knowing what a profile borrows would mean collecting a file VS Code never reads.
         return None, f"skipped profile {name!r}: useDefaultFlags is not a map of booleans"
     return ProfileEntry.create(
@@ -252,7 +253,7 @@ def _entry_of(raw: object) -> tuple[ProfileEntry | None, str | None]:
     ), None
 
 
-def read_profiles(document: Any) -> ProfileMap:
+def read_profiles(document: Any, profiles_homes: Collection[str] = ()) -> ProfileMap:
     """The profiles a parsed `storage.json` lists, and what was skipped.
 
     Only the `userDataProfiles` key is read; the file also holds window state and a telemetry machine id,
@@ -268,7 +269,7 @@ def read_profiles(document: Any) -> ProfileMap:
     listed = document.get(_PROFILES_KEY, [])
     if not isinstance(listed, list):
         return ProfileMap.unreadable(f"{_PROFILES_KEY} is not a list")
-    parsed = [_entry_of(item) for item in listed]
+    parsed = [_entry_of(item, profiles_homes) for item in listed]
     problems = [reason for _, reason in parsed if reason is not None]
     entries = [entry for entry, _ in parsed if entry is not None]
     clashing_names = set(duplicate_profile_names(entry.name for entry in entries))
