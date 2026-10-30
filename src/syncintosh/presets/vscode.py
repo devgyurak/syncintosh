@@ -79,9 +79,22 @@ with this preset.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
+from typing import Any
+
+from syncintosh.core.errors import ConfigError
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.profiles import ProfileFile, ProfileSpec
+from syncintosh.core.profiles import (
+    PROFILE_ID,
+    ProfileEntry,
+    ProfileFile,
+    ProfileMap,
+    ProfileSpec,
+    duplicate_profile_names,
+    encode_profile_name,
+    profile_name_key,
+)
 from syncintosh.core.tree import KeyPath
 
 SETTINGS = "Library/Application Support/Code/User/settings.json"
@@ -179,6 +192,95 @@ VSCODE = Preset.create(
     profiles=PROFILES,
 )
 
+_PROFILES_KEY = "userDataProfiles"
+
+
+def _directory_of(location: object, profiles_homes: Collection[str]) -> str | None:
+    """The profile's directory id from a `location`, or `None` when it is not a single-element id.
+
+    Current VS Code writes `location` as a string relative to `profiles/`, which is the id itself. An older
+    build wrote a URI object, and VS Code's reader accepts both (`isString(p.location) ? joinPath(profilesHome,
+    p.location) : URI.revive(...)`), so this does too, but only for a `file` URI whose path is exactly
+    `<this machine's profiles home>/<id>`. A URI that points anywhere else — another `--user-data-dir`, a
+    portable install — would otherwise be mapped onto this machine's folder of the same id. With no home to
+    compare against, a URI proves nothing and is refused.
+    """
+    if isinstance(location, str):
+        return location if PROFILE_ID.fullmatch(location) else None
+    if (
+        isinstance(location, Mapping)
+        and location.get("scheme") == "file"
+        and not location.get("authority")
+        and isinstance(location.get("path"), str)
+    ):
+        parent, _, directory = location["path"].rpartition("/")
+        if parent in profiles_homes and PROFILE_ID.fullmatch(directory):
+            return directory
+    return None
+
+
+def _entry_of(raw: object, profiles_homes: Collection[str]) -> tuple[ProfileEntry | None, str | None]:
+    """One `userDataProfiles` item as an entry, or the reason it was skipped (never both).
+
+    The reason names the profile at most; it never echoes the item, which may carry a path or an icon.
+    """
+    if not isinstance(raw, Mapping):
+        return None, "skipped a profile entry that is not an object"
+    name, flags = raw.get("name"), raw.get("useDefaultFlags", {})
+    if not isinstance(name, str) or name == "":
+        return None, "skipped a profile entry without a name"
+    try:
+        encode_profile_name(name)
+    except ConfigError:
+        return None, "skipped a profile whose name is not valid text"
+    location = raw.get("location")
+    if isinstance(location, str) and location.startswith("builtin/"):
+        # Built-in profiles (Agents) ship with the app and are not the user's to sync.
+        return None, f"skipped built-in profile {name!r}"
+    directory = _directory_of(location, profiles_homes)
+    if directory is None:
+        return None, f"skipped profile {name!r}: its location is not a single profile id"
+    if not isinstance(flags, Mapping) or not all(
+        isinstance(key, str) and key != "" and isinstance(value, bool) for key, value in flags.items()
+    ):
+        # Not knowing what a profile borrows would mean collecting a file VS Code never reads.
+        return None, f"skipped profile {name!r}: useDefaultFlags is not a map of booleans"
+    return ProfileEntry.create(
+        name=name, directory=directory, borrowed=[key for key, value in flags.items() if value]
+    ), None
+
+
+def read_profiles(document: Any, profiles_homes: Collection[str] = ()) -> ProfileMap:
+    """The profiles a parsed `storage.json` lists, and what was skipped.
+
+    Only the `userDataProfiles` key is read; the file also holds window state and a telemetry machine id,
+    which are never looked at. A missing key means the user has no non-default profile (VS Code omits the
+    key). A document that is not an object, or a key that is not a list, is not a profile list at all and
+    comes back unreadable, so the caller keeps its records instead of reading "no profiles" as a deletion.
+
+    Two entries that fold to one name, or that share a directory, are **both** dropped and reported: which
+    one a record belongs to would otherwise depend on their order.
+    """
+    if not isinstance(document, Mapping):
+        return ProfileMap.unreadable("storage.json is not a JSON object")
+    listed = document.get(_PROFILES_KEY, [])
+    if not isinstance(listed, list):
+        return ProfileMap.unreadable(f"{_PROFILES_KEY} is not a list")
+    parsed = [_entry_of(item, profiles_homes) for item in listed]
+    problems = [reason for _, reason in parsed if reason is not None]
+    entries = [entry for entry, _ in parsed if entry is not None]
+    clashing_names = set(duplicate_profile_names(entry.name for entry in entries))
+    directories = [entry.directory for entry in entries]
+    clashing_directories = {directory for directory in directories if directories.count(directory) > 1}
+    kept = [
+        e for e in entries if profile_name_key(e.name) not in clashing_names and e.directory not in clashing_directories
+    ]
+    problems += [
+        f"skipped profile {e.name!r}: another profile has the same name or directory" for e in entries if e not in kept
+    ]
+    return ProfileMap.create(tuple(kept), tuple(problems))
+
+
 __all__ = [
     "EXCLUDED",
     "KEYBINDINGS",
@@ -191,4 +293,5 @@ __all__ = [
     "SNIPPETS_GLOBAL",
     "SNIPPETS_JSON",
     "VSCODE",
+    "read_profiles",
 ]

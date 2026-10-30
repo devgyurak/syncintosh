@@ -516,6 +516,24 @@ def test_a_preset_refuses_to_track_its_profile_index() -> None:
         Preset.create(name="app", files=(owned,), profiles=spec)
 
 
+def test_a_preset_refuses_a_glob_that_covers_its_profile_index() -> None:
+    # given
+    spec = ProfileSpec.create(
+        default_root="App/User",
+        home="App/User/profiles",
+        index="App/User/globalStorage/storage.json",
+        files=(ProfileFile.create(path="settings.json", resource="settings"),),
+    )
+    files = (
+        PresetFile.create(path="App/User/settings.json", format="jsonc"),
+        PresetFile.create(path="App/User/globalStorage/*.json", format="jsonc"),
+    )
+
+    # when & then
+    with pytest.raises(ConfigError):
+        Preset.create(name="app", files=files, profiles=spec)
+
+
 # --------------------------------------------------------------------------- NFC
 
 
