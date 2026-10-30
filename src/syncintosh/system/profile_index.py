@@ -70,7 +70,12 @@ class SystemProfileIndex:
                 return parsed
             kept, problems = [], list(parsed.problems)
             for entry in parsed.entries:
-                reason = self._unsafe(spec, entry.directory)
+                try:
+                    reason = self._unsafe(spec, entry.directory)
+                except OSError:
+                    # A directory that cannot even be inspected (no search permission on its parent) is not
+                    # one to write into. Only that profile is skipped, and the OS message is not repeated.
+                    reason = "its directory could not be checked"
                 if reason is None:
                     kept.append(entry)
                 else:

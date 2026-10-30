@@ -264,3 +264,20 @@ def test_an_old_uri_pointing_at_another_root_is_skipped_through_the_reader(tmp_p
 
     # then
     assert (profiles.readable, profiles.entries, len(profiles.problems)) == (True, (), 1)
+
+
+def test_an_unreadable_profiles_directory_gives_an_unreadable_map_not_an_exception(tmp_path: Path) -> None:
+    # given — a listed profile whose parent directory cannot be searched
+    _write_index(tmp_path, json.dumps({"userDataProfiles": [{"name": "Work", "location": "abc"}]}))
+    home = tmp_path / SPEC.home
+    home.mkdir(parents=True)
+    home.chmod(0)
+
+    # when
+    try:
+        profiles = _index(tmp_path).read(SPEC)
+    finally:
+        home.chmod(0o755)
+
+    # then — the port promises not to raise; the profile is not resolved and nothing is said about the file
+    assert (profiles.entries, [p for p in profiles.problems if "abc" in p]) == ((), [])

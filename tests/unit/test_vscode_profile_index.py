@@ -236,3 +236,11 @@ def test_an_empty_flag_key_skips_only_that_profile(flags: dict) -> None:
 
     # then — the rest of the list survives, and the skipped one is reported once without its content
     assert (entries, len(problems), readable) == ([("Home", "def")], 1, True)
+
+
+def test_a_file_uri_with_an_authority_is_skipped() -> None:
+    # when — a `file` URI names a local path; one that names another host does not
+    result = _read_uri({"scheme": "file", "authority": "otherhost", "path": f"{MINE}/1a2b3c"}, MINE)
+
+    # then
+    assert result == ([], 1)
