@@ -55,8 +55,9 @@ class Carry:
     not `HEAD`. Change detection compares the live projection with that baseline (``core/ledger.py``),
     so a carried key projects to the baseline's own value and a local change to it never registers;
     projecting with `HEAD` would make a key that only the *remote* moved look locally edited, and
-    send an unchanged file through a stale-base merge on every cycle. `source` is `None` when the
-    machine holds no such object, and the carried keys are then left out.
+    send an unchanged file through a stale-base merge on every cycle. `source` is `None` when no object is
+    available, and the carried keys are then left out. When this machine has no ledger object, services pass the
+    object at `HEAD` instead, so a file the repo already holds keeps its value (`services.sync._baseline_reader`).
     """
 
     paths: frozenset[KeyPath] = frozenset()
@@ -222,8 +223,10 @@ def restore_text(
     if not paths:
         return repo_text
     restored = graft(_parse(adapter, repo_text, policy), _parse(adapter, live_text, policy), paths)
-    # What this machine keeps comes back as its file wrote it, for the same reason the carry above is copied.
-    verbatim = Verbatim(live_text, paths) if paths else None
+    # A carried key comes back as this machine's file wrote it, for the same reason the carry above is copied.
+    # Only those: a noise or excluded key is re-attached the ordinary way, as it always was (layout of a
+    # re-attached key is issue #27).
+    verbatim = Verbatim(live_text, carried.paths) if carried.paths else None
     rendered = _render(adapter, restored, repo_text, policy, verbatim)
     if project_text(adapter, rendered, policy, Carry(carried.paths, repo_text)) != repo_text:
         raise ProjectionError(
