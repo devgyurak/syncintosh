@@ -1738,6 +1738,9 @@ class _ValidatedCatalog:
     def preset_for(self, path: str):
         return self._base.preset_for(path)
 
+    def ignore_list_files(self):
+        return self._base.ignore_list_files()
+
 
 def test_a_key_pick_that_fails_the_syntax_check_is_settled_at_file_level(tmp_path, memory_key_store) -> None:
     # given — A sets a to "R"; B sets a to "L" and b to "B". Each side is valid; a key-level pick of "R"

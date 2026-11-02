@@ -42,7 +42,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from syncintosh.core.errors import ContentParseError, ProjectionError
-from syncintosh.core.ports import ContentAdapter
+from syncintosh.core.ports import ContentAdapter, Verbatim
 from syncintosh.core.presets import PresetFile
 from syncintosh.core.tree import EmptyObject, KeyPath, Node, Tree
 
@@ -195,7 +195,10 @@ def project_text(adapter: ContentAdapter, text: str, policy: PresetFile, carried
     projected = strip(carry(strip(tree, paths), carried.paths, source), paths)
     if projected == tree:
         return text
-    rendered = _render(adapter, projected, text, policy)
+    # The carried values are copied as the source wrote them, not re-serialized: `1e3` must stay `1e3` for the
+    # next cycle's projection of the same source to be this very text.
+    verbatim = None if carried.source is None or not carried.paths else Verbatim(carried.source, carried.paths)
+    rendered = _render(adapter, projected, text, policy, verbatim)
     if _parse(adapter, rendered, policy) != projected:
         raise ProjectionError(f"{policy.path}: stripping the preset's keys did not render cleanly")
     return rendered
@@ -219,7 +222,9 @@ def restore_text(
     if not paths:
         return repo_text
     restored = graft(_parse(adapter, repo_text, policy), _parse(adapter, live_text, policy), paths)
-    rendered = _render(adapter, restored, repo_text, policy)
+    # What this machine keeps comes back as its file wrote it, for the same reason the carry above is copied.
+    verbatim = Verbatim(live_text, paths) if paths else None
+    rendered = _render(adapter, restored, repo_text, policy, verbatim)
     if project_text(adapter, rendered, policy, Carry(carried.paths, repo_text)) != repo_text:
         raise ProjectionError(
             f"{policy.path}: re-attaching this machine's local keys did not round-trip; refusing to write"
@@ -234,9 +239,11 @@ def _parse(adapter: ContentAdapter, text: str, policy: PresetFile) -> Tree:
         raise ProjectionError(f"{policy.path}: not valid {policy.format} ({exc})") from exc
 
 
-def _render(adapter: ContentAdapter, tree: Tree, template: str, policy: PresetFile) -> str:
+def _render(
+    adapter: ContentAdapter, tree: Tree, template: str, policy: PresetFile, verbatim: Verbatim | None = None
+) -> str:
     try:
-        return adapter.render(tree, template, policy.array_rules)
+        return adapter.render(tree, template, policy.array_rules, verbatim)
     except ContentParseError as exc:
         raise ProjectionError(f"{policy.path}: cannot rewrite the file safely ({exc})") from exc
 

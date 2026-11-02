@@ -538,3 +538,32 @@ def test_a_url_in_a_side_is_not_new_even_when_the_proposal_escapes_it() -> None:
 
     # then
     assert found == ()
+
+
+@pytest.mark.parametrize(
+    ("path", "fmt"),
+    [("snippets/*.json", "jsonc"), ("run.zsh", "text")],
+)
+def test_an_ignore_list_needs_one_exact_path_in_a_keyed_format(path, fmt) -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetFile.create(path=path, format=fmt, ignore_list=True)
+
+
+def test_only_the_vscode_settings_file_holds_and_obeys_an_ignore_list() -> None:
+    # when
+    files = BuiltinCatalog.default().ignore_list_files()
+
+    # then
+    assert [file.path for file in files] == [vscode.SETTINGS]
+
+
+def test_a_profiles_settings_file_takes_the_defaults_ignore_list_policy() -> None:
+    # given
+    logical = vscode.PROFILES.logical_path("Work", "settings.json")
+
+    # when
+    policy = BuiltinCatalog.default().policy_for(logical)
+
+    # then — the policy is the default file's, so it names the file the list is read from
+    assert (policy is not None and policy.ignore_list, policy is not None and policy.path) == (True, vscode.SETTINGS)

@@ -29,8 +29,8 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
@@ -41,10 +41,12 @@ from syncintosh.core.errors import (
     ContentDigestMismatch,
     ContentParseError,
     GitError,
+    IgnoreListMalformed,
     PendingConflict,
     ProjectionError,
     SyntaxInvalid,
 )
+from syncintosh.core.ignore import NO_IGNORES, IgnoreSpec
 from syncintosh.core.keyed_array import ArrayRule, group_leaves
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
@@ -76,7 +78,7 @@ from syncintosh.core.ports import (
     remote_ref,
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
-from syncintosh.core.projection import project_text, restore_text
+from syncintosh.core.projection import Carry, project_text, restore_text
 from syncintosh.core.record_merge import (
     PathCollision,
     RecordConflict,
@@ -142,7 +144,7 @@ _DEFER: _Decision = "defer"
 
 # Why a file a preset owns could not be reduced to its synced form. A fixed code, never the
 # adapter's message: that message can name a key the file holds (``AGENTS.md`` §4).
-ProjectionFailure = Literal["format-mismatch", "no-adapter", "not-utf-8", "unrenderable"]
+ProjectionFailure = Literal["format-mismatch", "no-adapter", "not-utf-8", "unrenderable", "ignore-list"]
 
 # The sentence a user sees for each code. Fixed strings, so a report can never carry file content.
 _PROJECTION_FAILURE: Mapping[ProjectionFailure, str] = MappingProxyType(
@@ -151,6 +153,7 @@ _PROJECTION_FAILURE: Mapping[ProjectionFailure, str] = MappingProxyType(
         "no-adapter": "this build has no adapter for the file's format",
         "not-utf-8": "the file is not UTF-8",
         "unrenderable": "the file could not be reduced to its synced form",
+        "ignore-list": "the settings ignore list could not be read, so no file that obeys it is synced this run",
     }
 )
 
@@ -200,10 +203,37 @@ class _Presets:
     validators: Mapping[ValidatorName, SyntaxValidator]
     # The keyed tag a conflict names a `when` clause by; `None` shows it as hidden (`core/tree.py`).
     when_tag: WhenTag | None = None
+    # The user's ignore list, read once for the cycle by `_read_ignores`, by the path of the file that holds it:
+    # the spec, or the fixed reason the list could not be used. Empty until a cycle entry point fills it, so
+    # building a `_Presets` reads nothing (``AGENTS.md`` §2.6).
+    ignores: Mapping[str, IgnoreSpec | str] = field(default_factory=lambda: MappingProxyType({}))
 
     def policy_for(self, path: str) -> PresetFile | None:
         """The strip/validate policy for `path`, or `None` when no preset owns it."""
         return self.catalog.policy_for(path)
+
+    def carried(self, policy: PresetFile) -> frozenset[KeyPath]:
+        """The top-level keys this machine carries for `policy`'s file: the ignore list minus the preset's strip."""
+        state = self.ignores.get(policy.path) if policy.ignore_list else None
+        return state.paths_for(policy) if isinstance(state, IgnoreSpec) else frozenset()
+
+    def ignore_failure(self, policy: PresetFile) -> str | None:
+        """Why the ignore list `policy`'s file obeys cannot be used this cycle, or `None` when it can."""
+        state = self.ignores.get(policy.path) if policy.ignore_list else None
+        return state if isinstance(state, str) else None
+
+    def projects(self, policy: PresetFile) -> bool:
+        """True when the file is projected at all: it strips a key, or carries one."""
+        return bool(policy.stripped) or bool(self.carried(policy))
+
+    def notes(self) -> tuple[str, ...]:
+        """Fixed sentences about the ignore list that are not failures, for the report."""
+        unmatched = sum(
+            len(state.unmatched_cancellations) for state in self.ignores.values() if isinstance(state, IgnoreSpec)
+        )
+        if not unmatched:
+            return ()
+        return (_IGNORE_CANCEL_NOTE.format(count=unmatched),)
 
     def adapter_for(self, fmt: FileFormat) -> ContentAdapter | None:
         """The structural adapter for `fmt`, or `None` when this build has none."""
@@ -253,6 +283,8 @@ class SyncReport:
     conflicts: tuple[PendingConflictRecord, ...] = ()
     skipped: tuple[str, ...] = ()
     unchanged: bool = False
+    # Fixed sentences about the cycle that are neither failures nor file content (the ignore list, today).
+    notes: tuple[str, ...] = ()
 
     @property
     def has_conflicts(self) -> bool:
@@ -410,6 +442,55 @@ def _commit(transport: GitTransport, branch: str, parents: tuple[str, ...], mess
     return commit
 
 
+# --------------------------------------------------------------------------- ignore list
+
+
+def _read_ignores(
+    catalog: PresetCatalog,
+    adapters: Mapping[FileFormat, ContentAdapter],
+    live: LiveFiles,
+    deny: DenyList,
+    home: str,
+) -> Mapping[str, IgnoreSpec | str]:
+    """The user's ignore list for each file that holds one, read from the live file into memory.
+
+    Once per cycle, and from the **default** profile's file only: a profile's own `settings.json` obeys the
+    list its default counterpart holds. Nothing is collected or copied, and a change to the list is seen
+    from the next cycle. A file that is not there, a symlink, or a denied path has no list (collection
+    would not follow it either); a file that is there but cannot be read as a list is a fixed reason
+    string, which `_project_file` turns into a refusal for every file that obeys it (``AGENTS.md`` §4).
+    """
+    found: dict[str, IgnoreSpec | str] = {}
+    for policy in catalog.ignore_list_files():
+        full = _join(home, policy.path)
+        if deny.is_denied(home, policy.path) or deny.escapes(home, policy.path) or live.is_symlink(full):
+            found[policy.path] = NO_IGNORES
+            continue
+        raw = live.read(full)
+        if raw is None:
+            found[policy.path] = NO_IGNORES
+            continue
+        found[policy.path] = _ignore_spec(adapters.get(policy.format), raw)
+    return MappingProxyType(found)
+
+
+def _ignore_spec(adapter: ContentAdapter | None, raw: bytes) -> IgnoreSpec | str:
+    """The spec a settings file's text yields, or the fixed reason it does not."""
+    text = _decode(raw)
+    if adapter is None or text is None:
+        return _IGNORE_LIST_UNREADABLE
+    try:
+        settings = adapter.parse(text).to_value()
+    except ContentParseError:
+        return _IGNORE_LIST_UNREADABLE
+    if not isinstance(settings, dict):
+        return NO_IGNORES
+    try:
+        return IgnoreSpec.create(settings)
+    except IgnoreListMalformed:
+        return _IGNORE_LIST_UNREADABLE
+
+
 # --------------------------------------------------------------------------- projection
 
 
@@ -432,8 +513,67 @@ class _Projected:
     failure: ProjectionFailure | None = None
 
 
-def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileFormat) -> _Projected:
-    """Reduce a live file to the bytes that would be sealed, or report why it cannot be."""
+# Where a carried key's value comes from, read only when the file has one: the object this projection is
+# measured against (`core.projection.Carry`). `None` from the reader means this machine holds no such object.
+_Source = Callable[[], bytes | None]
+
+
+# The reader a caller with no object to carry from passes: the carried keys are then left out of the seal.
+def _no_source() -> bytes | None:
+    return None
+
+
+def _object_reader(transport: GitTransport, cipher: Cipher, commit: str | None, record: ManifestRecord) -> _Source:
+    """A reader for `record`'s object at `commit`, verified against the record's digest when it is called."""
+
+    def read() -> bytes | None:
+        return _verified_object(transport, cipher, commit, record.file_id, record.sha256)
+
+    return read
+
+
+def _baseline_reader(
+    transport: GitTransport, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
+) -> Callable[[ManifestRecord], _Source]:
+    """Readers for the object each carried key's value is taken from.
+
+    The ledger's object when this machine has one: it is what change detection compares the live file with, so a
+    key carried from it never reads as a local edit (`core.projection.Carry`). Otherwise the object at `HEAD`, for
+    a file the repo holds and this machine has not accounted for yet; with neither, the keys are left out.
+    """
+
+    def of(record: ManifestRecord) -> _Source:
+        def read() -> bytes | None:
+            entry = ledger.get(record.file_id)
+            if entry is not None:
+                accounted = _verified_object(transport, cipher, entry.commit, record.file_id, entry.sha256)
+                if accounted is not None:
+                    return accounted
+            return _verified_object(transport, cipher, head_commit, record.file_id, record.sha256)
+
+        return read
+
+    return of
+
+
+_NO_SOURCE: _Source = _no_source
+
+
+def _project_file(
+    presets: _Presets,
+    raw: bytes | None,
+    path: str,
+    fmt: FileFormat,
+    *,
+    source: _Source = _NO_SOURCE,
+    carry: bool = True,
+) -> _Projected:
+    """Reduce a live file to the bytes that would be sealed, or report why it cannot be.
+
+    `carry` False projects with the preset's static strip only: a merge result already holds the carried
+    values of the objects it merged (``docs/design/02-base-and-merge.md``), so carrying again would replace
+    them with an older object's. Otherwise `source` reads the object each carried key's value comes from.
+    """
     policy = presets.policy_for(path)
     if policy is None:
         return _Projected(raw=raw, view=raw)
@@ -443,7 +583,12 @@ def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileForm
         return _Projected(raw=None, view=None)
     if policy.format != fmt:
         return _Projected(raw=raw, view=None, failure="format-mismatch")
-    if not policy.stripped:
+    if carry and presets.ignore_failure(policy) is not None:
+        # The list that says which keys stay local cannot be read, so which keys to seal is unknown. Sealing
+        # the file anyway would put a key the user meant to keep local into the repo (``AGENTS.md`` §3.4).
+        return _Projected(raw=raw, view=None, failure="ignore-list")
+    carried = presets.carried(policy) if carry else frozenset()
+    if not policy.stripped and not carried:
         # Nothing to cut, so no adapter is needed and the projection is the file itself. This is
         # the `text` case: a shell script has no keys to strip.
         return _Projected(raw=raw, view=raw)
@@ -453,11 +598,14 @@ def _project_file(presets: _Presets, raw: bytes | None, path: str, fmt: FileForm
     text = _decode(raw)
     if text is None:
         return _Projected(raw=raw, view=None, failure="not-utf-8")
+    source_bytes = source() if carried else None
     try:
-        view = project_text(adapter, text, policy).encode("utf-8")
+        view = project_text(
+            adapter, text, policy, Carry(carried, None if source_bytes is None else _decode(source_bytes))
+        )
     except ProjectionError:
         return _Projected(raw=raw, view=None, failure="unrenderable")
-    return _Projected(raw=raw, view=view)
+    return _Projected(raw=raw, view=view.encode("utf-8"))
 
 
 # Why a record's path may not be written here, as fixed phrases: a report names the location and
@@ -467,8 +615,17 @@ _NOT_ALLOWED = "the path is not in this machine's config"
 _DENIED = "a dangerous path this machine never collects"
 _ESCAPES = "the target leaves this machine's home directory"
 _RESTORE_FAILED = "this machine's own keys could not be re-attached to the file"
+_IGNORE_LIST_UNREADABLE = _PROJECTION_FAILURE["ignore-list"]
 _SYNTAX_FAILED = "the file would not pass its syntax check"
 _PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
+
+# What the report says about an ignore list that is usable but has entries that do nothing. A count, never the
+# entries: they are file content (``AGENTS.md`` §4). VS Code uses a leading "-" to subtract from its own default
+# set, which this tool does not have; here it can only cancel what the user listed.
+_IGNORE_CANCEL_NOTE = (
+    '{count} entries of the settings ignore list start with "-" but cancel nothing you listed; '
+    "a setting the preset manages cannot be switched back on this way"
+)
 
 # Why a record was not written, as fixed phrases (§4). A file this machine has never had is one
 # thing, an app that is not installed is another, and the two call for different reactions — hence
@@ -557,21 +714,25 @@ def _project_merged(
     """
     if not allows_path(config, scope=scope, machine=machine, path=path) or not _strips(presets, path):
         return data
-    projected = _project_file(presets, data, path, fmt)
+    projected = _project_file(presets, data, path, fmt, carry=False)
     if projected.failure is not None or projected.view is None:
         raise ProjectionError(f"{path}: {_PROJECTION_FAILURE_MERGED}")
     return projected.view
 
 
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
-    """`repo_bytes` with the live file's local values re-attached, or `None` on failure."""
+    """`repo_bytes` with the live file's local values re-attached, or `None` on failure.
+
+    The live file's ignored keys come back along with the preset's noise: they are this machine's own, and
+    the object being applied is the carry source of the round-trip check (`core.projection.restore_text`).
+    """
     adapter = presets.adapter_for(policy.format)
     repo_text = _decode(repo_bytes)
     live_text = _decode(live_raw)
     if adapter is None or repo_text is None or live_text is None:
         return None
     try:
-        return restore_text(adapter, repo_text, live_text, policy).encode("utf-8")
+        return restore_text(adapter, repo_text, live_text, policy, Carry(presets.carried(policy))).encode("utf-8")
     except ProjectionError:
         return None
 
@@ -805,8 +966,13 @@ def _collect(
     source: FileIdSource,
     presets: _Presets,
     paths: LivePaths | None = None,
+    baseline: Callable[[ManifestRecord], _Source] = lambda record: _NO_SOURCE,
 ) -> _Collect:
-    """Steps 2–4: read the tracked paths, classify each, and stage what changed."""
+    """Steps 2–4: read the tracked paths, classify each, and stage what changed.
+
+    `baseline` reads, for a record, the object a carried key's value is taken from: the one the apply ledger
+    last accounted for (`core.projection.Carry`).
+    """
     paths = paths or LivePaths(catalog=presets.catalog)
     state = _Collect(records={} if head is None else dict(head.records))
     expanded = _expand_globs(config, head, live, deny, home)
@@ -843,11 +1009,17 @@ def _collect(
             # read as a first-sight prompt.
             state.symlinks.append(item.path)
             continue
-        projected = _project_file(presets, live.read(live_path), item.path, item.format)
+        record = _find_item_record(state.records, item)
+        projected = _project_file(
+            presets,
+            live.read(live_path),
+            item.path,
+            item.format,
+            source=_NO_SOURCE if record is None else baseline(record),
+        )
         if projected.failure is not None:
             state.unprojectable.append(_refusal(item.path, projected.failure))
             continue
-        record = _find_item_record(state.records, item)
         if record is not None and projected.raw is not None:
             # The raw bytes are the compare-and-swap reference apply checks. They are recorded
             # here, before the classification, so even a record that collects nothing (in-sync,
@@ -1882,7 +2054,12 @@ def _apply(
             # file never settled, rewritten on every cycle.
             unprojectable.append(_refusal(record.path, "format-mismatch"))
             continue
-        stripped_policy: PresetFile | None = policy if policy is not None and policy.stripped else None
+        if policy is not None and presets.ignore_failure(policy) is not None:
+            # Refused whether or not the file is there: a new file would be written with no live copy of the keys
+            # the list keeps local, and an existing one could not have them re-attached.
+            unprojectable.append(_refusal(record.path, "ignore-list"))
+            continue
+        stripped_policy: PresetFile | None = policy if policy is not None and presets.projects(policy) else None
         live_path = _join(home, located.path)
         if live.is_symlink(live_path):
             symlinks.append(record.path)
@@ -1897,17 +2074,26 @@ def _apply(
         # it was made from **and** the record names the format the policy uses: reusing it across a
         # format mismatch would apply a record on the strength of the file not having been touched,
         # while touching it would refuse it — the same input, two verdicts.
+        # A file with carried keys is never reused: collect measured it against the ledger's object, while apply
+        # measures it against the one it is about to write, and the two projections differ in the carried keys.
         reusable = (
             live_bytes is not None
             and live_bytes == collect_baseline
             and stripped_policy is not None
             and stripped_policy.format == record.format
+            and not presets.carried(stripped_policy)
         )
         cached = views.get(file_id) if reusable else None
         if cached is not None:
             live_view = cached
         elif live_bytes is not None and stripped_policy is not None:
-            view = _project_file(presets, live_bytes, record.path, record.format)
+            view = _project_file(
+                presets,
+                live_bytes,
+                record.path,
+                record.format,
+                source=_object_reader(transport, cipher, target_commit, record),
+            )
             if view.failure is not None:
                 unprojectable.append(_refusal(record.path, view.failure))
                 continue
@@ -2043,6 +2229,7 @@ def _settle_ledger(
     config: SyncConfig,
     home: str,
     paths: LivePaths | None = None,
+    target: Callable[[ManifestRecord], _Source] = lambda record: _NO_SOURCE,
 ) -> dict[str, LedgerEntry]:
     """Rewrite the ledger so the next cycle sees in-agreement files as a normal baseline.
 
@@ -2086,7 +2273,7 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = LedgerEntry(sha256=old.sha256, commit=old.commit, suppressed=True)
             continue
-        digest = _ledger_digest(presets, live_bytes, record.path, record.format)
+        digest = _ledger_digest(presets, live_bytes, record.path, record.format, target(record))
         if digest is not None and digest == record.sha256:
             settled[file_id] = LedgerEntry(sha256=digest, commit=target_commit, suppressed=False)
         else:
@@ -2096,9 +2283,13 @@ def _settle_ledger(
     return settled
 
 
-def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat) -> str | None:
-    """The digest the ledger should hold for a live file, or `None` when it cannot be projected."""
-    projected = _project_file(presets, live_bytes, path, fmt)
+def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat, source: _Source) -> str | None:
+    """The digest the ledger should hold for a live file, or `None` when it cannot be projected.
+
+    `source` reads the object the cycle ended on, because that is the object the next collect measures the file
+    against (``docs/design/02-base-and-merge.md``).
+    """
+    projected = _project_file(presets, live_bytes, path, fmt, source=source)
     if projected.failure is not None or projected.view is None:
         return None
     return _sha256(projected.view)
@@ -2151,7 +2342,9 @@ def sync(
             raise PendingConflict(
                 "a previous sync stopped with unresolved conflicts; resolve them before syncing again"
             )
-        # Read once per run: every live path of the cycle is resolved against this one view of the profiles.
+        # Read once per run: every live path of the cycle is resolved against this one view of the profiles, and
+        # every file that obeys the user's ignore list against this one reading of it.
+        presets = replace(presets, ignores=_read_ignores(catalog, adapters, live, deny, home))
         paths = open_live_paths(config, catalog, profiles)
         return _cycle(
             transport=transport,
@@ -2274,6 +2467,7 @@ def _cycle(
         source=source,
         presets=presets,
         paths=paths,
+        baseline=_baseline_reader(transport, cipher, ledger, head_commit),
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
@@ -2283,6 +2477,7 @@ def _cycle(
             skipped=tuple(collected.skipped),
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
+            notes=presets.notes(),
         )
     if collected.stale:
         found = _merge_stale(
@@ -2421,6 +2616,7 @@ def _cycle(
             config=config,
             home=home,
             paths=paths,
+            target=lambda record: _object_reader(transport, cipher, target_commit, record),
         )
     )
     return SyncReport(
@@ -2440,6 +2636,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
+        notes=presets.notes(),
     )
 
 

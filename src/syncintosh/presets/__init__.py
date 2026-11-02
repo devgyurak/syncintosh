@@ -159,5 +159,9 @@ class BuiltinCatalog:
         """
         return next((preset for preset in self.presets if self._owns(preset, path)), None)
 
+    def ignore_list_files(self) -> tuple[PresetFile, ...]:
+        """The built-in files that hold and obey the user's ignore list, in catalog order."""
+        return tuple(file for preset in self.presets for file in preset.files if file.ignore_list)
+
 
 __all__ = ["BUILTIN_PRESETS", "BuiltinCatalog"]
