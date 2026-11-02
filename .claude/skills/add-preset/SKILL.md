@@ -119,6 +119,16 @@ Only add a new adapter if no existing one fits; if you do, use the `add-adapter`
   is a different thing: that is a `scope = "machine"` item, which every machine carries but only
   its own writes (`docs/design/02-base-and-merge.md`).
 
+### 3-1. Policy history
+
+A new preset needs an entry in `POLICY_HISTORY` (`src/syncintosh/presets/history.py`): its first policy digest.
+So does **any later change** to a preset's files, formats, `noise`, `excluded`, `ignore_list`, or profile
+layout — append the new digest, never edit an earlier one. `tests/unit/test_policy_history.py` fails and prints
+the digest to append; append it to `tests/fixtures/policy_history_shipped.json` too (it pins what has shipped,
+so an edited entry fails). If you change what the **code** does with the preset's files (projection or carry
+semantics, a re-enabled strip) no field changes, so raise the preset's `policy_epoch` first, then append. It is what lets a build tell a repo written under an older policy (migrate) from one
+written under a policy it has never heard of (stop); see `docs/design/03-manifest.md`, "Policy stamp".
+
 ## 4. Tests
 
 Add to `tests/`:

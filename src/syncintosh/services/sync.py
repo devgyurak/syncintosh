@@ -54,6 +54,7 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
+from syncintosh.core.policy import stamp_policies
 from syncintosh.core.ports import (
     AppDetector,
     Cipher,
@@ -1759,6 +1760,7 @@ def _merge_diverged(
         schema=MANIFEST_SCHEMA,
         key_generation=max(local_manifest.key_generation, remote_manifest.key_generation),
         records=records,
+        policy=stamp_policies(records.values(), presets.catalog),
     )
     plan = plan_writes(local_manifest, merged_manifest)
     for file_id in plan.objects_to_write:
@@ -2549,7 +2551,12 @@ def _cycle(
             )
 
     generation = _current_generation(store, head_manifest)
-    new_manifest = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=generation, records=collected.records)
+    new_manifest = Manifest.create(
+        schema=MANIFEST_SCHEMA,
+        key_generation=generation,
+        records=collected.records,
+        policy=stamp_policies(collected.records.values(), presets.catalog),
+    )
     plan = plan_writes(head_manifest, new_manifest)
     # A live file that merely matches HEAD again (a crash between apply and the ledger save) must
     # not produce an empty commit; the write plan, not the collect list, decides (step 4–5).

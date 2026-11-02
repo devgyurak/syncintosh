@@ -64,6 +64,7 @@ from syncintosh.system.lock import FileLock
 from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
 from syncintosh.system.secret_scan import PatternSecretScanner
+from syncintosh.system.zsh_check import ZshSyntaxValidator
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -1741,6 +1742,9 @@ class _ValidatedCatalog:
     def ignore_list_files(self):
         return self._base.ignore_list_files()
 
+    def policy_history(self, name: str):
+        return self._base.policy_history(name)
+
 
 def test_a_key_pick_that_fails_the_syntax_check_is_settled_at_file_level(tmp_path, memory_key_store) -> None:
     # given — A sets a to "R"; B sets a to "L" and b to "B". Each side is valid; a key-level pick of "R"
@@ -2027,3 +2031,121 @@ def test_a_file_refused_by_a_proposal_run_is_applied_by_the_next_plain_sync(tmp_
     # keeps a restore point is the open gap tracked in the design note, and is not decided here.
     assert ZSH in report.applied
     assert _read_live(b) == b"ONE\ntwo\nthree\n"
+
+
+# ------------------------------------------------------------------ policy stamp (issue #24)
+
+
+def _published_manifest(machine: Machine, rev: str = "HEAD") -> Manifest:
+    blob = GitCLITransport(machine.repo).read_blob(rev, MANIFEST_PATH)
+    assert blob is not None
+    return loads_manifest(EnvelopeCipher(machine.store).open(blob, domain="manifest", file_id=""))
+
+
+def _stamped_run(machine: Machine) -> SyncReport:
+    """A sync under the shipped catalog, with the zsh syntax check the zsh preset names (absent, it fails closed)."""
+    return _run(machine, catalog=BuiltinCatalog.default(), validators={"zsh": ZshSyntaxValidator()})
+
+
+def _stamped_pair(tmp_path: Path, make_store) -> tuple[Machine, Machine]:
+    """Two machines in sync on `.zshrc`, collecting under the built-in catalog (so the zsh preset is stamped)."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a)
+    _write_file(a, ZSH, b"echo one\necho two\necho three\n")
+    _stamped_run(a)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    _stamped_run(b)
+    return a, b
+
+
+def test_a_collect_stamps_the_policy_of_each_built_in_preset_it_tracks(tmp_path, memory_key_store) -> None:
+    # given
+    a, _ = _stamped_pair(tmp_path, memory_key_store)
+
+    # when
+    manifest = _published_manifest(a)
+
+    # then — revision 1, the digest the shipped history ends at
+    history = BuiltinCatalog.default().policy_history("zsh")
+    assert history is not None
+    assert {name: (stamp.rev, stamp.digest) for name, stamp in manifest.policy.items()} == {"zsh": (1, history[-1])}
+    assert manifest.schema == MANIFEST_SCHEMA
+
+
+def test_a_collect_without_a_catalog_stamps_nothing(tmp_path, memory_key_store) -> None:
+    # given
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    manifest = _published_manifest(a)
+
+    # then
+    assert dict(manifest.policy) == {}
+
+
+def test_a_merge_stamps_the_merging_builds_policy(tmp_path, memory_key_store) -> None:
+    # given — both machines edit the same file in different regions, so the sync merges
+    a, b = _stamped_pair(tmp_path, memory_key_store)
+    _write_file(a, ZSH, b"echo ONE\necho two\necho three\n")
+    _write_file(b, ZSH, b"echo one\necho two\necho THREE\n")
+    _stamped_run(a)
+
+    # when
+    _stamped_run(b)
+
+    # then — a two-parent merge commit whose manifest carries the stamp
+    parents = _git(b.repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert len(parents) == 3
+    assert set(_published_manifest(b).policy) == {"zsh"}
+
+
+def test_a_key_rotation_keeps_the_stamps_it_found(tmp_path, memory_key_store) -> None:
+    # given
+    a, _ = _stamped_pair(tmp_path, memory_key_store)
+    before = dict(_published_manifest(a).policy)
+
+    # when
+    _rotate(a)
+
+    # then — the rotation re-seals bytes; it neither re-derives nor drops the policy
+    after = _published_manifest(a)
+    assert dict(after.policy) == before
+    assert after.key_generation == 2
+
+
+def test_a_schema_1_repo_is_rewritten_once_and_its_objects_are_left_alone(tmp_path, memory_key_store) -> None:
+    # given — a repo written before stamps existed: the manifest alone is replaced by its schema-1 form
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    manifest = _published_manifest(a)
+    legacy = (
+        b'{"key_generation":1,"records":{'
+        + b",".join(
+            b'"%s":%s'
+            % (
+                file_id.encode(),
+                json.dumps(
+                    {"path": r.path, "preset": r.preset, "scope": r.scope, "format": r.format, "sha256": r.sha256},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            for file_id, r in manifest.records.items()
+        )
+        + b'},"schema":1}'
+    )
+    cipher = EnvelopeCipher(a.store)
+    (a.repo / MANIFEST_PATH).write_bytes(cipher.seal(legacy, domain="manifest", file_id="", key_id=1))
+    _git(a.repo, "add", "-A")
+    _git(a.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "schema 1")
+    before = _git(a.repo, "rev-parse", "HEAD").strip()
+    objects_before = _git(a.repo, "ls-tree", "-r", "HEAD", "--", "objects")
+
+    # when
+    _stamped_run(a)
+
+    # then — one new commit, a schema-2 manifest, and the very same object blobs
+    assert _git(a.repo, "rev-list", "--count", f"{before}..HEAD").strip() == "1"
+    assert _published_manifest(a).schema == MANIFEST_SCHEMA
+    assert _git(a.repo, "ls-tree", "-r", "HEAD", "--", "objects") == objects_before

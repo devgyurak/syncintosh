@@ -22,10 +22,13 @@ from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
 from syncintosh.core.ids import is_file_id
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
+from syncintosh.core.policy import PolicyStamp
 from syncintosh.core.ports import FileIdSource
 
 # Bumping this is a migration, not a routine change (docs/design/03-manifest.md).
-MANIFEST_SCHEMA = 1
+# Schema 2 added the top-level `policy` (issue #24). Schema 1 is still read, as a schema-2 manifest
+# with no stamps (`manifest_codec`); it is never written again.
+MANIFEST_SCHEMA = 2
 
 # The adapter key for a record's content, serialized verbatim, so it is a `Literal` and never
 # an `Enum` (``AGENTS.md`` §4).
@@ -153,11 +156,17 @@ class ManifestRecord:
 
 @dataclass(frozen=True)
 class Manifest:
-    """The whole index: schema, the generation objects use, and the record map."""
+    """The whole index: schema, the generation objects use, the record map, and the policy stamps.
+
+    `policy` is the build-wide fingerprint of the preset policy the objects were made under, by preset
+    name (``core/policy.py``). It is independent of `key_generation`: a key rotation re-seals bytes, a
+    policy change decides which bytes there are.
+    """
 
     schema: int
     key_generation: int
     records: Mapping[str, ManifestRecord]
+    policy: Mapping[str, PolicyStamp]
 
     @classmethod
     def create(
@@ -166,6 +175,7 @@ class Manifest:
         schema: int,
         key_generation: int,
         records: Mapping[str, ManifestRecord],
+        policy: Mapping[str, PolicyStamp] | None = None,
     ) -> Manifest:
         """Validate the manifest-wide fields and freeze the record map."""
         if not _is_plain_int(schema):
@@ -177,7 +187,17 @@ class Manifest:
         mismatched = sorted(key for key, record in records.items() if key != record.file_id)
         if mismatched:
             raise ManifestCorrupt(f"record map keys do not match their file_id: {mismatched}")
-        return cls(schema=schema, key_generation=key_generation, records=MappingProxyType(dict(records)))
+        stamps = dict(policy or {})
+        for name, stamp in stamps.items():
+            validate_preset(name)
+            if not isinstance(stamp, PolicyStamp):
+                raise ManifestCorrupt(f"policy for {name!r} must be a PolicyStamp, got {type(stamp).__name__}")
+        return cls(
+            schema=schema,
+            key_generation=key_generation,
+            records=MappingProxyType(dict(records)),
+            policy=MappingProxyType(stamps),
+        )
 
     @classmethod
     def empty(cls, key_generation: int) -> Manifest:
@@ -232,7 +252,9 @@ def track(
         sha256=sha256,
     )
     records = {**manifest.records, record.file_id: record}
-    return Manifest.create(schema=manifest.schema, key_generation=manifest.key_generation, records=records)
+    return Manifest.create(
+        schema=manifest.schema, key_generation=manifest.key_generation, records=records, policy=manifest.policy
+    )
 
 
 def mint_file_id(records: Mapping[str, ManifestRecord], source: FileIdSource) -> str:

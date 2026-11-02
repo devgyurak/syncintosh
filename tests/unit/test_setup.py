@@ -31,6 +31,9 @@ class _StubCatalog:
     def ignore_list_files(self) -> tuple:
         return ()
 
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return None
+
     def preset_for(self, path: str) -> Preset | None:
         return next(
             (preset for preset in self._presets if any(file.path == path for file in preset.files)),

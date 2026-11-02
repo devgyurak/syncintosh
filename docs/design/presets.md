@@ -160,6 +160,21 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not
   under the `$HOME` user directory).
 
+## Changing a policy
+
+A preset's **policy** is what decides which bytes an object holds — its files, formats, `noise` and `excluded`
+keys, `ignore_list` flag, and profile layout. Each one is part of a digest the manifest stamps
+([03-manifest.md](03-manifest.md), "Policy stamp"), so changing any of them changes the digest. In the same
+commit, **append** the new digest to `POLICY_HISTORY[<preset>]` in `src/syncintosh/presets/history.py` **and** to
+`tests/fixtures/policy_history_shipped.json`. `tests/unit/test_policy_history.py` fails until you do, and prints
+the digest to append. Never edit or reorder an earlier entry: every repo stamped under it would read as
+`unknown`, and the fixture fails if you do.
+
+The digest sees only data. If you change what the **code** does with a preset's files — the semantics of
+`core/projection.py` or `core/ignore.py`, or a strip you switch back on — no field changes, so raise that
+preset's `policy_epoch` first, then append the resulting digest. Array rules, validators, and download
+metadata are not part of the policy and need no entry.
+
 ## How a row gets filled
 
 1. Inspect the real config — path, format, and the noise keys that would otherwise conflict on

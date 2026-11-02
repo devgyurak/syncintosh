@@ -444,7 +444,9 @@ def _rotate(
         generation_key = os.urandom(GENERATION_KEY_SIZE)
         store.put(new_id, generation_key)
         contents = _object_plaintexts(transport, cipher, head, manifest)
-        rotated = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=new_id, records=manifest.records)
+        rotated = Manifest.create(
+            schema=MANIFEST_SCHEMA, key_generation=new_id, records=manifest.records, policy=manifest.policy
+        )
         write_repo(
             files=files,
             cipher=cipher,

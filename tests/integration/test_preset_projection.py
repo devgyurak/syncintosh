@@ -92,6 +92,9 @@ class _UnawareCatalog:
     def ignore_list_files(self) -> tuple:
         return ()
 
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return None
+
 
 class _Catalog:
     """The built-in catalog plus one extra preset, so projection has a keyed format to run on."""
@@ -128,6 +131,9 @@ class _Catalog:
 
     def ignore_list_files(self) -> tuple:
         return self._base.ignore_list_files()
+
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return self._base.policy_history(name)
 
 
 KEYED_CATALOG = _Catalog(JSONC_PRESET)

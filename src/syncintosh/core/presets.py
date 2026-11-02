@@ -239,6 +239,11 @@ class PresetFile:
 class Preset:
     """A built-in app preset: its files and the metadata for detecting and pointing at the app.
 
+    `policy_epoch` is bumped by hand when the **code** that projects or carries this preset's files changes
+    meaning (`core/projection.py`, `core/ignore.py`, a re-enabled strip): the object bytes then differ although
+    no data field does, so the digest (`core/policy.py`) would not see it. It is part of the digest; bump it,
+    then append the new digest to `POLICY_HISTORY`.
+
     `download_url` is the vendor's official page. Only a URL hard-coded here is trusted
     (``AGENTS.md`` §3.6), so the field is restricted to `https`. A deferral report reads it
     directly (`services.sync`); a URL that arrived from anywhere else is screened through
@@ -251,6 +256,7 @@ class Preset:
     download_url: str | None
     cask: str | None
     profiles: ProfileSpec | None = None
+    policy_epoch: int = 1
 
     @classmethod
     def create(
@@ -262,8 +268,11 @@ class Preset:
         download_url: str | None = None,
         cask: str | None = None,
         profiles: ProfileSpec | None = None,
+        policy_epoch: int = 1,
     ) -> Preset:
         """Validate and freeze a preset; never assign fields afterwards."""
+        if not isinstance(policy_epoch, int) or isinstance(policy_epoch, bool) or policy_epoch < 1:
+            raise ConfigError(f"preset {name!r}: policy_epoch must be a positive integer, got {policy_epoch!r}")
         if not isinstance(name, str) or name == "":
             raise ConfigError(f"preset name must be a non-empty string, got {name!r}")
         if not files:
@@ -287,7 +296,15 @@ class Preset:
                 # The index is read in memory for the profile list only; it also holds window state and a
                 # telemetry machine id, so a preset must never be able to collect and seal it.
                 raise ConfigError(f"preset {name!r}: the profile index must not be a tracked file")
-        return cls(name=name, files=files, bundle_id=bundle_id, download_url=download_url, cask=cask, profiles=profiles)
+        return cls(
+            name=name,
+            files=files,
+            bundle_id=bundle_id,
+            download_url=download_url,
+            cask=cask,
+            profiles=profiles,
+            policy_epoch=policy_epoch,
+        )
 
 
 @dataclass(frozen=True)
@@ -413,6 +430,9 @@ class EmptyCatalog:
 
     def ignore_list_files(self) -> tuple[PresetFile, ...]:
         return ()
+
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return None
 
 
 # The single instance; a frozen dataclass with no fields, so identity and equality agree.

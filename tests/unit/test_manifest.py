@@ -14,6 +14,7 @@ import pytest
 
 from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, mint_file_id, track, tracking_key
+from syncintosh.core.policy import PolicyStamp
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
 ID2 = "00112233445566778899aabbccddeeff"
@@ -105,12 +106,12 @@ def test_record_create_rejects_a_bad_field(overrides) -> None:
 def test_manifest_create_rejects_a_newer_schema() -> None:
     # when & then — a schema bump is a migration, distinct from a corrupt manifest
     with pytest.raises(UnsupportedManifestSchema):
-        Manifest.create(schema=2, key_generation=1, records={})
+        Manifest.create(schema=MANIFEST_SCHEMA + 1, key_generation=1, records={})
 
 
 @pytest.mark.parametrize(
     ("schema", "generation"),
-    [(True, 1), ("1", 1), (1, 0), (1, -1), (1, True), (1, "1")],
+    [(True, 1), ("2", 1), (2, 0), (2, -1), (2, True), (2, "1")],
 )
 def test_manifest_create_rejects_bad_wide_fields(schema, generation) -> None:
     # when & then
@@ -135,6 +136,38 @@ def test_empty_manifest_has_no_records() -> None:
     assert manifest.schema == MANIFEST_SCHEMA
     assert manifest.key_generation == 3
     assert dict(manifest.records) == {}
+
+
+@pytest.mark.parametrize("policy", [{"": PolicyStamp(rev=1, digest="a" * 64)}, {"zsh": "stamp"}, {"zsh": (1, "a")}])
+def test_manifest_create_rejects_a_malformed_policy_entry(policy) -> None:
+    # when & then
+    with pytest.raises(ManifestCorrupt):
+        Manifest.create(schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy=policy)
+
+
+def test_manifest_policy_cannot_be_mutated() -> None:
+    # given
+    manifest = Manifest.create(
+        schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy={"zsh": PolicyStamp(rev=1, digest="a" * 64)}
+    )
+
+    # when & then
+    with pytest.raises(TypeError):
+        manifest.policy["zsh"] = PolicyStamp(rev=2, digest="b" * 64)  # ty: ignore[invalid-assignment]  # the point
+
+
+def test_track_keeps_the_policy_stamps() -> None:
+    # given
+    stamps = {"zsh": PolicyStamp(rev=1, digest="a" * 64)}
+    manifest = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy=stamps)
+
+    # when
+    tracked = track(
+        manifest, path=".zshrc", preset="zsh", scope="common", format="text", sha256=SHA1, source=StubIdSource(ID1)
+    )
+
+    # then
+    assert dict(tracked.policy) == stamps
 
 
 def test_manifest_records_cannot_be_mutated() -> None:
