@@ -536,6 +536,15 @@ def _object_reader(transport: GitTransport, cipher: Cipher, commit: str | None, 
     return read
 
 
+def _entry_reader(transport: GitTransport, cipher: Cipher, file_id: str, entry: LedgerEntry) -> _Source:
+    """A reader for the object a ledger entry accounts for, verified against the entry's digest."""
+
+    def read() -> bytes | None:
+        return _verified_object(transport, cipher, entry.commit, file_id, entry.sha256)
+
+    return read
+
+
 def _baseline_reader(
     transport: GitTransport, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
 ) -> Callable[[ManifestRecord], _Source]:
@@ -2103,12 +2112,33 @@ def _apply(
                 continue
             live_view = view.view
         changed = live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline
+        entry = ledger.get(file_id)
+        # With no collect baseline, `_decision` compares the view with the ledger digest. That digest is of the
+        # ledger's object, so a file with carried keys is measured against that object here, not the one about
+        # to be written: a remote change to a carried key would otherwise read as an edit and abort the write.
+        ledger_view = live_view
+        if (
+            collect_baseline is None
+            and entry is not None
+            and live_bytes is not None
+            and stripped_policy is not None
+            and presets.carried(stripped_policy)
+        ):
+            measured = _project_file(
+                presets,
+                live_bytes,
+                record.path,
+                record.format,
+                source=_entry_reader(transport, cipher, file_id, entry),
+            )
+            ledger_view = measured.view if measured.failure is None else live_view
         decision = _decision(
             record,
             live_bytes=live_bytes,
             live_view=live_view,
+            ledger_view=ledger_view,
             changed=changed,
-            entry=ledger.get(file_id),
+            entry=entry,
             baseline=collect_baseline,
             adopt=adopt,
         )
@@ -2192,6 +2222,7 @@ def _decision(
     *,
     live_bytes: bytes | None,
     live_view: bytes | None,
+    ledger_view: bytes | None,
     changed: bool,
     entry: LedgerEntry | None,
     baseline: bytes | None,
@@ -2218,7 +2249,7 @@ def _decision(
             return _SKIP
         return _WRITE if baseline is not None and live_bytes == baseline else _ABORT
     if baseline is None:
-        return _WRITE if _sha256(view) == entry.sha256 else _ABORT
+        return _WRITE if _sha256(live_bytes if ledger_view is None else ledger_view) == entry.sha256 else _ABORT
     return _WRITE if live_bytes == baseline else _ABORT
 
 
