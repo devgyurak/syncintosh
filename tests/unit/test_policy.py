@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from syncintosh.core.errors import ManifestCorrupt
+from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import ManifestRecord
 from syncintosh.core.policy import (
     MATCH,
@@ -130,6 +130,7 @@ def test_the_digest_is_64_lowercase_hex() -> None:
         _preset(_file(noise={("n",)})),
         _preset(_file(excluded={("e",)})),
         _preset(_file(ignore_list=True)),
+        Preset.create(name="x", files=(_file(),), policy_epoch=2),
     ],
 )
 def test_a_policy_change_changes_the_digest(changed) -> None:
@@ -286,3 +287,18 @@ def test_the_built_in_catalog_reports_a_history_only_for_its_own_presets() -> No
     # then
     assert histories[0] is not None
     assert histories[1] is None
+
+
+@pytest.mark.parametrize("epoch", [0, -1, True, 1.0, "1", None])
+def test_a_bad_policy_epoch_is_refused(epoch) -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        Preset.create(name="x", files=(_file(),), policy_epoch=epoch)
+
+
+def test_the_default_policy_epoch_is_1() -> None:
+    # when
+    epoch = _preset(_file()).policy_epoch
+
+    # then
+    assert epoch == 1

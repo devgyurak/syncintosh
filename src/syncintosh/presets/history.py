@@ -7,9 +7,15 @@ revision (this tuple's length) and digest the writing build used, so a build can
 under an older policy (migrate it) from one written under a policy it has never heard of (stop).
 
 **Append, never edit.** When a change to a preset alters its policy digest, add the new digest to the
-end of that preset's tuple in the same commit. Rewriting or reordering an entry makes every repo
-stamped under it read as `unknown`. `tests/unit/test_policy_history.py` fails until the last entry
-equals the current digest, and prints the digest to append.
+end of that preset's tuple in the same commit, and to `tests/fixtures/policy_history_shipped.json`.
+
+The digest sees only data. If you change what the **code** does with a preset's files (the projection, the
+ignore carry, a strip you switch back on), no field changes, so raise that preset's `policy_epoch` first: it
+is part of the digest, and the bump is what produces the new entry to append.
+
+Rewriting or reordering an entry makes every repo stamped under it read as `unknown`.
+`tests/unit/test_policy_history.py` fails until the last entry equals the current digest, and prints the
+digest to append; it also fails if an entry the fixture pins has changed.
 """
 
 from __future__ import annotations
@@ -19,8 +25,8 @@ from types import MappingProxyType
 
 POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "zsh": ("4f00dfa1260df3fb537e9f6c9bb939af1e8da29ae1490eeda0d7d44c7d9b9bd7",),
-        "vscode": ("a43b767bf032188078795433792d6c9f39edee4d3f69a3cdf5ab3d7308d3fc08",),
-        "docker": ("ea4e9891e8dbdbd6b6965319993f69e0e12f7931950a23644a1b6305ec63989c",),
+        "zsh": ("1914db8679f8fc449a7c8b0eeb43a67e8ab6c38bd43d44a21acf052bb6bbcec8",),
+        "vscode": ("df4dcae1e246dcbc04cf2bdde13dbb167dacd746d8f26729a040ad497356b602",),
+        "docker": ("c7551c6c38d3edcecfa3c038eba3a915b9688423d6cc77474a0628f132b55983",),
     }
 )

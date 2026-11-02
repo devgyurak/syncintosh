@@ -102,12 +102,17 @@ def _profiles_description(profiles: ProfileSpec | None) -> dict[str, Any] | None
 def policy_digest(preset: Preset) -> str:
     """The sha256 of everything about `preset` that decides which bytes an object holds.
 
+    Data fields are hashed directly. What the **code** does with them cannot be, so `policy_epoch` stands in
+    for it: a change to the projection or carry rules that alters object bytes without touching a field is
+    declared by raising the epoch.
+
     The description is canonical JSON, so the order files were listed in and the order keys were
     written in cannot change the digest. The ignore list (`core/ignore.py`) is deliberately absent:
     the user chooses it and it changes between cycles, so it is a carry, not a build property; only
     the `ignore_list` flag of the file that holds it is part of the policy.
     """
     description = {
+        "epoch": preset.policy_epoch,
         "files": sorted((_file_description(file) for file in preset.files), key=lambda entry: entry["path"]),
         "profiles": _profiles_description(preset.profiles),
     }
@@ -118,8 +123,8 @@ def classify_policy(history: tuple[str, ...] | None, stamp: PolicyStamp | None) 
     """How this build's policy for one preset compares with the one `stamp` names.
 
     `history` is the local build's digests for the preset, oldest first, or `None` when the build has
-    no such preset. A missing `stamp` is revision 1: every repo written before stamps existed was made
-    under the first policy, which is what lets a schema-1 repo be read without a migration step.
+    no such preset. A missing `stamp` is revision 1, the policy as of #24: no release predates it, so a
+    schema-1 repo is taken to match it, which is what lets one be read without a migration step.
     """
     if history is None or len(history) == 0:
         return NEWER
