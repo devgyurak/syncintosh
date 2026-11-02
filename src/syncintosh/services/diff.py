@@ -40,6 +40,7 @@ from syncintosh.services.sync import (
     _decode,
     _Presets,
     _project_file,
+    _read_ignores,
     _read_manifest,
     _real_path_refusal,
     _record_refusal,
@@ -99,7 +100,12 @@ def diff_repo(
     profiles: ProfileIndex | None = None,
 ) -> DiffReport:
     """Compare every tracked path's live file with the repo side. Never writes anything."""
-    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators)
+    presets = _Presets(
+        catalog=catalog,
+        adapters=adapters,
+        validators=validators,
+        ignores=_read_ignores(catalog, adapters, live, deny, home),
+    )
     paths = open_live_paths(config, catalog, profiles)
     head = transport.head()
     remote = transport.resolve(remote_ref(branch))
@@ -150,7 +156,8 @@ def _diff_record(
     raw = live.read(str(Path(home) / located.path))
     if raw is None:
         return FileDiff(record.path, "missing-here", repo=repo_text)
-    projected = _project_file(presets, raw, record.path, record.format)
+    # The repo side is the carry source, so an ignored key never shows as a difference.
+    projected = _project_file(presets, raw, record.path, record.format, source=lambda: repo_bytes)
     view = projected.view
     if view is not None and _sha256(view) == record.sha256:
         return FileDiff(record.path, "in-sync")

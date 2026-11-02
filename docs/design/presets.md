@@ -135,8 +135,27 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   - To add profiles to an existing config by hand, add
     `"profiles": [{"preset": "vscode", "scope": "common", "names": "*"}]` to `config.json`. A `preset add`
     command is tracked in #68.
-- **Out of scope:** `settingsSync.ignoredSettings` (issue #23 extends the single policy lookup a profile file
-  goes through, `BuiltinCatalog.policy_for`), `tasks.json`, `mcp.json` (its server `env` and `headers`
+- **The user's ignore list** (`settingsSync.ignoredSettings`, issue #23). VS Code does not delete an ignored key
+  from what it uploads; it leaves the remote's value in place, and the setting is `disallowSyncIgnore`, so the
+  list itself **syncs**. syncintosh does the same: an ignored key is **carried**, not stripped
+  ([02-base-and-merge.md](02-base-and-merge.md), "Carrying an ignored key").
+  - Read once per cycle, in memory, from the default profile's `settings.json`; the default file and every
+    profile's `settings.json` obey it. A change to the list is seen from the next cycle.
+  - Both `settingsSync.ignoredSettings` and the legacy `sync.ignoredSettings` are read. Matching is by top-level
+    key (`"[python]"` is one key). `settingsSync.ignoredSettings` and `settingsSync.ignoredExtensions` cannot be
+    ignored.
+  - Precedence: **excluded > preset noise > the user's list.** The keys actually carried are the user's list
+    minus what the preset strips, so listing `http.proxyAuthorization` seals nothing more and nothing less.
+  - `-x` cancels only an `x` the user listed. It does not switch a noise key back on or release an excluded one
+    (VS Code uses `-x` to subtract from its own built-in default set, which this tool does not have); such an
+    entry is counted in a note on the report. Re-enabling a noise key this way is a follow-up.
+  - A default `settings.json` that is a symbolic link, a denied path, or outside `$HOME` has a list that cannot be
+    trusted, so a profile's `settings.json` is **not synced** either (the list is unknown, and an empty one would seal
+    the keys the user meant to keep local). A default file that is simply absent has no list, as in VS Code.
+  - A list that is not an array of strings (or a `settings.json` that cannot be read to find it) **fails closed**:
+    the cycle refuses to collect or apply every file that obeys it and reports a fixed message that does not quote
+    the file.
+- **Out of scope:** `tasks.json`, `mcp.json` (its server `env` and `headers`
   need their own exclusion pass before it can be collected safely), `extensions.json`, `prompts/`, Insiders,
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not
   under the `$HOME` user directory).

@@ -1031,6 +1031,9 @@ def _render(report: SyncReport, config) -> None:
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
             _say(f"{label} ({refusal.reason}): {_shown(refusal.path)}", err=True)
+    for note in report.notes:
+        # A fixed sentence from the service; this only prints it.
+        _say(f"note: {note}")
     if report.unchanged:
         _say("nothing changed")
     elif report.published_commit:

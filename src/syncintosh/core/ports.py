@@ -159,6 +159,13 @@ class PresetCatalog(Protocol):
         """
         ...
 
+    def ignore_list_files(self) -> tuple[PresetFile, ...]:
+        """The files that hold, and obey, the user's own list of settings to keep local (`core/ignore.py`).
+
+        Asked once per cycle so the list is read up front rather than discovered file by file.
+        """
+        ...
+
 
 @runtime_checkable
 class SyntaxValidator(Protocol):

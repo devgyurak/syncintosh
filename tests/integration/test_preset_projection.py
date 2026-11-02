@@ -89,6 +89,9 @@ class _UnawareCatalog:
     def preset_for(self, path: str) -> Preset | None:
         return None
 
+    def ignore_list_files(self) -> tuple:
+        return ()
+
 
 class _Catalog:
     """The built-in catalog plus one extra preset, so projection has a keyed format to run on."""
@@ -122,6 +125,9 @@ class _Catalog:
         if self._extra is not None and self._extra_file(path) is not None:
             return self._extra
         return self._base.preset_for(path)
+
+    def ignore_list_files(self) -> tuple:
+        return self._base.ignore_list_files()
 
 
 KEYED_CATALOG = _Catalog(JSONC_PRESET)
@@ -602,8 +608,8 @@ def test_a_cycle_projects_a_file_once(tmp_path, memory_key_store) -> None:
     # then — two for collect (the projection, and the re-parse that verifies it) and two for
     # settle, which projects the bytes it actually read so the ledger records what it saw. Apply
     # reuses collect's projection because the raw bytes are unchanged, saving the two it used to
-    # spend; without that reuse this would be 6.
-    assert counting.parses == 4
+    # spend; without that reuse this would be 6. One more reads the file's own ignore list, once per cycle.
+    assert counting.parses == 5
 
 
 def test_a_dangerous_path_is_reported_as_dangerous_not_as_unowned(tmp_path, memory_key_store) -> None:

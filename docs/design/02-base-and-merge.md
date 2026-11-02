@@ -146,6 +146,36 @@ neither the original nor the projection. A path the local catalog cannot project
 its format, a file that is not UTF-8, a value that cannot be rewritten without dropping a comment
 — is **refused and reported**, never sealed raw ([03-manifest.md](03-manifest.md)).
 
+### Carrying an ignored key
+
+A key the **user** chose to keep local (VS Code's `settingsSync.ignoredSettings`) is not noise and is not
+stripped. Stripping it would make the 3-way merge read it as *deleted* on this side and erase the value from
+every other Mac. It is **carried**: its value in the sealed object comes from an object the repo already holds,
+and `apply` puts this machine's own value back.
+
+| Step | What it produces |
+|---|---|
+| `project_text(text, carry)` = `strip(carry(strip(parse(text)), source))` | the bytes sealed: the live file, with each carried key's value taken from `source` |
+| `restore_text(repo, live, carry)` | the bytes `apply` writes: the repo object with this machine's value for every carried key (absent stays absent), verified by `project_text(restored, source=repo) == repo` |
+
+- **The source is the apply ledger's object, not `HEAD`.** Change detection compares the live projection with the
+  ledger, so a key carried from it never reads as a local edit, and a key that only the remote moved reads as
+  `pending-apply` rather than as a change here. Carrying from `HEAD` would make the same remote-only change look
+  like a local one and send an unchanged file through a stale-base merge every cycle. Where this machine has no
+  ledger object, the object at `HEAD` is used; where there is none at all (a file not yet published), the carried
+  keys are left out of the seal.
+- **Strip, carry, strip.** The source is a stored object and may predate an exclusion, so the static strip runs
+  again after the carry; an excluded key inside a carried value is never sealed.
+- **The round trip is checked against the object being applied.** That object is the next cycle's ledger object,
+  so it is the source the next projection will use.
+- **A merge result is not carried again.** `_project_merged` applies the static strip only: the objects being
+  merged already hold the carried values, and carrying again would put an older object's over them.
+- **The text is copied, not re-written.** A carried value is taken from the source document span for span
+  (`Verbatim`): `1e3` stays `1e3`, and a commented `"[python]": {...}` keeps its comments. Otherwise the byte-exact
+  round trip above could not hold.
+- **The list is read from the live file at the start of the cycle**, so a list that a merge changes takes effect on
+  the next cycle: the key is still carried while that cycle applies, and synced from the one after.
+
 ### What a render is allowed to change
 
 The renderer edits the original text at the spans it must, so the layout of everything it did not

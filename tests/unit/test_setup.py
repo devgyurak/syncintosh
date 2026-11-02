@@ -28,6 +28,9 @@ class _StubCatalog:
     def knows(self, preset: str, path: str) -> bool:
         return True
 
+    def ignore_list_files(self) -> tuple:
+        return ()
+
     def preset_for(self, path: str) -> Preset | None:
         return next(
             (preset for preset in self._presets if any(file.path == path for file in preset.files)),

@@ -26,7 +26,7 @@ not honour.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from syncintosh.core.errors import IgnoreListMalformed
@@ -51,8 +51,9 @@ class IgnoreSpec:
     to cancel, kept so a report can say that one did nothing (``docs/design/presets.md``).
     """
 
-    keys: frozenset[str] = frozenset()
-    unmatched_cancellations: tuple[str, ...] = ()
+    # Setting names come from the user's file, so a repr never shows them (``AGENTS.md`` §4).
+    keys: frozenset[str] = field(default=frozenset(), repr=False)
+    unmatched_cancellations: tuple[str, ...] = field(default=(), repr=False)
 
     @classmethod
     def create(cls, settings: Mapping[str, object]) -> IgnoreSpec:

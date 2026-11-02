@@ -149,6 +149,10 @@ class PresetFile:
     `arrays` names the arrays inside the file that merge element by element instead of as one value (see
     `core/keyed_array.py`). It is part of the local catalog only: the policy is read by path from the
     preset that owns the file, never from a synced copy.
+
+    `ignore_list` marks the file that holds the user's own list of settings to keep to themselves
+    (VS Code's ``settingsSync.ignoredSettings``) and obeys it (`core/ignore.py`). The list is read from
+    this exact path, and the files a profile takes this policy for obey the same list.
     """
 
     path: str
@@ -158,6 +162,7 @@ class PresetFile:
     validator: ValidatorName | None
     glob: PresetGlob | None
     arrays: tuple[tuple[KeyPath, ArrayRule], ...] = ()
+    ignore_list: bool = False
 
     @property
     def array_rules(self) -> dict[KeyPath, ArrayRule]:
@@ -174,6 +179,7 @@ class PresetFile:
         excluded: Iterable[KeyPath] = (),
         validator: ValidatorName | None = None,
         array_identity: Mapping[KeyPath, ArrayRule] | None = None,
+        ignore_list: bool = False,
     ) -> PresetFile:
         """Validate and freeze one preset file; never assign fields afterwards."""
         try:
@@ -194,6 +200,10 @@ class PresetFile:
             raise ConfigError(f"{validated_path}: a key path must name a key below the root")
         if (noise_paths or excluded_paths) and validated_format not in KEYED_FORMATS:
             raise ConfigError(f"{validated_path}: noise/excluded keys need a keyed format, not {validated_format!r}")
+        if ignore_list and (glob is not None or validated_format not in KEYED_FORMATS):
+            # The list is read from one file, as keys of a document: a pattern names no single file, and a
+            # format without keys has no list to read.
+            raise ConfigError(f"{validated_path}: an ignore list needs one exact path in a keyed format")
         repeated = noise_paths & excluded_paths
         if repeated:
             raise ConfigError(f"{validated_path}: a key cannot be both noise and excluded: {sorted(repeated)}")
@@ -205,6 +215,7 @@ class PresetFile:
             validator=validator,
             glob=glob,
             arrays=tuple(sorted((array_identity or {}).items(), key=lambda item: item[0])),
+            ignore_list=ignore_list,
         )
 
     @property
@@ -399,6 +410,9 @@ class EmptyCatalog:
 
     def preset_for(self, path: str) -> Preset | None:
         return None
+
+    def ignore_list_files(self) -> tuple[PresetFile, ...]:
+        return ()
 
 
 # The single instance; a frozen dataclass with no fields, so identity and equality agree.

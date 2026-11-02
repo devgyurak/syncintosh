@@ -217,6 +217,19 @@ def test_restore_still_re_attaches_a_noise_key_beside_a_carried_one() -> None:
     assert json.loads(restored) == {"a": 2, "k": "LIVE", "noise": 9}
 
 
+def test_restore_writes_a_carried_value_as_the_live_file_wrote_it_and_a_noise_value_the_ordinary_way() -> None:
+    # given — both keys hold a number the live file spells in a non-canonical way
+    policy = _policy(noise={("noise",)})
+    repo = '{\n  "a": 2\n}\n'
+    live = '{\n  "a": 1,\n  "k": 1e3,\n  "noise": 2.50\n}\n'
+
+    # when
+    restored = restore_text(ADAPTER, repo, live, policy, Carry(CARRY_K, repo))
+
+    # then — `1e3` is copied; `2.50` is re-attached by `json.dumps`, which is what develop did for noise
+    assert restored == '{\n  "a": 2,\n  "k": 1e3,\n  "noise": 2.5\n}\n'
+
+
 # --------------------------------------------------------------------------- the carry source
 
 

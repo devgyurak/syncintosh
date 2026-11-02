@@ -73,10 +73,30 @@ Sources (`microsoft/vscode` `main` `a48dd23e2ac5`): `src/vs/platform/userDataPro
 `state/node/stateService.ts`, and vscode-docs `configure/profiles.md`. Not inspected on a real machine (the
 approved exception, as above). `read_profiles` reads only that key; `storage.json` is never collected.
 
+## The user's ignore list (issue #23)
+
+`settingsSync.ignoredSettings` lists settings a machine keeps to itself. Source (`microsoft/vscode`
+`e24589266f28`, `userDataSync.ts` and `settingsMerge.ts`): the setting carries `disallowSyncIgnore`, so the
+list **itself syncs**; and VS Code does not delete an ignored key from what it uploads, it
+leaves the remote's value in place (`updateIgnoredSettings(content, remoteContent, ignored)`). This preset does the
+same, so an ignored key is *carried*, not stripped: stripping would make the 3-way merge read it as deleted and
+erase the other Macs' value (`core/ignore.py`, `core/projection.py`).
+
+- The list is read once per cycle, in memory, from the default profile's `settings.json`, and applies to that
+  file and to every profile's `settings.json`. A change to the list takes effect on the next cycle.
+- Matching is by top-level key (`"[python]"` is one key). The legacy name `sync.ignoredSettings` is read too;
+  `settingsSync.ignoredSettings` and `settingsSync.ignoredExtensions` cannot be ignored.
+- Precedence is excluded > this preset's noise > the user's list. `-x` cancels only an `x` the user listed; it
+  never revives a noise key or an excluded one, and such an entry is reported.
+- An ignored key's value in the sealed object comes from the object this machine last accounted for (the apply
+  ledger's); with none, from the object at `HEAD` (so a Mac joining a repo that already holds the file does not delete
+  the key for everyone); with neither, the key is left out of what is sealed.
+- A list that is not an array of strings makes the cycle refuse to collect or apply every file that obeys it,
+  with a fixed message that does not quote the file.
+
 ## What is out of scope
 
-- `settingsSync.ignoredSettings` is not consulted: reproducing VS Code's own ignore list would
-  mean reading a setting the sync never applies, and it is a follow-up (issue #6, V3).
+- Re-enabling a key this preset treats as noise with `-x` is not supported (a follow-up).
 - A snippet file is synced as ordinary JSONC with no strip list, and the secret scan is the backstop
   for a credential inlined in a `body`. `tasks.json`, `mcp.json`, `extensions.json`, `prompts/`, Insiders,
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under
@@ -168,7 +188,7 @@ EXCLUDED: frozenset[KeyPath] = frozenset({("http.proxyAuthorization",), ("http",
 VSCODE = Preset.create(
     name="vscode",
     files=(
-        PresetFile.create(path=SETTINGS, format="jsonc", noise=NOISE, excluded=EXCLUDED),
+        PresetFile.create(path=SETTINGS, format="jsonc", noise=NOISE, excluded=EXCLUDED, ignore_list=True),
         # No strip list, but the bindings merge one at a time. The array's order carries meaning (a later
         # entry overrides an earlier one), so the merge keeps local's order and places each addition after
         # its predecessor on its own side, and it never reorders across sides silently. Two bindings are

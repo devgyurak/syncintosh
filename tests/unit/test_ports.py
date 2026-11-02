@@ -468,6 +468,9 @@ def test_preset_catalog_port_is_structural() -> None:
         def preset_for(self, path: str) -> Preset | None:
             return None
 
+        def ignore_list_files(self) -> tuple:
+            return ()
+
     # when
     matches = isinstance(FakeCatalog(), PresetCatalog)
 
