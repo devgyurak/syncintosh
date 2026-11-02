@@ -88,8 +88,9 @@ erase the other Macs' value (`core/ignore.py`, `core/projection.py`).
   `settingsSync.ignoredSettings` and `settingsSync.ignoredExtensions` cannot be ignored.
 - Precedence is excluded > this preset's noise > the user's list. `-x` cancels only an `x` the user listed; it
   never revives a noise key or an excluded one, and such an entry is reported.
-- An ignored key's value in the sealed object comes from the object this machine last accounted for. With
-  none, the key is left out of what is sealed.
+- An ignored key's value in the sealed object comes from the object this machine last accounted for (the apply
+  ledger's); with none, from the object at `HEAD` (so a Mac joining a repo that already holds the file does not delete
+  the key for everyone); with neither, the key is left out of what is sealed.
 - A list that is not an array of strings makes the cycle refuse to collect or apply every file that obeys it,
   with a fixed message that does not quote the file.
 
