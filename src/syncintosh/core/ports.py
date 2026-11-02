@@ -9,6 +9,7 @@ client, or LLM (``AGENTS.md`` §2.2). Implementations live in `adapters`, `crypt
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.advice import Advice, MaskedText
@@ -71,6 +72,21 @@ class MergeDriver(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Verbatim:
+    """A document whose value at each of `paths` an adapter copies byte for byte.
+
+    The default render re-serializes a value it changes, which turns `1e3` into `1000` and drops a
+    comment inside the value. For a key the machine carries (``core/ignore.py``) that is not
+    acceptable: the sealed object must hold exactly the bytes the object it was carried from holds,
+    or the restore round-trip never agrees again. A path the document does not hold, or holds with a
+    different value than the tree, is rendered the ordinary way.
+    """
+
+    text: str = field(repr=False)
+    paths: frozenset[KeyPath]
+
+
 @runtime_checkable
 class ContentAdapter(Protocol):
     """Parses one format to a typed tree and renders a merged tree back to text.
@@ -89,8 +105,17 @@ class ContentAdapter(Protocol):
         """Parse `text` into a typed tree, or raise when the text is not this format."""
         ...
 
-    def render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None) -> str:
-        """Render `tree` into text, using `template` as the unchanged baseline to edit."""
+    def render(
+        self,
+        tree: Tree,
+        template: str,
+        arrays: Mapping[KeyPath, ArrayRule] | None = None,
+        verbatim: Verbatim | None = None,
+    ) -> str:
+        """Render `tree` into text, using `template` as the unchanged baseline to edit.
+
+        `verbatim` names values to copy from another document as they are written there.
+        """
         ...
 
 
