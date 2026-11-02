@@ -111,7 +111,7 @@ def policy_digest(preset: Preset) -> str:
         "files": sorted((_file_description(file) for file in preset.files), key=lambda entry: entry["path"]),
         "profiles": _profiles_description(preset.profiles),
     }
-    return hashlib.sha256(canonical_json_bytes(description)).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(description, "policy")).hexdigest()
 
 
 def classify_policy(history: tuple[str, ...] | None, stamp: PolicyStamp | None) -> PolicyVerdict:

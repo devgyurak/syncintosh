@@ -34,13 +34,13 @@ def _check_canonical(value: object, where: str) -> None:
     raise ManifestCorrupt(f"{where} holds a value that is not canonical JSON: {type(value).__name__}")
 
 
-def canonical_json_bytes(value: object) -> bytes:
+def canonical_json_bytes(value: object, where: str = "manifest") -> bytes:
     """Encode `value` as canonical JSON, UTF-8, with no trailing newline.
 
     Pure and total for the manifest's value domain; a float, a negative int, or any other
     non-canonical type is a `ManifestCorrupt` rather than a silent re-serialization.
     """
-    _check_canonical(value, "manifest")
+    _check_canonical(value, where)
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     try:
         return text.encode("utf-8")
