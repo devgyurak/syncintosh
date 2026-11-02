@@ -22,6 +22,13 @@ The two halves are inverses:
   projecting the result back to exactly the repo text. That check is what keeps the apply
   ledger's digest from drifting on every cycle.
 
+A key the *user* chose to ignore is different, and is **carried** instead of stripped. Stripping it
+would make the 3-way merge read it as deleted and erase the value from every other machine, so its
+value in the sealed object comes from `Carry.source` — an object the repo already holds — and the
+live value is put back on apply. The order is static strip → carry → static strip: the carried value
+is a stored object, and may itself hold a key the preset excludes, which must not be sealed again.
+With no source the carried key is left out of the sealed object (``docs/design/02-base-and-merge.md``).
+
 Because rendering re-uses the format adapter's minimal-edit path, comments, key order, trailing
 commas, and newline style survive on both halves (``AGENTS.md`` §2.5).
 
@@ -32,6 +39,7 @@ This module is pure: it takes text, a policy, and a `ContentAdapter` port, and r
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from syncintosh.core.errors import ContentParseError, ProjectionError
 from syncintosh.core.ports import ContentAdapter
@@ -39,9 +47,33 @@ from syncintosh.core.presets import PresetFile
 from syncintosh.core.tree import EmptyObject, KeyPath, Node, Tree
 
 
+@dataclass(frozen=True)
+class Carry:
+    """The keys whose value is carried from an object already in the repo, and that object's text.
+
+    The source is the **apply-ledger baseline object** — what this machine last accounted for — and
+    not `HEAD`. Change detection compares the live projection with that baseline (``core/ledger.py``),
+    so a carried key projects to the baseline's own value and a local change to it never registers;
+    projecting with `HEAD` would make a key that only the *remote* moved look locally edited, and
+    send an unchanged file through a stale-base merge on every cycle. `source` is `None` when the
+    machine holds no such object, and the carried keys are then left out.
+    """
+
+    paths: frozenset[KeyPath] = frozenset()
+    source: str | None = field(default=None, repr=False)
+
+
+NO_CARRY = Carry()
+
+
+def _root_of(path: KeyPath, roots: Iterable[KeyPath]) -> KeyPath | None:
+    """The first of `roots` that `path` is, or lies beneath."""
+    return next((root for root in roots if path[: len(root)] == root), None)
+
+
 def _under(path: KeyPath, roots: Iterable[KeyPath]) -> bool:
     """True when `path` is one of `roots` or lies strictly beneath it."""
-    return any(path[: len(root)] == root for root in roots)
+    return _root_of(path, roots) is not None
 
 
 def _consistent(entries: dict[KeyPath, Node]) -> dict[KeyPath, Node]:
@@ -76,6 +108,35 @@ def _document(entries: dict[KeyPath, Node]) -> Tree:
     if not kept:
         return Tree.create({(): EmptyObject()})
     return Tree.create(kept)
+
+
+def carry(tree: Tree, paths: frozenset[KeyPath], source: Tree | None) -> Tree:
+    """`tree` with the entries at or under `paths` taken from `source` instead.
+
+    Each carried key keeps the position of the one it replaces, so the renderer edits it in place;
+    a key `tree` does not have is appended. A `source` that lacks the key removes it.
+    """
+    if not paths:
+        return tree
+    replacement: dict[KeyPath, dict[KeyPath, Node]] = {root: {} for root in paths}
+    if source is not None:
+        for path, node in source.entries.items():
+            root = _root_of(path, paths)
+            if root is not None:
+                replacement[root][path] = node
+    entries: dict[KeyPath, Node] = {}
+    placed: set[KeyPath] = set()
+    for path, node in tree.entries.items():
+        root = _root_of(path, paths)
+        if root is None:
+            entries[path] = node
+        elif root not in placed:
+            placed.add(root)
+            entries.update(replacement[root])
+    for root, carried in replacement.items():
+        if root not in placed:
+            entries.update(carried)
+    return _document(entries)
 
 
 def strip(tree: Tree, paths: frozenset[KeyPath]) -> Tree:
@@ -116,18 +177,22 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPath]) -> Tree:
     return _document(entries)
 
 
-def project_text(adapter: ContentAdapter, text: str, policy: PresetFile) -> str:
+def project_text(adapter: ContentAdapter, text: str, policy: PresetFile, carried: Carry = NO_CARRY) -> str:
     """The text that is sealed for `policy`: `text` with noise and excluded keys removed.
 
     The rendered result is re-parsed and compared with the projected tree, because a renderer
     that half-applies an edit would otherwise seal a file that is neither the original nor the
     projection — and, for `excluded`, would seal a credential.
+
+    `carried` swaps the value of each user-ignored key for the one in its source object. Strip runs
+    again afterwards because that object may hold a key the preset excludes.
     """
     paths = policy.stripped
-    if not paths:
+    if not paths and not carried.paths:
         return text
     tree = _parse(adapter, text, policy)
-    projected = strip(tree, paths)
+    source = None if carried.source is None else _parse(adapter, carried.source, policy)
+    projected = strip(carry(strip(tree, paths), carried.paths, source), paths)
     if projected == tree:
         return text
     rendered = _render(adapter, projected, text, policy)
@@ -136,20 +201,26 @@ def project_text(adapter: ContentAdapter, text: str, policy: PresetFile) -> str:
     return rendered
 
 
-def restore_text(adapter: ContentAdapter, repo_text: str, live_text: str, policy: PresetFile) -> str:
+def restore_text(
+    adapter: ContentAdapter, repo_text: str, live_text: str, policy: PresetFile, carried: Carry = NO_CARRY
+) -> str:
     """`repo_text` with `live_text`'s local values at `policy`'s paths put back.
 
     `live_text` is the file as the user has it; `repo_text` is the published object. The result
     is rendered against `repo_text`, then projected again and required to reproduce `repo_text`
     **byte for byte** — the apply ledger's digest is the projection's, so a restore that fails
     this check would make every later cycle read the file as changed.
+
+    A carried key takes the live file's value too, absent or not: the key is the machine's own.
+    The check projects with **`repo_text` as the carry source**, because it is the object being
+    applied and so the next cycle's baseline; whatever `carried.source` was at collect is not.
     """
-    paths = policy.stripped
+    paths = policy.stripped | carried.paths
     if not paths:
         return repo_text
     restored = graft(_parse(adapter, repo_text, policy), _parse(adapter, live_text, policy), paths)
     rendered = _render(adapter, restored, repo_text, policy)
-    if project_text(adapter, rendered, policy) != repo_text:
+    if project_text(adapter, rendered, policy, Carry(carried.paths, repo_text)) != repo_text:
         raise ProjectionError(
             f"{policy.path}: re-attaching this machine's local keys did not round-trip; refusing to write"
         )
@@ -170,4 +241,4 @@ def _render(adapter: ContentAdapter, tree: Tree, template: str, policy: PresetFi
         raise ProjectionError(f"{policy.path}: cannot rewrite the file safely ({exc})") from exc
 
 
-__all__ = ["graft", "project_text", "restore_text", "strip"]
+__all__ = ["NO_CARRY", "Carry", "carry", "graft", "project_text", "restore_text", "strip"]

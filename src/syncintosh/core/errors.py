@@ -176,6 +176,16 @@ class ProjectionError(DomainError):
     """
 
 
+class IgnoreListMalformed(DomainError):
+    """The user's ignore list is not a list of strings, so what it ignores cannot be known.
+
+    Raised by `core.ignore.IgnoreSpec.create`. Callers fail closed: reading it as "ignore
+    nothing" would collect, and seal, a key the user meant to keep on this machine; reading it as
+    "ignore everything it can" would guess. The message is fixed and never quotes the list, which
+    sits in a settings file and can hold anything (``AGENTS.md`` §4).
+    """
+
+
 class SyntaxInvalid(DomainError):
     """A `SyntaxValidator` refused a would-be result.
 
