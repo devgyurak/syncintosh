@@ -60,12 +60,15 @@ Two builds can disagree about what a preset strips: one has excluded a key the o
 an object says which policy produced it, so before this field every path that touched such an object had to
 guess ([#24](https://github.com/devgyurak/syncintosh/issues/24)). The manifest now says so once, per preset.
 
-* `digest` — the sha256 of the canonical JSON of the preset's **policy**: for each file its path, whether it is
+* `digest` — the sha256 of the canonical JSON of the preset's **policy**: its `policy_epoch` (see below), then for each file its path, whether it is
   a glob, its format, its `noise` and `excluded` key paths, and its `ignore_list` flag; plus the preset's profile
   layout. File order and key order do not matter. Array rules, validators, bundle ID, download URL, and cask are
   **not** part of it — they change how a file is merged or where the app comes from, not which bytes an object
   holds. The user's ignore list itself is not part of it either: the user chooses it and it changes from cycle
   to cycle, so it is a carry (`core/ignore.py`), not a build property.
+* `policy_epoch` — a number in the preset, raised by hand when the **code** that projects or carries the
+  preset's files changes meaning (`core/projection.py`, `core/ignore.py`, a re-enabled strip). Object bytes then
+  differ though no data field does; the epoch is how the digest sees it.
 * `rev` — the position of that digest in the preset's append-only `POLICY_HISTORY`
   (`presets/history.py`), counted from 1. A policy change appends the new digest in the same commit; a golden
   test fails until the last entry equals the current digest.
@@ -81,8 +84,9 @@ digest cannot say whether to migrate or to stop. `core/policy.py` compares them 
 | the latest revision | `match` |
 | an earlier revision | `older` |
 
-A preset with records but no stamp is revision 1: every repo written before stamps existed was made under the
-first policy. A record naming a preset that is not built in (a community preset) makes no claim.
+A preset with records but no stamp is revision 1. Revision 1 is the policy as of #24; there was no release before
+it, so a repo written earlier is taken to match it (the policy did change during #6, #22 and #23, but no such
+repo is in use). A record naming a preset that is not built in (a community preset) makes no claim.
 
 Only the **writer's own build** is ever stamped — a collect, a merge, and (by preserving what it found) a key
 rotation. `key_generation` is independent: a rotation re-seals bytes, a policy change decides which bytes there

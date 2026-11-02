@@ -144,7 +144,8 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
   every sync and shred git history into delete+add churn.
 - The manifest stamps each built-in preset with the policy `(rev, digest)` its objects were made under.
   Changing a preset's strip policy means **appending** to `POLICY_HISTORY` (`presets/history.py`) in the
-  same commit; never edit an earlier entry (`docs/design/03-manifest.md`, "Policy stamp").
+  same commit (and in `tests/fixtures/policy_history_shipped.json`); if you change what the code does with a
+  preset's files (projection or carry semantics), raise its `policy_epoch` first, then append; never edit an earlier entry (`docs/design/03-manifest.md`, "Policy stamp").
 
 ### 3.3 Plaintext never enters git
 

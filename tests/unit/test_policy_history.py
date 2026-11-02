@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from syncintosh.core.policy import policy_digest
@@ -62,3 +65,34 @@ def test_the_catalog_serves_the_shipped_history(preset) -> None:
 
     # then
     assert history == POLICY_HISTORY[preset.name]
+
+
+SHIPPED = json.loads(
+    (Path(__file__).resolve().parents[1] / "fixtures" / "policy_history_shipped.json").read_text(encoding="utf-8")
+)["history"]
+
+
+def test_every_shipped_entry_is_still_in_place() -> None:
+    # given — the fixture pins what has shipped; a history may only grow at the end
+    edited = [
+        f"{name}: entries {pinned} were changed"
+        for name, pinned in SHIPPED.items()
+        if tuple(POLICY_HISTORY.get(name, ()))[: len(pinned)] != tuple(pinned)
+    ]
+
+    # when
+    violations = edited
+
+    # then
+    assert violations == [], (
+        "Never modify an existing POLICY_HISTORY entry; append the new digest to history.py and to "
+        "tests/fixtures/policy_history_shipped.json."
+    )
+
+
+def test_every_built_in_preset_is_pinned_by_the_fixture() -> None:
+    # when
+    unpinned = sorted(set(POLICY_HISTORY) - set(SHIPPED))
+
+    # then
+    assert unpinned == [], "Add the new preset's history to tests/fixtures/policy_history_shipped.json."
