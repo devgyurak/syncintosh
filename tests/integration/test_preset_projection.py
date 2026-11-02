@@ -9,7 +9,6 @@ policy beside it — the machinery under test is the same one the VS Code preset
 
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -22,19 +21,22 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
+from syncintosh.core.errors import PolicyMismatch
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.paths import collision_key
+from syncintosh.core.policy import policy_digest
 from syncintosh.core.ports import ContentAdapter, PresetCatalog
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
 from syncintosh.core.tree import Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
+from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.sync import SyncReport, sync
 from syncintosh.system.config import load_config, save_config
@@ -110,6 +112,8 @@ class _Catalog:
         return next((file for file in self._extra.files if collision_key(file.path) == folded), None)
 
     def get(self, name: str) -> Preset | None:
+        if self._extra is not None and name == self._extra.name:
+            return self._extra
         return self._base.get(name)
 
     def policy_for(self, path: str) -> PresetFile | None:
@@ -133,8 +137,76 @@ class _Catalog:
         return self._base.ignore_list_files()
 
     def policy_history(self, name: str) -> tuple[str, ...] | None:
+        if self._extra is not None and name == self._extra.name:
+            return (policy_digest(self._extra),)
         return self._base.policy_history(name)
 
+
+class _ClaimingZsh:
+    """A build whose zsh preset also owns one extra path, under the shipped policy history.
+
+    It stamps the very digest the default catalog expects, so a machine on the default catalog accepts its repo
+    and the only disagreement left is ownership of the path.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._base = BuiltinCatalog.default()
+
+    def _claims(self, path: str) -> bool:
+        return collision_key(path) == collision_key(self._path)
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        return PresetFile.create(path=self._path, format="text") if self._claims(path) else self._base.policy_for(path)
+
+    def knows(self, preset: str, path: str) -> bool:
+        return True if self._claims(path) else self._base.knows(preset, path)
+
+    def get(self, name: str) -> Preset | None:
+        return self._base.get(name)
+
+    def preset_for(self, path: str) -> Preset | None:
+        return self._base.get("zsh") if self._claims(path) else self._base.preset_for(path)
+
+    def ignore_list_files(self) -> tuple:
+        return self._base.ignore_list_files()
+
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return self._base.policy_history(name)
+
+
+class _Release(_Catalog):
+    """A build that has shipped `releases` of one preset, oldest first, and enforces the last.
+
+    Its history is the digest of every release, so a build with one more release reads a repo stamped by the
+    shorter one as `older`, and the shorter reads the longer's as `newer` — which is how two builds of the same
+    program are told apart without changing the program.
+    """
+
+    def __init__(self, *releases: Preset) -> None:
+        super().__init__(releases[-1])
+        self._releases = releases
+
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        if name == self._releases[-1].name:
+            return tuple(policy_digest(release) for release in self._releases)
+        return super().policy_history(name)
+
+
+# Release 1 did not exclude the credential key; release 2 (the current `JSONC_POLICY`) does.
+RELEASE_1 = Preset.create(
+    name="keyed-test",
+    files=(PresetFile.create(path=JSONC, format="jsonc", noise={("window", "zoomLevel")}), SECOND_FILE),
+)
+RELEASE_2 = JSONC_PRESET
+# A fork that also shipped a second release, but a different one.
+FORK_2 = Preset.create(
+    name="keyed-test",
+    files=(PresetFile.create(path=JSONC, format="jsonc", excluded={("telemetry",)}), SECOND_FILE),
+)
+OLD_BUILD = _Release(RELEASE_1)
+NEW_BUILD = _Release(RELEASE_1, RELEASE_2)
+FORK_BUILD = _Release(RELEASE_1, FORK_2)
 
 KEYED_CATALOG = _Catalog(JSONC_PRESET)
 TOML_CATALOG = _Catalog(TOML_PRESET)
@@ -417,7 +489,7 @@ def test_a_record_the_local_catalog_does_not_own_is_refused(tmp_path, memory_key
     # B's catalog does not, so B must refuse the record rather than write it
     remote = _bare_remote(tmp_path)
     path = "notes/settings.txt"
-    owned = _Catalog(Preset.create(name="zsh", files=(PresetFile.create(path=path, format="text"),)))
+    owned = _ClaimingZsh(path)
     a = _machine(tmp_path, memory_key_store, "machine-a", remote)
     _initialize(a, _config(a, (LocalItem.create(path=path, preset="zsh", scope="common", format="text"),)))
     _write(a, path, b"set\n")
@@ -656,37 +728,6 @@ def test_a_record_published_in_another_format_is_refused_however_fresh_the_file_
     assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
 
 
-def test_a_merge_never_re_seals_a_credential_another_build_published(tmp_path, memory_key_store) -> None:
-    # given — B applied a version without the credential, so it has a ledger baseline, and A (a
-    # build whose preset does not exclude the key) then published one that holds it
-    remote = _bare_remote(tmp_path)
-    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
-    _initialize(a, _jsonc_config(a))
-    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
-    _run(a, catalog=_UnawareCatalog())
-    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
-    _initialize(b, _jsonc_config(b), import_from=a.recovery)
-    _write(b, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-B"}}\n')
-    _run(b, adopt="remote")
-    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
-    _run(a, catalog=_UnawareCatalog())
-
-    # when — B edits its own file and merges against HEAD, which still holds A's credential
-    _write(b, JSONC, b'{"editor.fontSize": 13, "editor.tabSize": 2, "http": {"proxyAuthorization": "Basic FROM-B"}}\n')
-    report = _run(b)
-    plaintexts = _decrypted_objects(b)
-
-    # then — the merge result was projected before it was sealed, so neither machine's credential is
-    # in any object, and B's own file kept its value
-    assert report.has_conflicts is False
-    assert report.unprojectable == ()
-    assert [blob for blob in plaintexts if b"proxyAuthorization" in blob] == []
-    assert [blob for blob in plaintexts if b"FROM-A" in blob] == []
-    assert [blob for blob in plaintexts if b"FROM-B" in blob] == []
-    assert b"Basic FROM-B" in _read(b, JSONC)
-    assert b'"editor.tabSize": 2' in _read(b, JSONC)
-
-
 def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_refused(tmp_path, memory_key_store) -> None:
     # given — A publishes `.zshrc` as JSONC; this machine's catalog says it is plain text and strips
     # nothing from it, so the format check has to run for that policy too
@@ -739,74 +780,6 @@ def test_a_record_is_republished_in_the_format_its_object_is_really_in(tmp_path,
     assert formats[JSONC] == "jsonc"
 
 
-def test_a_merge_carries_an_object_it_re_uses_unchanged(tmp_path, memory_key_store) -> None:
-    # given — both machines are settled, then A publishes a settings file that holds a key this
-    # machine's policy excludes (A's build does not exclude it), and B edits its *other* file
-    remote = _bare_remote(tmp_path)
-    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
-    _initialize(a, _two_file_config(a))
-    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
-    _write(a, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
-    _run(a)
-    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
-    _initialize(b, _two_file_config(b), import_from=a.recovery)
-    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
-    _write(b, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
-    _run(b)
-    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
-    _run(a, catalog=_UnawareCatalog())
-    published = _record_for(a, JSONC)
-
-    # when — B merges against A's commit; the settings object is one it only re-uses
-    _write(b, SECOND, b'[\n  {"key": "cmd+j"}\n]\n')
-    report = _run(b)
-
-    # then — B's merge commit names A's object exactly as A published it: projecting it would delete
-    # A's own values (its noise, its credential) without removing anything from the history, since
-    # the blob is already in A's commit. B's own change lands, and A's file is untouched.
-    assert report.has_conflicts is False
-    assert _record_for(b, JSONC).sha256 == published.sha256
-    assert _read(b, SECOND) == b'[\n  {"key": "cmd+j"}\n]\n'
-    assert _read(a, JSONC) == b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n'
-
-
-def test_a_merge_projects_an_object_it_only_re_uses(tmp_path, memory_key_store) -> None:
-    # given — A (a build that does not exclude the key) changes `settings.json` while B changes its
-    # *other* file, so the merge re-uses A's settings object instead of merging its content
-    remote = _bare_remote(tmp_path)
-    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
-    _initialize(a, _two_file_config(a))
-    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
-    _write(a, SECOND, b'[\n  {\n    "key": "cmd+k"\n  }\n]\n')
-    _run(a)
-    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
-    _initialize(b, _two_file_config(b), import_from=a.recovery)
-    _run(b, adopt="remote")
-    _write(a, JSONC, b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n')
-    _run(a, catalog=_UnawareCatalog())
-    _write(b, SECOND, b'[\n  {\n    "key": "cmd+j"\n  }\n]\n')
-
-    # when
-    report = _run(b)
-    head = GitCLITransport(b.repo).head() or ""
-    files = FileRepo(b.repo)
-    manifest = loads_manifest(
-        EnvelopeCipher(b.store).open(files.read(MANIFEST_PATH) or b"", domain="manifest", file_id="")
-    )
-    record = next(item for item in manifest.records.values() if item.path == JSONC)
-    sealed = EnvelopeCipher(b.store).open(
-        files.read(object_path(record.file_id)) or b"", domain="object", file_id=record.file_id
-    )
-
-    # then — the object the merge commit names was projected before it was sealed, so the key this
-    # machine's policy strips is not in the commit it pushed
-    assert report.has_conflicts is False
-    assert b"proxyAuthorization" not in sealed
-    assert b"FROM-A" not in sealed
-    assert head != ""
-    assert record.sha256 == hashlib.sha256(sealed).hexdigest()
-
-
 def test_a_diverged_merge_of_two_files_that_need_no_projection_does_not_crash(tmp_path, memory_key_store) -> None:
     # given — each machine edits a different tracked file, and the one that changed remotely needs no
     # projection (its record has no strip list)
@@ -834,3 +807,132 @@ def test_a_diverged_merge_of_two_files_that_need_no_projection_does_not_crash(tm
     assert _read(b, SECOND) == b'[\n  {"key": "cmd+j"}\n]\n'
     assert _read(b, JSONC) == b'{"editor.fontSize": 15}\n'
     assert _read(a, JSONC) == b'{"editor.fontSize": 15}\n'
+
+
+# --------------------------------------------------------------------------- the policy gate (issue #24)
+
+CREDENTIAL = b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n'
+OWN_CREDENTIAL = b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-B"}}\n'
+
+
+def _manifest_at_head(machine: Machine):
+    blob = GitCLITransport(machine.repo).read_blob(GitCLITransport(machine.repo).head() or "", MANIFEST_PATH)
+    return loads_manifest(EnvelopeCipher(machine.store).open(blob or b"", domain="manifest", file_id=""))
+
+
+def _published_by_the_old_build(tmp_path, make_store) -> tuple[Machine, Machine]:
+    """A (the old build) has published a settings file that holds the credential key; B is cloned, not yet synced."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, CREDENTIAL)
+    _run(a, catalog=OLD_BUILD)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    return a, b
+
+
+def test_a_newer_build_migrates_an_older_repo_and_keeps_its_own_values(tmp_path, memory_key_store) -> None:
+    # given — the old build published the credential key; B's file has its own value for it
+    _, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    _write(b, JSONC, OWN_CREDENTIAL)
+
+    # when
+    report = _run(b, adopt="remote", catalog=NEW_BUILD)
+    plaintexts = _decrypted_objects(b)
+
+    # then — the repo no longer holds the key, B's live value is untouched, and the stamp says release 2
+    assert [blob for blob in plaintexts if b"proxyAuthorization" in blob] == []
+    assert [blob for blob in plaintexts if b"FROM-A" in blob] == []
+    assert b"Basic FROM-B" in _read(b, JSONC)
+    assert _manifest_at_head(b).policy["keyed-test"].rev == 2
+    assert "policy migrated: keyed-test rev 1→2" in report.notes
+
+
+def test_an_older_build_stops_on_a_repo_a_newer_build_migrated(tmp_path, memory_key_store) -> None:
+    # given — B migrated the repo; A (the old build) has an edit of its own
+    a, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    _run(b, adopt="remote", catalog=NEW_BUILD)
+    published = _git(b.remote, "rev-parse", BRANCH)
+    edited = CREDENTIAL.replace(b"13", b"14")
+    _write(a, JSONC, edited)
+
+    # when & then — stopped after the fetch: nothing was merged, pushed, or applied
+    with pytest.raises(PolicyMismatch, match="upgrade syncintosh on this Mac"):
+        _run(a, catalog=OLD_BUILD)
+    assert _git(a.remote, "rev-parse", BRANCH) == published
+    assert _read(a, JSONC) == edited
+
+
+def test_a_diff_warns_and_still_shows_what_it_can_when_the_repo_is_newer(tmp_path, memory_key_store) -> None:
+    # given — the repo was migrated by a newer build, and the old build has fetched it before stopping
+    a, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    _run(b, adopt="remote", catalog=NEW_BUILD)
+    with pytest.raises(PolicyMismatch):
+        _run(a, catalog=OLD_BUILD)
+
+    # when
+    report = diff_repo(
+        transport=GitCLITransport(a.repo),
+        cipher=EnvelopeCipher(a.store),
+        live=SystemLiveFiles(),
+        config=load_config(a.config_file),
+        home=str(a.home),
+        deny=SystemDenyList(),
+        branch=BRANCH,
+        catalog=OLD_BUILD,
+        adapters={"jsonc": JsoncAdapter()},
+        validators={},
+    )
+
+    # then — read-only, with the warning
+    assert [entry.path for entry in report.entries] == [JSONC]
+    assert len(report.policy_warnings) == 1
+    assert "upgrade syncintosh on this Mac" in report.policy_warnings[0]
+
+
+def test_a_stamp_this_build_has_never_shipped_stops_the_cycle(tmp_path, memory_key_store) -> None:
+    # given — release 2 here is not the fork's release 2
+    a, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    _run(b, adopt="remote", catalog=NEW_BUILD)
+
+    # when & then
+    with pytest.raises(PolicyMismatch, match="matches no policy this build has shipped"):
+        _run(a, catalog=FORK_BUILD)
+
+
+def test_a_preset_this_build_lacks_stops_the_cycle_before_anything_is_collected(tmp_path, memory_key_store) -> None:
+    # given — A's repo is stamped for a preset the catalog does not ship, and A has a live edit
+    a, _ = _published_by_the_old_build(tmp_path, memory_key_store)
+    before = GitCLITransport(a.repo).head()
+    _write(a, JSONC, CREDENTIAL.replace(b"13", b"14"))
+
+    # when & then — HEAD is judged first, so no collect commit is made
+    with pytest.raises(PolicyMismatch):
+        _run(a, catalog=_UnawareCatalog())
+    assert GitCLITransport(a.repo).head() == before
+
+
+def test_a_merge_takes_the_migrated_view_of_a_remote_the_old_build_wrote(tmp_path, memory_key_store) -> None:
+    # given — B is cloned at the old build's first commit, which the old build then moves past (it holds the key)
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _run(a, catalog=OLD_BUILD)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(a, JSONC, CREDENTIAL)
+    _run(a, catalog=OLD_BUILD)
+    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
+
+    # when — B's collect commit (the migrated first commit) and the old build's second commit diverge
+    report = _run(b, adopt="remote", catalog=NEW_BUILD)
+    plaintexts = _decrypted_objects(b)
+
+    # then — the merge read the old build's object through the migration, so the key is in no object
+    assert report.has_conflicts is False
+    assert [blob for blob in plaintexts if b"proxyAuthorization" in blob] == []
+    assert [blob for blob in plaintexts if b"FROM-A" in blob] == []
+    assert _manifest_at_head(b).policy["keyed-test"].rev == 2
+    assert b"FROM-A" not in _read(b, JSONC)

@@ -136,21 +136,30 @@ def classify_policy(history: tuple[str, ...] | None, stamp: PolicyStamp | None) 
     return MATCH if effective.rev == len(history) else OLDER
 
 
+def _owners(records: Iterable[ManifestRecord], catalog: PresetCatalog) -> set[str]:
+    """The built-in presets that own the paths of `records`, found by path.
+
+    The owner is never read from a record's `preset` (that name arrives from the repo,
+    ``docs/design/03-manifest.md``), so a community name on a built-in path is judged — and stamped — as the
+    built-in preset it really is, and cannot step around the comparison.
+    """
+    return {owner.name for record in records if (owner := catalog.preset_for(record.path)) is not None}
+
+
 def policy_verdicts(
     policy: Mapping[str, PolicyStamp], records: Iterable[ManifestRecord], catalog: PresetCatalog
 ) -> dict[str, PolicyVerdict]:
     """The verdict for every preset a manifest makes a claim about, by preset name.
 
-    A preset is covered when the manifest stamps it, or when one of its records names a preset this
-    build ships (an unstamped one is revision 1). A record naming a preset that is neither stamped nor
-    built in makes no claim — it is a community preset, and the local allowlist alone decides.
+    A preset is covered when the manifest stamps it, or when a record's **path** is owned by a built-in
+    preset. A record on a path no built-in preset owns makes no claim: the local allowlist alone decides it.
     """
-    names = set(policy) | {record.preset for record in records if catalog.policy_history(record.preset) is not None}
+    names = set(policy) | _owners(records, catalog)
     return {name: classify_policy(catalog.policy_history(name), policy.get(name)) for name in sorted(names)}
 
 
 def stamp_policies(records: Iterable[ManifestRecord], catalog: PresetCatalog) -> dict[str, PolicyStamp]:
-    """This build's stamp for every built-in preset that has a record: what a writer records.
+    """This build's stamp for every built-in preset that owns a record's path: what a writer records.
 
     A writer always stamps its own build's policy, never one it read. That is honest only because a
     cycle first brings every object it re-uses to the local policy (migrate an `older` stamp, stop on a
@@ -158,7 +167,7 @@ def stamp_policies(records: Iterable[ManifestRecord], catalog: PresetCatalog) ->
     does not know into a `match`.
     """
     stamps: dict[str, PolicyStamp] = {}
-    for name in sorted({record.preset for record in records}):
+    for name in sorted(_owners(records, catalog)):
         preset, history = catalog.get(name), catalog.policy_history(name)
         if preset is not None and history:
             # The digest is computed, not read from the history, so a policy changed without an append

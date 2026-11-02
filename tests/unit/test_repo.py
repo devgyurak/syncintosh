@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import pytest
 
+from syncintosh.core.errors import ManifestCorrupt
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.repo import (
     GITATTRIBUTES_CONTENT,
     GITIGNORE_CONTENT,
     GITIGNORE_PATH,
     MANIFEST_PATH,
+    envelope_key_id,
     object_file_id,
     object_path,
     plan_writes,
@@ -181,3 +183,18 @@ def test_a_generation_bump_rewrites_the_manifest() -> None:
     # then
     assert plan.write_manifest is True
     assert plan.objects_to_write == ()
+
+
+@pytest.mark.parametrize(("blob", "key_id"), [(b"\x01\x00\x00\x00\x07rest", 7), (b"\x01\x00\x01\x00\x00", 65536)])
+def test_envelope_key_id_reads_the_header(blob, key_id) -> None:
+    # when
+    result = envelope_key_id(blob)
+
+    # then
+    assert result == key_id
+
+
+def test_envelope_key_id_refuses_a_blob_shorter_than_its_header() -> None:
+    # when & then
+    with pytest.raises(ManifestCorrupt):
+        envelope_key_id(b"\x01\x00")

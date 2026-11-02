@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from syncintosh.core.errors import ConfigError, ManifestCorrupt
+from syncintosh.core.errors import ConfigError, ManifestCorrupt, ManifestError, PolicyMismatch
 from syncintosh.core.manifest import ManifestRecord
 from syncintosh.core.policy import (
     MATCH,
@@ -34,9 +34,9 @@ def _stamp(rev: int, digest: str) -> PolicyStamp:
     return PolicyStamp.create(rev=rev, digest=digest)
 
 
-def _record(preset: str, file_id: str = ID1) -> ManifestRecord:
+def _record(preset: str, file_id: str = ID1, path: str | None = None) -> ManifestRecord:
     return ManifestRecord.create(
-        file_id=file_id, path=f"{preset}.conf", preset=preset, scope="common", format="text", sha256=A
+        file_id=file_id, path=path or f"{preset}.conf", preset=preset, scope="common", format="text", sha256=A
     )
 
 
@@ -60,7 +60,7 @@ class _Catalog:
         return True
 
     def preset_for(self, path: str) -> Preset | None:
-        return None
+        return next((preset for preset in self._presets if any(file.path == path for file in preset.files)), None)
 
     def ignore_list_files(self) -> tuple[PresetFile, ...]:
         return ()
@@ -225,9 +225,10 @@ def test_the_digest_ignores_key_order(keys) -> None:
     assert digests[0] == digests[1]
 
 
-def test_verdicts_cover_stamped_and_recorded_built_in_presets() -> None:
-    # given — zsh is stamped, vscode has a record but no stamp, jetbrains is a community name
-    catalog = _Catalog({"zsh": (A, B), "vscode": (C,)})
+def test_verdicts_cover_stamped_presets_and_those_that_own_a_record() -> None:
+    # given — zsh is stamped, vscode owns a record but is not stamped, jetbrains is a community path
+    zsh, vscode = _preset(_file("zsh.conf"), name="zsh"), _preset(_file("vscode.conf"), name="vscode")
+    catalog = _Catalog({"zsh": (A, B), "vscode": (C,)}, (zsh, vscode))
     records = [_record("vscode", "1" * 32), _record("jetbrains", "2" * 32)]
 
     # when
@@ -235,6 +236,19 @@ def test_verdicts_cover_stamped_and_recorded_built_in_presets() -> None:
 
     # then
     assert verdicts == {"vscode": MATCH, "zsh": MATCH}
+
+
+def test_a_community_name_on_a_built_in_path_is_judged_as_the_built_in_preset() -> None:
+    # given — the record names `mine`, but vscode owns the path and has moved on from the stamp's revision
+    vscode = _preset(_file("vscode.conf"), name="vscode")
+    catalog = _Catalog({"vscode": (A, B)}, (vscode,))
+    records = [_record("mine", path="vscode.conf")]
+
+    # when
+    verdicts = policy_verdicts({"vscode": _stamp(1, A)}, records, catalog)
+
+    # then — it cannot slip past the comparison by carrying another name
+    assert verdicts == {"vscode": OLDER}
 
 
 def test_a_stamp_for_a_preset_the_build_lacks_is_newer() -> None:
@@ -247,7 +261,7 @@ def test_a_stamp_for_a_preset_the_build_lacks_is_newer() -> None:
 
 def test_a_writer_stamps_its_own_policy_for_every_built_in_preset_with_a_record() -> None:
     # given
-    preset = _preset(_file(), name="x")
+    preset = _preset(_file("x.conf"), name="x")
     catalog = _Catalog({"x": (A, B)}, (preset,))
 
     # when
@@ -267,7 +281,7 @@ def test_a_writer_stamps_nothing_without_a_history() -> None:
 
 def test_a_policy_changed_without_an_append_reads_back_as_unknown() -> None:
     # given — the history still ends at the old digest
-    preset = _preset(_file(noise={("n",)}), name="x")
+    preset = _preset(_file("x.conf", noise={("n",)}), name="x")
     catalog = _Catalog({"x": (A,)}, (preset,))
 
     # when
@@ -302,3 +316,18 @@ def test_the_default_policy_epoch_is_1() -> None:
 
     # then
     assert epoch == 1
+
+
+@pytest.mark.parametrize(
+    ("verdict", "reason"),
+    [("newer", "newer policy than this build ships"), ("unknown", "matches no policy this build has shipped")],
+)
+def test_policy_mismatch_names_the_preset_the_reason_and_the_fix(verdict, reason) -> None:
+    # when
+    error = PolicyMismatch("vscode", verdict)
+
+    # then
+    assert (error.preset, error.verdict) == ("vscode", verdict)
+    assert reason in str(error)
+    assert str(error).endswith("upgrade syncintosh on this Mac")
+    assert isinstance(error, ManifestError)

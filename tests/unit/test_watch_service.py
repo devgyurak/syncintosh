@@ -14,7 +14,7 @@ from itertools import count
 import pytest
 
 from syncintosh.core.config import LocalItem, SyncConfig
-from syncintosh.core.errors import GitError, PendingConflict, SecretScanError, SyncLockError, WatchError
+from syncintosh.core.errors import GitError, PendingConflict, PolicyMismatch, SecretScanError, SyncLockError, WatchError
 from syncintosh.core.watch import FileEvent, WatchFilter
 from syncintosh.services.sync import SyncReport
 from syncintosh.services.watch import watch
@@ -189,6 +189,18 @@ def test_a_pending_conflict_is_reported_and_not_retried() -> None:
     # then — only `resolve` may run, so nothing is retried
     assert run.calls == 1
     assert len(errors) == 1
+
+
+def test_a_policy_mismatch_is_reported_and_not_retried() -> None:
+    # given — a newer build migrated the repo; only an upgrade helps, so the daemon only says so
+    errors: list[BaseException] = []
+
+    # when
+    _, run = _watch([(FileEvent(".zshrc"),)], [PolicyMismatch("zsh", "newer")], on_error=errors.append)
+
+    # then
+    assert run.calls == 1
+    assert [str(error) for error in errors] == [str(PolicyMismatch("zsh", "newer"))]
 
 
 def test_a_network_failure_is_reported_and_the_watch_continues() -> None:
