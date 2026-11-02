@@ -23,6 +23,12 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
   object that is not laid out member-per-line — is reserialized whole, and refused when a
   comment inside it would be lost.
 
+A value named by `Verbatim` is the exception to re-serializing: it is copied from the other
+document's text, span for span. `json.dumps` would turn `1e3` into `1000` and drop a comment inside
+`"[python]": {...}`, and a restore that has to land on the exact bytes of an earlier render could
+then never agree with it. The copy replaces the whole value, so a comment the template had *inside*
+that value goes with it: the value belongs to the other document now.
+
 The merge itself is not this module's job: it returns a :class:`~syncintosh.core.tree.Tree` and
 takes one back, and the engine decides what changed (``core/merge.py``).
 """
@@ -36,10 +42,14 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
 from syncintosh.core.tree import Array, ElementId, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
+
+if TYPE_CHECKING:
+    from syncintosh.core.ports import Verbatim
 
 # Whitespace the scanner skips; a BOM is treated as leading trivia so spans stay absolute.
 _WHITESPACE = " \t\r\n\ufeff"
@@ -306,23 +316,79 @@ class JsoncAdapter:
             # malformed input for this format, not a crash the caller has to know about.
             raise ContentParseError(str(exc)) from exc
 
-    def render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule] | None = None) -> str:
+    def render(
+        self,
+        tree: Tree,
+        template: str,
+        arrays: Mapping[KeyPath, ArrayRule] | None = None,
+        verbatim: Verbatim | None = None,
+    ) -> str:
         """Render `tree` by editing `template`; unchanged content returns the bytes verbatim.
 
         `arrays` names the arrays that pair an element by its identity when it is rewritten (`core/keyed_array.py`);
-        an array without a rule pairs nothing, so a changed element there is removed and re-added.
+        an array without a rule pairs nothing, so a changed element there is removed and re-added. `verbatim` names
+        values to copy from another document as written; one whose value there differs from `tree`'s is not copied.
         """
         try:
-            return self._render(tree, template, arrays or {})
+            return self._render(tree, template, arrays or {}, verbatim)
         except (ValueError, RecursionError) as exc:
             raise ContentParseError(str(exc)) from exc
 
-    def _render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule]) -> str:
+    def _render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule], verbatim: Verbatim | None) -> str:
         parser = _Parser(template)
         root = parser.parse()
-        if _tree_of(root) == tree:
+        copies = _copies(tree, verbatim)
+        stale = _stale_copies(root, template, copies)
+        if _tree_of(root) == tree and not stale:
             return template
-        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays).apply()
+        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays, copies, stale).apply()
+
+
+def _locate(root: _AstNode, path: KeyPath) -> _AstNode | None:
+    """The node at `path` below `root`, or `None` when an object on the way lacks the key."""
+    node: _AstNode | None = root
+    for step in path:
+        if not isinstance(node, _ObjectNode):
+            return None
+        node = next((member.value for member in node.members if member.key == step), None)
+    return node
+
+
+def _copies(tree: Tree, verbatim: Verbatim | None) -> dict[KeyPath, str]:
+    """The text to copy for each verbatim path that the source holds with `tree`'s own value.
+
+    A path whose value in the source is not the value `tree` holds is dropped: copying it would
+    write something the render was never asked for, and the caller's re-parse check would catch it
+    only after the fact.
+    """
+    if verbatim is None or not verbatim.paths:
+        return {}
+    source = _Parser(verbatim.text).parse()
+    source_entries = _tree_of(source).entries
+    copies: dict[KeyPath, str] = {}
+    for path in verbatim.paths:
+        node = _locate(source, path)
+        if node is None:
+            continue
+        held = {entry: value for entry, value in source_entries.items() if entry[: len(path)] == path}
+        wanted = {entry: value for entry, value in tree.entries.items() if entry[: len(path)] == path}
+        if held == wanted:
+            copies[path] = verbatim.text[node.span.start : node.span.end]
+    return copies
+
+
+def _stale_copies(root: _AstNode, text: str, copies: Mapping[KeyPath, str]) -> frozenset[KeyPath]:
+    """The paths to copy whose text in the template is not already the copy, with every path above them.
+
+    The ancestors are included because a structural comparison reads `1e3` and `1000` as one value:
+    the walk must go down through them to reach the span to replace.
+    """
+    stale: set[KeyPath] = set()
+    for path, copied in copies.items():
+        node = _locate(root, path)
+        if node is None or text[node.span.start : node.span.end] != copied:
+            stale.update(path[:length] for length in range(len(path) + 1))
+    return frozenset(stale)
 
 
 class _Diff:
@@ -335,7 +401,11 @@ class _Diff:
         text: str,
         comments: _Comments,
         arrays: Mapping[KeyPath, ArrayRule],
+        copies: Mapping[KeyPath, str],
+        stale: frozenset[KeyPath],
     ) -> None:
+        self._copies = copies
+        self._stale = stale
         self._arrays = arrays
         self._source = text
         self._comments = comments
@@ -358,7 +428,13 @@ class _Diff:
         return self._kids.get(path, [])
 
     def _render(self, node: _AstNode, path: KeyPath, edits: list[_Edit]) -> None:
-        if self._matches(node, path):
+        if path in self._copies:
+            # The whole value is the source's text. It is replaced in place even where it compares equal
+            # structurally, because equal is not the same bytes (`1e3`, a comment inside it).
+            if path in self._stale:
+                edits.append(_Edit(node.span.start, node.span.end, self._copies[path]))
+            return
+        if path not in self._stale and self._matches(node, path):
             return
         children = self._children(path)
         if not children:
@@ -510,6 +586,8 @@ class _Diff:
         return json.dumps(path[-1], ensure_ascii=False) + ": " + self._inline_subtree(path)
 
     def _inline_subtree(self, path: KeyPath) -> str:
+        if path in self._copies:
+            return self._copies[path]
         children = self._children(path)
         if not children:
             leaf = self._leaves.get(path)
@@ -801,6 +879,8 @@ class _Diff:
         return self._indent * (level + 1) + json.dumps(key, ensure_ascii=False) + ": " + self._subtree(path, level + 1)
 
     def _subtree(self, path: KeyPath, level: int) -> str:
+        if path in self._copies:
+            return self._copies[path]
         children = self._children(path)
         if not children:
             leaf = self._leaves.get(path)
