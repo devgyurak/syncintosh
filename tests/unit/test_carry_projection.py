@@ -60,7 +60,7 @@ def test_carry_swaps_the_value_in_place() -> None:
     result = carry(tree, CARRY_K, source)
 
     # then — the key keeps its position, so the renderer edits it where it stands
-    assert [path for path in result] == [("a",), ("k",), ("z",)]
+    assert list(result) == [("a",), ("k",), ("z",)]
     assert result.value(("k",)) == source.value(("k",))
 
 
