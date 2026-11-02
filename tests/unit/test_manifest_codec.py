@@ -18,6 +18,7 @@ from hypothesis import strategies as st
 from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import canonical_json_bytes, dumps_manifest, loads_manifest
+from syncintosh.core.policy import PolicyStamp
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = json.loads((ROOT / "tests" / "fixtures" / "manifest_golden.json").read_text(encoding="utf-8"))
@@ -39,7 +40,10 @@ def _golden_manifest() -> Manifest:
     records = {
         file_id: ManifestRecord.create(file_id=file_id, **fields) for file_id, fields in GOLDEN["records"].items()
     }
-    return Manifest.create(schema=MANIFEST_SCHEMA, key_generation=GOLDEN["key_generation"], records=records)
+    policy = {name: PolicyStamp.create(**fields) for name, fields in GOLDEN["policy"].items()}
+    return Manifest.create(
+        schema=MANIFEST_SCHEMA, key_generation=GOLDEN["key_generation"], records=records, policy=policy
+    )
 
 
 def test_dumps_matches_the_golden_bytes() -> None:
@@ -103,6 +107,10 @@ def test_canonical_json_rejects_a_non_canonical_value(value) -> None:
         canonical_json_bytes(value)
 
 
+_HEX = {"zsh": "a", "vscode": "b", "docker": "c", "jetbrains": "d"}
+STAMP = b'{"rev":1,"digest":"' + b"a" * 64 + b'"}'
+
+
 @pytest.mark.parametrize(
     ("raw", "error"),
     [
@@ -110,21 +118,50 @@ def test_canonical_json_rejects_a_non_canonical_value(value) -> None:
         (b"{", ManifestCorrupt),
         (b"[]", ManifestCorrupt),
         (b"{}", ManifestCorrupt),
-        (b'{"schema":1,"key_generation":1,"records":{},"extra":1}', ManifestCorrupt),
-        (b'{"schema":1,"key_generation":1,"records":[]}', ManifestCorrupt),
-        (b'{"schema":1,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":5}}', ManifestCorrupt),
-        (b'{"schema":1,"schema":1,"key_generation":1,"records":{}}', ManifestCorrupt),
-        (b'{"schema":1.5,"key_generation":1,"records":{}}', ManifestCorrupt),
-        (b'{"schema":NaN,"key_generation":1,"records":{}}', ManifestCorrupt),
-        (b'{"schema":"1","key_generation":1,"records":{}}', ManifestCorrupt),
-        (b'{"schema":1,"key_generation":0,"records":{}}', ManifestCorrupt),
-        (b'{"key_generation":1,"records":{}}', ManifestCorrupt),
-        (b'{"schema":2,"key_generation":1,"records":{}}', UnsupportedManifestSchema),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":{},"extra":1}', ManifestCorrupt),
+        (b'{"schema":2,"key_generation":1,"records":[],"policy":{}}', ManifestCorrupt),
+        (
+            b'{"schema":2,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":5},"policy":{}}',
+            ManifestCorrupt,
+        ),
+        (b'{"schema":2,"schema":2,"key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"schema":1.5,"key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"schema":NaN,"key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"schema":"2","key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"schema":2,"key_generation":0,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        # Schema 2 requires `policy`; schema 1 forbids it (it predates the field).
+        (b'{"schema":2,"key_generation":1,"records":{}}', ManifestCorrupt),
+        (b'{"schema":1,"key_generation":1,"records":{},"policy":{}}', ManifestCorrupt),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":[]}', ManifestCorrupt),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":5}}', ManifestCorrupt),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":{"":' + STAMP + b"}}", ManifestCorrupt),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":1}}}', ManifestCorrupt),
+        (
+            b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":1,"digest":"'
+            + b"a" * 64
+            + b'","x":1}}}',
+            ManifestCorrupt,
+        ),
+        (
+            b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":0,"digest":"' + b"a" * 64 + b'"}}}',
+            ManifestCorrupt,
+        ),
+        (
+            b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":true,"digest":"' + b"a" * 64 + b'"}}}',
+            ManifestCorrupt,
+        ),
+        (
+            b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":1,"digest":"' + b"A" * 64 + b'"}}}',
+            ManifestCorrupt,
+        ),
+        (b'{"schema":2,"key_generation":1,"records":{},"policy":{"zsh":{"rev":1,"digest":"abc"}}}', ManifestCorrupt),
+        (b'{"schema":3,"key_generation":1,"records":{},"policy":{}}', UnsupportedManifestSchema),
         # A newer schema wins over an unknown field or a reshaped record: it is an upgrade, not
         # corruption, and must not be masked by a field check.
-        (b'{"schema":2,"key_generation":1,"records":{},"extra":1}', UnsupportedManifestSchema),
+        (b'{"schema":3,"key_generation":1,"records":{},"extra":1}', UnsupportedManifestSchema),
         (
-            b'{"schema":2,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":{"new":1}}}',
+            b'{"schema":3,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":{"new":1}}}',
             UnsupportedManifestSchema,
         ),
     ],
@@ -146,7 +183,11 @@ def test_loads_rejects_bad_input(raw, error) -> None:
 )
 def test_loads_rejects_a_bad_record(record_json) -> None:
     # given
-    raw = b'{"schema":1,"key_generation":1,"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":' + record_json + b"}}"
+    raw = (
+        b'{"schema":2,"key_generation":1,"policy":{},"records":{"0f3c4b5a69788796a5b4c3d2e1f0abcd":'
+        + record_json
+        + b"}}"
+    )
 
     # when & then
     with pytest.raises(ManifestCorrupt):
@@ -170,6 +211,55 @@ def test_canonical_bytes_are_independent_of_insertion_order(file_ids) -> None:
 def test_round_trip_is_identity(file_ids, generation) -> None:
     # given
     manifest = _manifest({file_id: _record(file_id, file_id * 2) for file_id in file_ids}, generation=generation)
+
+    # when
+    parsed = loads_manifest(dumps_manifest(manifest))
+
+    # then
+    assert parsed == manifest
+
+
+def test_a_schema_1_manifest_reads_as_schema_2_with_no_stamps() -> None:
+    # given — what every pre-#24 repo holds
+    raw = b'{"schema":1,"key_generation":4,"records":{}}'
+
+    # when
+    parsed = loads_manifest(raw)
+
+    # then — lifted in memory; the next write persists the new schema
+    assert (parsed.schema, parsed.key_generation, dict(parsed.policy)) == (MANIFEST_SCHEMA, 4, {})
+
+
+def test_a_schema_1_manifest_is_rewritten_as_schema_2() -> None:
+    # given
+    legacy = loads_manifest(b'{"schema":1,"key_generation":1,"records":{}}')
+
+    # when
+    encoded = dumps_manifest(legacy)
+
+    # then
+    assert encoded == b'{"key_generation":1,"policy":{},"records":{},"schema":2}'
+
+
+@given(names=st.lists(st.sampled_from(["zsh", "vscode", "docker", "jetbrains"]), unique=True, max_size=4))
+def test_stamp_bytes_are_independent_of_insertion_order(names) -> None:
+    # given
+    stamps = {name: PolicyStamp.create(rev=2, digest=_HEX[name] * 64) for name in names}
+    reordered = dict(reversed(list(stamps.items())))
+
+    # when
+    forward = dumps_manifest(Manifest.create(schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy=stamps))
+    backward = dumps_manifest(Manifest.create(schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy=reordered))
+
+    # then
+    assert forward == backward
+
+
+@given(names=st.lists(st.sampled_from(["zsh", "vscode", "docker"]), unique=True, max_size=3), rev=st.integers(1, 9))
+def test_stamps_round_trip(names, rev) -> None:
+    # given
+    stamps = {name: PolicyStamp.create(rev=rev, digest=_HEX[name] * 64) for name in names}
+    manifest = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=1, records={}, policy=stamps)
 
     # when
     parsed = loads_manifest(dumps_manifest(manifest))

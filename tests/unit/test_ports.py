@@ -471,6 +471,9 @@ def test_preset_catalog_port_is_structural() -> None:
         def ignore_list_files(self) -> tuple:
             return ()
 
+        def policy_history(self, name: str) -> tuple[str, ...] | None:
+            return None
+
     # when
     matches = isinstance(FakeCatalog(), PresetCatalog)
 

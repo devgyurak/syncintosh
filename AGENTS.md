@@ -142,6 +142,9 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
   manifest**, never in a filename.
 - **Do not encrypt the path into the filename.** A fresh nonce would rename the file on
   every sync and shred git history into delete+add churn.
+- The manifest stamps each built-in preset with the policy `(rev, digest)` its objects were made under.
+  Changing a preset's strip policy means **appending** to `POLICY_HISTORY` (`presets/history.py`) in the
+  same commit; never edit an earlier entry (`docs/design/03-manifest.md`, "Policy stamp").
 
 ### 3.3 Plaintext never enters git
 

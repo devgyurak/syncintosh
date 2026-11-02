@@ -11,8 +11,12 @@ machines always touch, so its shape decides how clean a sync is.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "key_generation": 2,
+  "policy": {
+    "zsh": { "rev": 1, "digest": "<64 lowercase hex — see Policy stamp>" },
+    "vscode": { "rev": 2, "digest": "<64 lowercase hex>" }
+  },
   "records": {
     "<file_id>": {
       "path": ".zshrc",
@@ -37,6 +41,7 @@ machines always touch, so its shape decides how clean a sync is.
 |---|---|
 | `schema` | Manifest schema version. A bump is a migration, not a routine change. |
 | `key_generation` | The generation new objects are encrypted with ([05-key-generations.md](05-key-generations.md)). Readable only after decrypting the manifest; the manifest's *own* generation is in its envelope header ([04-envelope-v1.md](04-envelope-v1.md)). |
+| `policy` | The preset policy the objects were made under, per built-in preset that has a record: `{preset: {rev, digest}}`. Always present in schema 2 (`{}` for a build with no catalog). See "Policy stamp". |
 | `records` | Record map keyed by `file_id`. |
 | `file_id` | 32 lowercase hex characters (`secrets.token_hex(16)`), fixed width. Generated **once** and reused forever. |
 | `path` | The real path, **relative to `$HOME`** and without a leading `/`. Relative so the manifest is portable across the two Macs and does not bake in a user name. |
@@ -48,6 +53,55 @@ machines always touch, so its shape decides how clean a sync is.
 
 Paths, preset names, and scope live **only here**, never in a filename. The repo stores
 `objects/<file_id>.enc` and nothing else that names the content (§3.2).
+
+## Policy stamp
+
+Two builds can disagree about what a preset strips: one has excluded a key the other still ships. Nothing in
+an object says which policy produced it, so before this field every path that touched such an object had to
+guess ([#24](https://github.com/devgyurak/syncintosh/issues/24)). The manifest now says so once, per preset.
+
+* `digest` — the sha256 of the canonical JSON of the preset's **policy**: for each file its path, whether it is
+  a glob, its format, its `noise` and `excluded` key paths, and its `ignore_list` flag; plus the preset's profile
+  layout. File order and key order do not matter. Array rules, validators, bundle ID, download URL, and cask are
+  **not** part of it — they change how a file is merged or where the app comes from, not which bytes an object
+  holds. The user's ignore list itself is not part of it either: the user chooses it and it changes from cycle
+  to cycle, so it is a carry (`core/ignore.py`), not a build property.
+* `rev` — the position of that digest in the preset's append-only `POLICY_HISTORY`
+  (`presets/history.py`), counted from 1. A policy change appends the new digest in the same commit; a golden
+  test fails until the last entry equals the current digest.
+
+Both are stored because neither is enough: a bare revision cannot tell our revision 3 from a fork's, and a bare
+digest cannot say whether to migrate or to stop. `core/policy.py` compares them (`classify_policy`), against the
+**local** history, per preset:
+
+| The stamp names… | Verdict |
+|---|---|
+| a preset this build does not ship, or a `rev` past its history | `newer` |
+| a `rev` whose recorded digest is not the stamp's | `unknown` |
+| the latest revision | `match` |
+| an earlier revision | `older` |
+
+A preset with records but no stamp is revision 1: every repo written before stamps existed was made under the
+first policy. A record naming a preset that is not built in (a community preset) makes no claim.
+
+Only the **writer's own build** is ever stamped — a collect, a merge, and (by preserving what it found) a key
+rotation. `key_generation` is independent: a rotation re-seals bytes, a policy change decides which bytes there
+are, and a rotation neither re-derives nor blocks on the stamp.
+
+Stamping the local policy is honest only because a cycle brings every object it re-uses to that policy first
+(migrate on `older`, stop on `newer`/`unknown`). A writer that stamped without that gate would turn a policy it
+does not know into a `match`.
+
+The stamp is a claim by whoever wrote the repo, so it is a signal for detection, not a trust boundary: `apply`
+still checks that an object is a projection under the local policy (`docs/design/02-base-and-merge.md`).
+
+## Schema versions
+
+`schema` 2 added `policy`. A schema-1 manifest is still **read**, as a schema-2 manifest with no stamps, and the
+next write persists it, so a repo upgrades by being synced: the manifest is rewritten once and no object is
+(an object's bytes do not depend on the schema). A schema-1 build reading a schema-2 repo fails with
+`UnsupportedManifestSchema`, which is the intended outcome: the older build does not know to stop on a policy
+mismatch, so it must be upgraded first.
 
 ## Canonical serialization — an invariant
 
@@ -214,6 +268,8 @@ same conservative posture as a first-sight file.
 
 ## Open
 
+- Gating a cycle on the stamp (stop on `newer`/`unknown`, migrate on `older`) is the follow-up to this
+  schema change; until it lands the stamp is written and read but nothing acts on it.
 - Whether `schema` should be a per-record field as well as a manifest-wide one. Manifest-wide
   is enough today and simpler; per-record only helps if two record shapes ever coexist.
 - Record `path` is relative to `$HOME`; a preset that writes outside `$HOME` (if one ever

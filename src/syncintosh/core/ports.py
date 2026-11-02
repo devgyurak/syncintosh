@@ -166,6 +166,14 @@ class PresetCatalog(Protocol):
         """
         ...
 
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        """Every policy digest built-in preset `name` has had, oldest first, or `None` when it is not built in.
+
+        The length is the preset's current revision (`core/policy.py`). A catalog that holds no history
+        for a preset makes no claim about it, which reads as a policy this build has never heard of.
+        """
+        ...
+
 
 @runtime_checkable
 class SyntaxValidator(Protocol):

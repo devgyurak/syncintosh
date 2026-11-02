@@ -20,11 +20,16 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from syncintosh.core.canonical import canonical_json_bytes
 from syncintosh.core.errors import ManifestCorrupt, UnsupportedManifestSchema
-from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
+from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord, validate_preset
+from syncintosh.core.policy import STAMP_KEYS, PolicyStamp
 
 # Top-level keys: all required, nothing else allowed.
-_MANIFEST_KEYS = frozenset({"schema", "key_generation", "records"})
+_MANIFEST_KEYS = frozenset({"schema", "key_generation", "records", "policy"})
+# Schema 1 had no `policy`; it is read as schema 2 with none (every preset then reads as revision 1).
+_MANIFEST_KEYS_V1 = frozenset({"schema", "key_generation", "records"})
+_LEGACY_SCHEMA = 1
 # Record keys: `machine` is optional (required only for machine scope, which the model checks).
 _RECORD_KEYS = frozenset({"path", "preset", "scope", "machine", "format", "sha256"})
 
@@ -49,41 +54,6 @@ def _reject_constant(token: str) -> Any:
     raise ManifestCorrupt(f"manifest JSON may not contain the constant {token}")
 
 
-def _check_canonical(value: object, where: str) -> None:
-    """Reject a value the canonical encoder would not round-trip (float, negative int, ...)."""
-    if value is None or isinstance(value, (str, bool)):
-        return
-    if isinstance(value, int):
-        if value < 0:
-            raise ManifestCorrupt(f"{where} holds a negative integer: {value}")
-        return
-    if isinstance(value, list):
-        for item in value:
-            _check_canonical(item, where)
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ManifestCorrupt(f"{where} has a non-string key: {key!r}")
-            _check_canonical(item, where)
-        return
-    raise ManifestCorrupt(f"{where} holds a value that is not canonical JSON: {type(value).__name__}")
-
-
-def canonical_json_bytes(value: object) -> bytes:
-    """Encode `value` as canonical JSON, UTF-8, with no trailing newline.
-
-    Pure and total for the manifest's value domain; a float, a negative int, or any other
-    non-canonical type is a `ManifestCorrupt` rather than a silent re-serialization.
-    """
-    _check_canonical(value, "manifest")
-    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    try:
-        return text.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ManifestCorrupt("manifest holds a string that is not encodable as UTF-8") from exc
-
-
 def manifest_to_mapping(manifest: Manifest) -> dict[str, Any]:
     """The plain nested mapping a manifest serializes as (`machine` omitted when absent)."""
     records: dict[str, Any] = {}
@@ -98,7 +68,8 @@ def manifest_to_mapping(manifest: Manifest) -> dict[str, Any]:
         if record.machine is not None:
             entry["machine"] = record.machine
         records[file_id] = entry
-    return {"schema": manifest.schema, "key_generation": manifest.key_generation, "records": records}
+    policy = {name: {"rev": stamp.rev, "digest": stamp.digest} for name, stamp in manifest.policy.items()}
+    return {"schema": manifest.schema, "key_generation": manifest.key_generation, "records": records, "policy": policy}
 
 
 def dumps_manifest(manifest: Manifest) -> bytes:
@@ -130,6 +101,19 @@ def _parse_record(file_id: str, raw: object) -> ManifestRecord:
     )
 
 
+def _parse_policy(raw: object) -> dict[str, PolicyStamp]:
+    if not isinstance(raw, dict):
+        raise ManifestCorrupt("manifest `policy` must be a JSON object")
+    stamps: dict[str, PolicyStamp] = {}
+    for name, entry in raw.items():
+        validate_preset(name)
+        if not isinstance(entry, dict):
+            raise ManifestCorrupt(f"policy {name!r} must be a JSON object")
+        _require_keys(entry, STAMP_KEYS, STAMP_KEYS, f"policy {name!r}")
+        stamps[name] = PolicyStamp.create(rev=entry["rev"], digest=entry["digest"])
+    return stamps
+
+
 def loads_manifest(data: bytes) -> Manifest:
     """Parse canonical manifest bytes, rejecting anything the model would not have written.
 
@@ -157,14 +141,21 @@ def loads_manifest(data: bytes) -> Manifest:
     schema = parsed.get("schema")
     if not isinstance(schema, int) or isinstance(schema, bool):
         raise ManifestCorrupt(f"manifest schema must be an integer, got {type(schema).__name__}")
-    if schema != MANIFEST_SCHEMA:
+    if schema not in (MANIFEST_SCHEMA, _LEGACY_SCHEMA):
         raise UnsupportedManifestSchema(schema)
-    _require_keys(parsed, _MANIFEST_KEYS, _MANIFEST_KEYS, "manifest")
+    legacy = schema == _LEGACY_SCHEMA
+    expected = _MANIFEST_KEYS_V1 if legacy else _MANIFEST_KEYS
+    _require_keys(parsed, expected, expected, "manifest")
     records_raw = parsed["records"]
     if not isinstance(records_raw, dict):
         raise ManifestCorrupt("manifest `records` must be a JSON object")
     records = {file_id: _parse_record(file_id, raw) for file_id, raw in records_raw.items()}
-    return Manifest.create(schema=schema, key_generation=parsed["key_generation"], records=records)
+    # A schema-1 manifest is lifted to the current schema in memory. The next write persists it, so a
+    # repo upgrades by being synced, never by a separate migration command.
+    policy = {} if legacy else _parse_policy(parsed["policy"])
+    return Manifest.create(
+        schema=MANIFEST_SCHEMA, key_generation=parsed["key_generation"], records=records, policy=policy
+    )
 
 
 __all__ = [

@@ -414,6 +414,9 @@ class EmptyCatalog:
     def ignore_list_files(self) -> tuple[PresetFile, ...]:
         return ()
 
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        return None
+
 
 # The single instance; a frozen dataclass with no fields, so identity and equality agree.
 EMPTY_CATALOG: Final = EmptyCatalog()

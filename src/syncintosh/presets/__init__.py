@@ -19,6 +19,7 @@ from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
 from syncintosh.presets.docker import DOCKER
+from syncintosh.presets.history import POLICY_HISTORY
 from syncintosh.presets.vscode import VSCODE
 from syncintosh.presets.zsh import ZSH
 
@@ -162,6 +163,10 @@ class BuiltinCatalog:
     def ignore_list_files(self) -> tuple[PresetFile, ...]:
         """The built-in files that hold and obey the user's ignore list, in catalog order."""
         return tuple(file for preset in self.presets for file in preset.files if file.ignore_list)
+
+    def policy_history(self, name: str) -> tuple[str, ...] | None:
+        """The digests built-in preset `name` has shipped, oldest first, or `None` for a name this catalog lacks."""
+        return POLICY_HISTORY.get(name) if self.get(name) is not None else None
 
 
 __all__ = ["BUILTIN_PRESETS", "BuiltinCatalog"]
