@@ -415,3 +415,75 @@ def test_a_list_with_nothing_to_note_adds_no_note(tmp_path, memory_key_store) ->
 
     # then
     assert report.notes == ()
+
+
+# --------------------------------------------------------------------------- a list that cannot be read
+
+
+def test_a_symlinked_default_settings_file_stops_a_profile_from_sealing_its_ignored_keys(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the default settings.json is a symlink (so its list cannot be trusted), and the profile's own
+    # settings.json holds a key the list names
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    real = a.home / "dotfiles" / "settings.json"
+    real.parent.mkdir(parents=True)
+    real.write_text(json.dumps({**BASE, LIST: ["editor.fontSize"]}), encoding="utf-8")
+    (a.home / SETTINGS).parent.mkdir(parents=True)
+    (a.home / SETTINGS).symlink_to(real)
+    _write(a, INDEX, {"userDataProfiles": [{"name": "Work", "location": "-3f2a1b"}]})
+    _write(a, PROFILE_SETTINGS, {"editor.tabSize": 3, "editor.fontSize": 99})
+
+    # when
+    report = _run(a)
+
+    # then — the profile file is refused and reported, and nothing of it was sealed
+    work = vscode.PROFILES.logical_path("Work", "settings.json")
+    assert [row.path for row in report.unprojectable] == [work]
+    assert [obj for obj in _sealed(a) if obj.get("editor.fontSize") == 99 or obj.get("editor.tabSize") == 3] == []
+
+
+# --------------------------------------------------------------------------- joining with an ignored key
+
+
+def test_a_new_mac_that_ignores_a_key_adopts_local_without_changing_the_repos_value(tmp_path, memory_key_store) -> None:
+    # given — A and B share the file; the new Mac C ignores the font size and has its own value for it
+    a, b = _pair(tmp_path, memory_key_store)
+    c = _machine(tmp_path, memory_key_store, "machine-c", a.remote)
+    _initialize(c, import_from=a.recovery)
+    _write(c, SETTINGS, {**BASE, "editor.fontSize": 40, LIST: ["editor.fontSize"]})
+
+    # when
+    first = _run(c)
+    _run(c, adopt="local")
+    _run(b)
+
+    # then — C is asked to choose, then the repo keeps the shared font size, C keeps its own, B is unchanged
+    assert first.needs_adopt is True
+    assert [obj for obj in _sealed(c) if obj.get("editor.fontSize") == 13 and LIST in obj] != []
+    assert [obj for obj in _sealed(c) if obj.get("editor.fontSize") == 40] == []
+    assert _live(c)["editor.fontSize"] == 40
+    assert _live(b)["editor.fontSize"] == 13
+
+
+# --------------------------------------------------------------------------- the live file's own spelling
+
+
+def test_apply_leaves_an_ignored_value_exactly_as_the_live_file_spelled_it(tmp_path, memory_key_store) -> None:
+    # given — A spells its ignored font size `1e3`; B publishes a tab size change
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, {**BASE, "editor.tabSize": 2})
+    _run(b)
+    text = (
+        '{\n  "editor.tabSize": 4,\n  "editor.fontSize": 1e3,\n  "window.zoomLevel": 2,\n'
+        f'  "{LIST}": ["editor.fontSize"]\n}}\n'
+    )
+    (a.home / SETTINGS).write_text(text, encoding="utf-8")
+
+    # when
+    _run(a)
+
+    # then — only the tab size moved; `1e3` is not rewritten as `1000.0`
+    assert (a.home / SETTINGS).read_text(encoding="utf-8") == text.replace('"editor.tabSize": 4', '"editor.tabSize": 2')
