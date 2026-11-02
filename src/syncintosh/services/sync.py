@@ -206,7 +206,7 @@ class _Presets:
     # The user's ignore list, read once for the cycle by `_read_ignores`, by the path of the file that holds it:
     # the spec, or the fixed reason the list could not be used. Empty until a cycle entry point fills it, so
     # building a `_Presets` reads nothing (``AGENTS.md`` §2.6).
-    ignores: Mapping[str, IgnoreSpec | str] = field(default_factory=lambda: MappingProxyType({}))
+    ignores: Mapping[str, IgnoreSpec | str] = field(default_factory=lambda: MappingProxyType({}), repr=False)
 
     def policy_for(self, path: str) -> PresetFile | None:
         """The strip/validate policy for `path`, or `None` when no preset owns it."""
