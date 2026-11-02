@@ -456,15 +456,19 @@ def _read_ignores(
 
     Once per cycle, and from the **default** profile's file only: a profile's own `settings.json` obeys the
     list its default counterpart holds. Nothing is collected or copied, and a change to the list is seen
-    from the next cycle. A file that is not there, a symlink, or a denied path has no list (collection
-    would not follow it either); a file that is there but cannot be read as a list is a fixed reason
-    string, which `_project_file` turns into a refusal for every file that obeys it (``AGENTS.md`` §4).
+    from the next cycle. A file that is **not there** has no list (VS Code has none either). A file that is
+    there but cannot be used — a symlink, a denied path, one outside `$HOME`, or text that is not a list of
+    strings — is a fixed reason string, which `_project_file` turns into a refusal for every file that obeys
+    it (``AGENTS.md`` §4).
     """
     found: dict[str, IgnoreSpec | str] = {}
     for policy in catalog.ignore_list_files():
         full = _join(home, policy.path)
         if deny.is_denied(home, policy.path) or deny.escapes(home, policy.path) or live.is_symlink(full):
-            found[policy.path] = NO_IGNORES
+            # The list cannot be read, which is not the same as there being none: the default file is not
+            # collected, but a profile's file obeys its list, and an empty one would seal the keys the user
+            # meant to keep local and overwrite the other Macs' values with them.
+            found[policy.path] = _IGNORE_LIST_UNREADABLE
             continue
         raw = live.read(full)
         if raw is None:

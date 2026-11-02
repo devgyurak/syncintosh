@@ -149,6 +149,9 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   - `-x` cancels only an `x` the user listed. It does not switch a noise key back on or release an excluded one
     (VS Code uses `-x` to subtract from its own built-in default set, which this tool does not have); such an
     entry is counted in a note on the report. Re-enabling a noise key this way is a follow-up.
+  - A default `settings.json` that is a symbolic link, a denied path, or outside `$HOME` has a list that cannot be
+    trusted, so a profile's `settings.json` is **not synced** either (the list is unknown, and an empty one would seal
+    the keys the user meant to keep local). A default file that is simply absent has no list, as in VS Code.
   - A list that is not an array of strings (or a `settings.json` that cannot be read to find it) **fails closed**:
     the cycle refuses to collect or apply every file that obeys it and reports a fixed message that does not quote
     the file.
