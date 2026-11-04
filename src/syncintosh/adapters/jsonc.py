@@ -450,12 +450,15 @@ class _Diff:
         children = self._children(path)
         if not children:
             leaf = self._leaves.get(path)
+            lone = False
             if isinstance(leaf, EmptyObject) and isinstance(node, _ObjectNode) and node.members:
                 # The tree says this object is empty but the template still has members. Take them
                 # out in place — line by line, or by splice — rather than rewriting the span, so a
                 # comment above a member and the object's own layout survive (`_rewrite` would
                 # refuse the comment anyway).
-                if _clean_multiline_object(self._source, node, self._comments):
+                clean = _clean_multiline_object(self._source, node, self._comments)
+                lone = clean and self._lone_comma_touched(node, path)
+                if clean and not lone:
                     self._object(node, path, edits)
                     return
                 if self._splice_inline(node, path, edits):
@@ -467,21 +470,57 @@ class _Diff:
             ):
                 return
             if leaf is not None:
-                self._rewrite(node, _leaf_text(leaf), edits)
+                self._rewrite(node, _leaf_text(leaf), edits, LONE_COMMA_REFUSED if lone else None)
             return
         if not isinstance(node, _ObjectNode):
             # The tree wants an object here but the template has something else: rewrite it.
             self._rewrite(node, self._subtree(path, len(path)), edits)
             return
-        if _clean_multiline_object(self._source, node, self._comments):
+        clean = _clean_multiline_object(self._source, node, self._comments)
+        lone = clean and self._lone_comma_touched(node, path)
+        if clean and not lone:
             self._object(node, path, edits)
             return
         if self._splice_inline(node, path, edits):
             return
         # A one-line object with a comment inside it cannot be spliced member by member, and
         # re-flowing it would move that comment; rewrite the whole value (which refuses when the
-        # span holds a comment, so a comment is never silently dropped).
-        self._rewrite(node, self._subtree(path, len(path)), edits)
+        # span holds a comment, so a comment is never silently dropped). The same goes for a line
+        # edit that would strand a comma on a line of its own.
+        self._rewrite(node, self._subtree(path, len(path)), edits, LONE_COMMA_REFUSED if lone else None)
+
+    def _lone_comma_touched(self, node: _ObjectNode, path: KeyPath) -> bool:
+        """True when a line edit of this object would strand a comma that sits alone on its line.
+
+        Only an edit that works on the comma itself needs the whole object rewritten: a deleted member
+        (its line goes, its comma stays), the member a new block is inserted after (the block would land
+        between a value and its comma), and the last survivor when a tail deletion drops its comma. An
+        object with a comma on its own line is otherwise edited in place, so a nested change, or an add at
+        the head, keeps the user's layout and notes. The three cases mirror `_object` and `_remove_deleted`.
+        """
+        text, comments = self._source, self._comments
+        lone = [not _comma_stays_on_its_line(text, comments, member.value) for member in node.members]
+        if not any(lone):
+            return False
+        desired = self._children(path)
+        wanted = set(desired)
+        index_of = {member.key: index for index, member in enumerate(node.members)}
+        deleted = {index for index, member in enumerate(node.members) if member.key not in wanted}
+        anchors: set[int] = set()
+        previous: int | None = None
+        for name in desired:
+            if name in index_of:
+                previous = index_of[name]
+            elif previous is not None:
+                anchors.add(previous)
+        survivors = [index for index in range(len(node.members)) if index not in deleted]
+        tail_dropped = (
+            bool(survivors)
+            and len(node.members) - 1 in deleted
+            and not _has_trailing_comma(comments, node)
+            and survivors[-1] not in anchors
+        )
+        return any(lone[index] for index in deleted | anchors) or (tail_dropped and lone[survivors[-1]])
 
     def _inline_inner(self, node: _ObjectNode) -> str | None:
         """The text between a one-line object's braces when it can be spliced, else `None`.
@@ -499,7 +538,9 @@ class _Diff:
             return None
         if self._source[node.span.start] != "{" or self._source[node.span.end - 1] != "}":
             return None
-        if self._comments.overlaps(node.span.start + 1, node.span.end - 1):
+        if node.members and self._comments.overlaps(node.span.start + 1, node.span.end - 1):
+            # A member-less object has nothing a splice could move or swallow: the new members go after
+            # the comment (`_splice_inline`), so only an object with members falls back to a rewrite.
             return None
         return self._source[node.span.start + 1 : node.span.end - 1]
 
@@ -535,12 +576,22 @@ class _Diff:
             # empty and the members still need a separator between them.
             join = lead or ", "
             members = [self._inline_member((*path, key)) for key in added]
+            commented = not node.members and self._comments.overlaps(node.span.start + 1, node.span.end - 1)
+            if commented:
+                # `{ /* note */ }`: the members go after the comment, never inside it, and the padding
+                # that was already before `}` stays where it is.
+                lead = " "
             # The block goes after everything that survives — and after any removal, never inside
             # one. The padding before `}` sits between the last member and the brace, so a run that
             # emptied the object ends past that member's value; an insert placed there would be
             # inside the deleted range, and `_apply_edits` refuses an edit that carries text and
             # starts before the cursor. `{"a": 1, "b": 2}` handed `{c}` would then not render at all.
-            natural = node.members[-1].value.span.end if node.members else node.span.end - 1
+            if node.members:
+                natural = node.members[-1].value.span.end
+            elif commented:
+                natural = self._comments.last_end_before(node.span.end - 1)
+            else:
+                natural = node.span.end - 1
             position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
         return True
@@ -605,6 +656,10 @@ class _Diff:
             return "{}" if leaf is None else _leaf_text(leaf)
         entries = ", ".join(self._inline_member((*path, key)) for key in children)
         return "{" + entries + "}"
+
+    def _brace_line_is_comment(self, node: _ObjectNode) -> bool:
+        """True when the line holding a member-less object's `}` begins inside a comment."""
+        return self._comments.inside(_line_start(self._source, node.span.end - 1))
 
     def _open_position(self, node: _ObjectNode) -> int:
         """Where a block that opens the object goes: above the first member's own comment.
@@ -838,6 +893,16 @@ class _Diff:
             member + ("," if index < last or follows or trailing else "") + self._newline
             for index, member in enumerate(pending)
         )
+        if anchor is None and not node.members and self._brace_line_is_comment(node):
+            # `{ /* note\n   more */ }`: the closing brace shares a line with the end of a comment, so a
+            # line start before it is inside the comment. The block goes after the comment and `}` moves
+            # to its own line at the indent of the line the object opened on.
+            close = node.span.end - 1
+            opening = self._source[_line_start(self._source, node.span.start) : node.span.start]
+            closing_indent = opening[: len(opening) - len(opening.lstrip(" \t"))]
+            end = self._comments.last_end_before(close)
+            edits.append(_Edit(end, close, self._newline + block + closing_indent))
+            return
         if anchor is None:
             # Nothing precedes the block *in the tree*, so it opens the object: before the first
             # member the template has. Reaching for the closing brace instead would put the block
@@ -1021,6 +1086,19 @@ class _Comments:
         if last > first and self.spans[last - 1].end > limit:
             return self.spans[last - 1].end
         return None
+
+    def inside(self, position: int) -> bool:
+        """True when `position` is strictly inside a comment, so a line that starts there starts mid-comment."""
+        span = self._span_at(position)
+        return span is not None and span.start < position
+
+    def last_end_before(self, position: int) -> int:
+        """The end of the last comment that ends at or before `position`; the caller must know one does."""
+        index = bisect.bisect_right(self._ends, position) - 1
+        if index < 0:
+            # Index -1 would hand back the file's *last* comment, which is somewhere else entirely.
+            raise ValueError("no comment ends before this position")
+        return self.spans[index].end
 
     def next_meaningful(self, position: int) -> int:
         """The offset of the first character after `position` that is not in a comment or a space."""
@@ -1332,6 +1410,13 @@ CHANGED_WITH_NOTE_REFUSED = (
 # only the cause.
 EDIT_OVERLAP_REFUSED = "two edits to this file overlap, so it cannot be written without losing one of them"
 
+# A comma alone on its line stays behind when its member's line goes, so the object is rewritten whole, and a comment
+# inside it would be lost. The text names the cause and the way out, never a value.
+LONE_COMMA_REFUSED = (
+    "this object has a comma on a line of its own, so this edit cannot be made in place and a comment inside it"
+    " would be lost; move the comma to the end of the previous line"
+)
+
 UNRULED_REMOVAL_REFUSED = (
     "this array has no rule to tell its bindings apart, so a comment on a removed element cannot be kept"
 )
@@ -1529,6 +1614,7 @@ def _apply_edits(text: str, edits: list[TextEdit]) -> str:
 __all__ = [
     "CHANGED_WITH_NOTE_REFUSED",
     "EDIT_OVERLAP_REFUSED",
+    "LONE_COMMA_REFUSED",
     "UNRULED_REMOVAL_REFUSED",
     "VALUE_WITH_NOTE_REFUSED",
     "JsoncAdapter",

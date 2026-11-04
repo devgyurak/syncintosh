@@ -494,6 +494,34 @@ def test_a_tab_indented_crlf_settings_file_round_trips(tmp_path, memory_key_stor
     assert b"\r\n" in _read(b, SETTINGS)
 
 
+def test_a_key_added_to_a_commented_empty_object_converges_beside_a_lone_comma(tmp_path, memory_key_store) -> None:
+    # given — two machines in sync on a settings file with the two layouts that used to wedge a merge: an
+    # empty `[python]` that carries a block comment, and a `files.exclude` whose comma sits alone on its line
+    original = (
+        b'{\n  "editor.fontSize": 13,\n  "[python]": { /* note\n  more */ },\n'
+        b'  "files.exclude": {\n    "**/.git": true\n    ,\n    "**/.DS_Store": true\n  }\n}\n'
+    )
+    a, b = _pair(tmp_path, memory_key_store, original)
+    edited = original.replace(b"/* note\n  more */ }", b'/* note\n  more */\n    "editor.tabSize": 4\n  }').replace(
+        b'    "**/.git": true\n    ,\n    "**/.DS_Store": true\n', b'    "**/.DS_Store": true\n'
+    )
+
+    # when — A adds a key to `[python]` and drops one from `files.exclude`, B changes another setting
+    # meanwhile, so B's sync is a tree merge rendered against B's own commented file; B then syncs again
+    _write(a, SETTINGS, edited)
+    published = _run(a)
+    _write(b, SETTINGS, original.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15'))
+    first = _run(b)
+    second = _run(b)
+
+    # then — B holds both sides' changes, never a conflict on either side, and the second sync has nothing left
+    adapter = JsoncAdapter()
+    expected = adapter.parse(edited.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15').decode("utf-8"))
+    assert [published.has_conflicts, first.has_conflicts, second.has_conflicts] == [False, False, False]
+    assert adapter.parse(_read(b, SETTINGS).decode("utf-8")) == expected
+    assert second.unchanged is True
+
+
 def test_a_machine_without_vscode_installed_defers(tmp_path, memory_key_store) -> None:
     # given — A published, and B has no VS Code directory at all
     a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
