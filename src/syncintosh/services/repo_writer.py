@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from types import MappingProxyType
 
 from syncintosh.core.errors import ContentDigestMismatch
 from syncintosh.core.manifest import FileFormat, Manifest
@@ -24,6 +25,7 @@ from syncintosh.core.repo import (
     GITIGNORE_PATH,
     MANIFEST_PATH,
     OBJECTS_DIR,
+    envelope_key_id,
     object_file_id,
     object_path,
     plan_writes,
@@ -32,6 +34,10 @@ from syncintosh.core.repo import (
 # A human label for the manifest in a secret-scan message; objects are labelled by their record
 # path instead, which is what the user recognises.
 MANIFEST_SUBJECT = "manifest"
+
+
+# The default for `carried`: an immutable empty mapping, so no call shares a mutable default.
+NOTHING_CARRIED: Mapping[str, bytes] = MappingProxyType({})
 
 
 # The manifest is canonical JSON, so it is scanned as a structured format: nothing in it is a
@@ -106,6 +112,7 @@ def write_repo(
     head: Manifest | None,
     new: Manifest,
     contents: Mapping[str, bytes],
+    carried: Mapping[str, bytes] = NOTHING_CARRIED,
     force_reseal: bool = False,
 ) -> None:
     """Turn `head` into `new`, sealing each object and the manifest under the scan.
@@ -114,6 +121,12 @@ def write_repo(
     every object the plan writes, and its digest must equal the record's. State-changing, so it
     returns `None` and raises on failure (``AGENTS.md`` §2.8): a missing plaintext, a digest
     mismatch, or a scan refusal raises before any seal or write happens.
+
+    `carried` maps a `file_id` to the **stored ciphertext** of an object this machine did not change (the
+    other side's, or a policy migration's). It is opened here — the AAD check — and held to the same digest
+    and scan as a plaintext; on the manifest's generation it is then written byte for byte instead of
+    re-sealed under a fresh nonce, so a reused object does not churn in git. `contents` wins over `carried`
+    for the same `file_id`, and `force_reseal` ignores `carried`.
 
     `new` must be the **complete** manifest: the orphan sweep deletes every stored object absent
     from it, so a manifest filtered to this machine's records would delete another machine's
@@ -127,17 +140,30 @@ def write_repo(
     plan = plan_writes(head, new)
     objects_to_write = tuple(sorted(new.records)) if force_reseal else plan.objects_to_write
     manifest_plaintext = dumps_manifest(new)
-    missing = sorted(file_id for file_id in objects_to_write if file_id not in contents)
+    usable = NOTHING_CARRIED if force_reseal else carried
+    missing = sorted(file_id for file_id in objects_to_write if file_id not in contents and file_id not in usable)
     if missing:
         raise ValueError(f"no plaintext supplied for objects: {missing}")
-    _verify_digests(new, objects_to_write, contents)
+    # Every failure below happens before the first write. A carried blob is opened here, not by the caller, so
+    # the AAD check, the digest, and the scan cover it exactly as they cover a plaintext.
+    reused = tuple(file_id for file_id in objects_to_write if file_id not in contents)
+    plaintexts = {
+        **{file_id: cipher.open(usable[file_id], domain="object", file_id=file_id) for file_id in reused},
+        **contents,
+    }
+    _verify_digests(new, objects_to_write, plaintexts)
 
     # Scan everything first: a refusal must leave the repo untouched.
-    for subject, plaintext, fmt in _payloads(new, contents, objects_to_write, manifest_plaintext, plan.write_manifest):
+    for subject, plaintext, fmt in _payloads(
+        new, plaintexts, objects_to_write, manifest_plaintext, plan.write_manifest
+    ):
         scanner.scan(plaintext, subject=subject, format=fmt)
 
     for file_id in objects_to_write:
-        blob = cipher.seal(contents[file_id], domain="object", file_id=file_id, key_id=new.key_generation)
+        if file_id in reused and envelope_key_id(usable[file_id]) == new.key_generation:
+            files.write(object_path(file_id), usable[file_id])
+            continue
+        blob = cipher.seal(plaintexts[file_id], domain="object", file_id=file_id, key_id=new.key_generation)
         files.write(object_path(file_id), blob)
     if plan.write_manifest:
         blob = cipher.seal(manifest_plaintext, domain="manifest", file_id="", key_id=new.key_generation)

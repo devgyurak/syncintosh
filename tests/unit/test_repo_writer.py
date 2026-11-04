@@ -12,7 +12,7 @@ import hashlib
 
 import pytest
 
-from syncintosh.core.errors import ContentDigestMismatch, SecretScanError
+from syncintosh.core.errors import AuthenticationError, ContentDigestMismatch, SecretScanError
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.repo import (
@@ -23,6 +23,7 @@ from syncintosh.core.repo import (
     MANIFEST_PATH,
     object_path,
 )
+from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.services.repo_writer import write_repo
 
 ID1 = "0f3c4b5a69788796a5b4c3d2e1f0abcd"
@@ -32,6 +33,8 @@ OTHER_CONTENT = b"other content"
 SHA1 = hashlib.sha256(CONTENT).hexdigest()
 SHA2 = hashlib.sha256(OTHER_CONTENT).hexdigest()
 SEAL_PREFIX = b"SEALED:"
+KEY = bytes(range(32))
+OTHER_KEY = bytes(range(1, 33))
 
 
 class FakeCipher:
@@ -264,3 +267,164 @@ def test_the_scan_is_told_the_format_each_payload_is_in() -> None:
 
     # then
     assert scanner.formats == {"settings.json": "jsonc", "manifest": "jsonc"}
+
+
+class CountingCipher:
+    """The real envelope cipher, counting every `seal` so a test can tell carried from re-sealed."""
+
+    def __init__(self, store) -> None:
+        self._real = EnvelopeCipher(store)
+        self.sealed: list[tuple[str, str, int]] = []
+
+    def seal(self, plaintext: bytes, *, domain, file_id, key_id):
+        self.sealed.append((domain, file_id, key_id))
+        return self._real.seal(plaintext, domain=domain, file_id=file_id, key_id=key_id)
+
+    def open(self, blob: bytes, *, domain, file_id):
+        return self._real.open(blob, domain=domain, file_id=file_id)
+
+
+def _stored(store, plaintext: bytes = CONTENT, *, file_id: str = ID1, key_id: int = 1) -> bytes:
+    return EnvelopeCipher(store).seal(plaintext, domain="object", file_id=file_id, key_id=key_id)
+
+
+def _carry(files, cipher, scanner, *, new, carried, head=None, contents=None, force_reseal=False) -> None:
+    write_repo(
+        files=files,
+        cipher=cipher,
+        scanner=scanner,
+        head=head,
+        new=new,
+        contents={} if contents is None else contents,
+        carried=carried,
+        force_reseal=force_reseal,
+    )
+
+
+def test_a_carried_blob_is_written_byte_for_byte(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store)
+
+    # when
+    _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob})
+
+    # then — the stored ciphertext is untouched, and only the manifest was sealed
+    assert files.read(object_path(ID1)) == blob
+    assert cipher.sealed == [("manifest", "", 1)]
+
+
+def test_a_carried_blob_with_the_wrong_digest_is_refused_before_anything_is_written(memory_key_store) -> None:
+    # given — the blob opens, but its plaintext is not what the record says
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store, OTHER_CONTENT)
+
+    # when & then
+    with pytest.raises(ContentDigestMismatch):
+        _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob})
+    assert files.files == {}
+    assert cipher.sealed == []
+    assert scanner.scanned == []
+
+
+def test_a_carried_plaintext_the_scan_refuses_leaves_the_repo_untouched(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner(refuse=".zshrc")
+    blob = _stored(store)
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob})
+    assert files.files == {}
+    assert cipher.sealed == []
+
+
+def test_a_carried_blob_from_another_generation_is_sealed_again(memory_key_store) -> None:
+    # given — the blob is on generation 1, the manifest on generation 2
+    store = memory_key_store({1: KEY, 2: OTHER_KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store, key_id=1)
+    new = Manifest.create(schema=MANIFEST_SCHEMA, key_generation=2, records={ID1: _rec()})
+
+    # when
+    _carry(files, cipher, scanner, new=new, carried={ID1: blob})
+
+    # then
+    assert ("object", ID1, 2) in cipher.sealed
+    assert files.read(object_path(ID1)) != blob
+    assert cipher.open(files.read(object_path(ID1)) or b"", domain="object", file_id=ID1) == CONTENT
+
+
+def test_force_reseal_does_not_accept_a_carried_blob_for_a_missing_plaintext(memory_key_store) -> None:
+    # given — a carried blob on the current generation, but a rotation re-seals everything from plaintext
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store)
+
+    # when & then
+    with pytest.raises(ValueError):
+        _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob}, force_reseal=True)
+
+
+def test_force_reseal_seals_the_plaintext_instead_of_writing_the_carried_blob(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store)
+
+    # when
+    _carry(
+        files,
+        cipher,
+        scanner,
+        new=_manifest({ID1: _rec()}),
+        carried={ID1: blob},
+        contents={ID1: CONTENT},
+        force_reseal=True,
+    )
+
+    # then
+    assert ("object", ID1, 1) in cipher.sealed
+    assert files.read(object_path(ID1)) != blob
+
+
+def test_a_carried_blob_for_an_object_the_plan_does_not_write_is_never_opened(memory_key_store) -> None:
+    # given — ID1 is unchanged against head, and its carried entry is garbage
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    head = _manifest({ID1: _rec()})
+
+    # when
+    _carry(files, cipher, scanner, head=head, new=head, carried={ID1: b"not a ciphertext"})
+
+    # then
+    assert object_path(ID1) not in files.files
+
+
+def test_contents_win_over_carried_for_the_same_object(memory_key_store) -> None:
+    # given — a carried blob that would be refused (wrong digest) beside a plaintext this machine made
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    stale = _stored(store, OTHER_CONTENT)
+
+    # when
+    _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: stale}, contents={ID1: CONTENT})
+
+    # then — the plaintext was sealed, the carried blob was never consulted
+    assert ("object", ID1, 1) in cipher.sealed
+    assert cipher.open(files.read(object_path(ID1)) or b"", domain="object", file_id=ID1) == CONTENT
+
+
+def test_a_blob_carried_into_another_objects_slot_fails_the_aad_check(memory_key_store) -> None:
+    # given — ID2's ciphertext offered for ID1
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store, file_id=ID2)
+
+    # when & then
+    with pytest.raises(AuthenticationError):
+        _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob})
+    assert files.files == {}
