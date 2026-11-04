@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ProjectionError
+from syncintosh.core.ports import TextEdit
 from syncintosh.core.presets import PresetFile
 from syncintosh.core.projection import graft, project_text, restore_text, strip
 from syncintosh.core.tree import Tree, tree_from_value
@@ -321,6 +322,9 @@ def test_restore_text_still_refuses_a_render_that_breaks_a_projection() -> None:
 
         def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
             return "{}"
+
+        def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+            return (TextEdit(0, len(template), self.render(tree, template, arrays, verbatim)),)
 
     policy = _policy(noise={NOISE})
     repo_text = '{"editor.fontSize": 13}'

@@ -2093,9 +2093,9 @@ def _apply(
     other role those collected bytes play: the raw compare-and-swap reference for the file. When
     a preset owns the path the published bytes are first combined with the live file's own values
     at the preset's stripped keys, so an excluded credential the repo never held is left exactly
-    as this machine has it (``AGENTS.md`` §3.4) — for a scalar value byte-identical, and for a
-    nested object the value itself but re-rendered (``docs/design/02-base-and-merge.md``,
-    "What a render is allowed to change").
+    as this machine has it (``AGENTS.md`` §3.4) — byte-identical, comments and layout included, unless
+    a line beside it changed on the other machine, in which case the value is the same but re-rendered
+    (``docs/design/02-base-and-merge.md``, "What a render is allowed to change").
 
     A record's `path` and `preset` arrive from the repo, so before writing anything this checks
     the target stays under `$HOME` (resolving the parent), is one this machine's local allowlist

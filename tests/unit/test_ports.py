@@ -24,6 +24,7 @@ from syncintosh.core.ports import (
     SecretScanner,
     SyncLock,
     SyntaxValidator,
+    TextEdit,
 )
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.tree import Tree
@@ -50,6 +51,9 @@ def test_content_adapter_port_is_structural() -> None:
 
         def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
             return template
+
+        def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+            return ()
 
     # when
     matches = isinstance(FakeAdapter(), ContentAdapter)

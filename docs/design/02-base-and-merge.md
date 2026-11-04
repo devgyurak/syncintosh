@@ -218,10 +218,19 @@ decide about survives:
   one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
   This predates issue #21. `test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json` pins that
   the result stays valid and merged; it does not pin the layout.
-- **A re-attached *nested* value is re-rendered.** The value is the one this machine has, but it
-  comes back from the tree rather than from the live file's own text, so a nested object's
-  internal layout may differ from what the file had. A scalar value — the usual noise or excluded
-  key — is byte-identical.
+- **A re-attached key comes back as the live file wrote it, unless a neighbouring line changed.** Projecting
+  the live file is a list of text edits, and apply runs them backwards onto the repo text, so a stripped key
+  returns where it stood, with its trailing comment, its one-line layout, and a nested value spelled the way
+  the file had it. An edit is only moved when the line it sits on and the line before and after are the same
+  in the repo text; the file's two ends count as lines. The result must also hold exactly the values the
+  graft gives and project back to the repo object byte for byte, so this changes a layout and never a value.
+  Known limit: when the other machine changed a line beside the key, or the checks fail, the key is
+  re-attached through the renderer instead. The value is still the one this machine has, but the renderer
+  places the key by its sibling, writes a nested value as the format's default, and drops a trailing comment.
+  Pinned by `test_a_line_the_other_machine_changed_beside_the_key_falls_back_to_a_render_with_the_right_values`
+  and, for the layouts that are kept, by `test_restoring_an_unchanged_projection_gives_back_the_live_file` and
+  `test_a_line_the_other_machine_changed_far_away_comes_across_and_the_local_lines_stay`. A comment *above*
+  a stripped key is not stripped with it: it stays in the sealed object, as it always did.
 
 A strict consequence: **an object that is not itself a projection is refused, not applied.** Two builds that
 disagree about a preset are told apart before this point, by the policy stamp (`03-manifest.md`, "The gate"): a
