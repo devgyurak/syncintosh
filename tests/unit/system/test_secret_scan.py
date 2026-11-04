@@ -12,13 +12,19 @@ different things. Every case names its format.
 
 from __future__ import annotations
 
+import base64
 import time
 
 import pytest
 
 from syncintosh.core.errors import SecretScanError
-from syncintosh.system.scan_allow import ALLOWABLE_LABELS, ScanAllow, ScanAllowEntry
-from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, PatternSecretScanner
+from syncintosh.system.scan_allow import ALLOWABLE_LABELS, BASIC_LABEL, ScanAllow, ScanAllowEntry
+from syncintosh.system.secret_scan import (
+    CHECKED_PATTERNS,
+    SHELL_PATTERNS,
+    STRUCTURED_PATTERNS,
+    PatternSecretScanner,
+)
 
 # Built from pieces so the source file does not itself contain a token-shaped literal.
 PEM = b"-----BEGIN " + b"RSA PRIVATE KEY-----"
@@ -423,6 +429,144 @@ def test_the_basic_scheme_is_case_insensitive(scheme: bytes) -> None:
     # when & then
     with pytest.raises(SecretScanError):
         scanner.scan(scheme + b" " + b"dXNlcjpwYXNzd29yZA==", subject="settings.json", format="jsonc")
+
+
+# A 16-character token with no digit and no `=` padding: `_SCHEME_SHAPE` cannot see it, only decoding can.
+# It decodes to `nbH:QDDtIPyn`.
+BASIC_NO_DIGIT = b"bmJIOlFERHRJUHlu"
+
+
+@pytest.mark.parametrize("scheme", [b"Basic", b"basic", b"BASIC"])
+@pytest.mark.parametrize("fmt", ["jsonc", "text"])
+def test_a_basic_credential_with_no_digit_and_no_padding_is_refused(scheme: bytes, fmt: str) -> None:
+    # given — the shape rule alone passes this, because the token has no digit and no padding
+    scanner = PatternSecretScanner()
+
+    # when & then
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(b"x " + scheme + b" " + BASIC_NO_DIGIT, subject="settings.json", format=fmt)
+    assert BASIC_LABEL in str(caught.value)
+    assert BASIC_NO_DIGIT.decode() not in str(caught.value)
+
+
+def _basic_hits(token: bytes) -> list[bytes]:
+    """The tokens a `Basic <token>` line yields from the checked table once the check has run."""
+    line = b"x Basic " + token
+    return [match.group() for _, pattern, check in CHECKED_PATTERNS for match in pattern.finditer(line) if check(match)]
+
+
+BASIC_NOT_A_CREDENTIAL = [
+    pytest.param(base64.b64encode(b"adminsecretxyz"), id="no-colon"),
+    pytest.param(base64.b64encode(b":password-pass"), id="empty-user"),
+    pytest.param(base64.b64encode(b"user:\xff\xfe\xfd\xfc\xfb\xfa\xf9"), id="not-utf8"),
+    pytest.param(base64.b64encode(b"user:\x00\x01\x02\x03\x04\x05\x06\x07"), id="not-printable"),
+    pytest.param(b"internationalization", id="prose"),
+]
+
+
+@pytest.mark.parametrize("token", BASIC_NOT_A_CREDENTIAL)
+def test_a_basic_word_that_does_not_decode_to_a_credential_is_not_one(token: bytes) -> None:
+    # when
+    hits = _basic_hits(token)
+
+    # then
+    assert hits == []
+
+
+def test_basic_internationalization_prose_passes_the_scan() -> None:
+    # given
+    scanner = PatternSecretScanner()
+
+    # when
+    result = scanner.scan(b"// basic internationalization settings\n", subject="settings.json", format="jsonc")
+
+    # then
+    assert result is None
+
+
+def test_a_basic_credential_longer_than_the_width_cap_is_still_refused() -> None:
+    # given — a digit-free run past the 256-character cap: it is cut at the cap, and its decoded prefix
+    # already holds the `user:` that decides it
+    scanner = PatternSecretScanner()
+    token = base64.b64encode(b"user:" + b"a" * 300)
+
+    # when & then
+    with pytest.raises(SecretScanError):
+        scanner.scan(b"x Basic " + token, subject="settings.json", format="jsonc")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"user:" + b"a" * 186 + "é".encode(), id="multibyte-cut-by-the-cap"),
+        pytest.param(b"user:pass\tword\xc2\xa0ok", id="tab-and-no-break-space"),
+    ],
+)
+def test_a_basic_credential_the_decode_must_tolerate_is_still_refused(raw: bytes) -> None:
+    # given — a character cut in half by the width cap, and a password holding a tab or U+00A0
+    token = base64.b64encode(raw)
+
+    # when
+    hits = _basic_hits(token)
+
+    # then
+    assert len(hits) == 1
+
+
+def test_a_bearer_token_without_a_digit_is_a_known_limit() -> None:
+    # given — nothing structural tells this apart from a sentence: an entropy test would bring back the
+    # CamelCase and long-word false positives, and a false positive stops every tracked file on the
+    # machine (``AGENTS.md`` §6). So a digit-free, padding-free `Bearer` word passes, on purpose.
+    scanner = PatternSecretScanner()
+
+    # when
+    result = scanner.scan(b"x Bearer abcdefGHIJKLmnopqrSTUVwxyzABCDEFghij", subject="settings.json", format="jsonc")
+
+    # then
+    assert result is None
+
+
+PLACEHOLDERS = [
+    b"// Authorization: Bearer <your-token>",
+    b"// Authorization: Bearer YOUR_TOKEN",
+    b"// Authorization: Bearer xxxxxxxxxxxxxxxx",
+]
+
+
+@pytest.mark.parametrize("payload", PLACEHOLDERS)
+def test_a_placeholder_header_is_refused_and_can_be_allowed(payload: bytes) -> None:
+    # given — the rule is unchanged: a placeholder under the key is refused, and the allowlist is the way out
+    strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        strict.scan(payload, subject="settings.json", format="jsonc")
+    digest = str(caught.value).split("fingerprint ")[1].split(";")[0].strip()
+    label = str(caught.value).split("possible ")[1].split(" at line")[0]
+    relaxed = PatternSecretScanner(
+        ScanAllow(key=ALLOW_KEY, entries=frozenset({ScanAllowEntry("settings.json", label, digest)}))
+    )
+
+    # when
+    result = relaxed.scan(payload, subject="settings.json", format="jsonc")
+
+    # then
+    assert result is None
+
+
+def test_allowing_one_basic_credential_does_not_allow_another() -> None:
+    # given — two digit-free tokens on their own lines; the first is allowed by its fingerprint
+    other = base64.b64encode(b"nbH:QDDtIPyZ")
+    first, second = b"x Basic " + BASIC_NO_DIGIT, b"x Basic " + other
+    strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        strict.scan(first, subject="settings.json", format="jsonc")
+    digest = str(caught.value).split("fingerprint ")[1].split(";")[0].strip()
+    entry = ScanAllowEntry("settings.json", BASIC_LABEL, digest)
+    relaxed = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    assert relaxed.scan(first, subject="settings.json", format="jsonc") is None
+    with pytest.raises(SecretScanError):
+        relaxed.scan(second, subject="settings.json", format="jsonc")
 
 
 def test_a_bearer_token_is_detected() -> None:

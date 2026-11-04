@@ -18,8 +18,12 @@ location, and can be allowed on the machine that hit it (#25, #28).
 
 from __future__ import annotations
 
+import base64
+import binascii
+import codecs
 import re
 import shlex
+from collections.abc import Callable
 
 from syncintosh.core.errors import SecretScanError
 from syncintosh.system.scan_allow import (
@@ -280,6 +284,46 @@ SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 )
 
 
+# A `Basic` credential is decoded, not shape-guessed: the scheme is defined as `base64(user ":" password)`
+# (RFC 7617), so a token that decodes to printable text with a `user:` in front is a credential whatever
+# its digits and padding look like. `_SCHEME_SHAPE` only sees a digit or `=`, and misses a 16-character
+# token that has neither. The width is capped (and the run possessive) so the engine cannot re-scan a
+# long value from every position; a run past the cap is cut there and `_is_basic_credential` decodes the
+# prefix, which already holds the `user:` that decides it. The standard alphabet only: Basic is not
+# base64url.
+_BASIC_DECODED = re.compile(rb"\b(?i:basic)[ \t]+(?P<token>[A-Za-z0-9+/]{16,256}+={0,2}+)")
+
+
+# C0 controls except tab, DEL, and C1 controls: what a password does not hold. `str.isprintable` is
+# stricter than that and would reject a password with a tab or a no-break space.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
+
+def _is_basic_credential(match: re.Match[bytes]) -> bool:
+    """True when the token strictly decodes to printable UTF-8 shaped `user:password` with a user."""
+    token = match.group("token")
+    # A run cut at the cap, or one that simply is not a whole number of quads, decodes by its whole
+    # quads: base64 is prefix-stable, and the `user:` that decides the check is at the front.
+    whole = token if token.endswith(b"=") else token[: len(token) - len(token) % 4]
+    try:
+        raw = base64.b64decode(whole, validate=True)
+        # `final=False` tolerates a multibyte character the cap or the quad trim cut in half, and still
+        # rejects bytes that are not UTF-8 at all.
+        decoded = codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    user, separator, _ = decoded.partition(":")
+    return separator == ":" and user != "" and _CONTROL.search(decoded) is None
+
+
+# `(label, pattern, check)` — a pattern whose match is only a *candidate*, confirmed by `check`. Kept
+# apart from the `(label, pattern)` tables so those keep their shape; the scanner and the masker both
+# read this one, so the masker covers exactly what the scan refuses.
+CHECKED_PATTERNS: tuple[tuple[str, re.Pattern[bytes], Callable[[re.Match[bytes]], bool]], ...] = (
+    (BASIC_LABEL, _BASIC_DECODED, _is_basic_credential),
+)
+
+
 def patterns_for(format: str) -> tuple[tuple[str, re.Pattern[bytes]], ...]:
     """The pattern table for a file's format: the shell one only where a shell reads the text."""
     return SHELL_PATTERNS if format in _SHELL_FORMATS else STRUCTURED_PATTERNS
@@ -347,16 +391,20 @@ class PatternSecretScanner:
         match spans (see `_lines_at`), so an allowlist entry is bound to those lines whatever span
         the pattern matched.
         """
-        allow = self._allow
-        for label, pattern in patterns_for(format):
+        checked = ((label, pattern, lambda _match: True) for label, pattern in patterns_for(format))
+        for label, pattern, check in (*checked, *CHECKED_PATTERNS):
             for match in pattern.finditer(plaintext):
-                digest = (
-                    None if allow is None else fingerprint(allow.key, _lines_at(plaintext, match.start(), match.end()))
-                )
-                if allow is not None and digest is not None and allow.allows(subject, label, digest):
+                if not check(match):
                     continue
-                line = _line_number(plaintext, match.start())
-                raise SecretScanError(_refusal(subject, label, line, digest))
+                self._refuse_unless_allowed(plaintext, match, label, subject)
+
+    def _refuse_unless_allowed(self, plaintext: bytes, match: re.Match[bytes], label: str, subject: str) -> None:
+        allow = self._allow
+        digest = None if allow is None else fingerprint(allow.key, _lines_at(plaintext, match.start(), match.end()))
+        if allow is not None and digest is not None and allow.allows(subject, label, digest):
+            return
+        line = _line_number(plaintext, match.start())
+        raise SecretScanError(_refusal(subject, label, line, digest))
 
 
-__all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for"]
+__all__ = ["CHECKED_PATTERNS", "COMMON_PATTERNS", "PatternSecretScanner", "patterns_for"]

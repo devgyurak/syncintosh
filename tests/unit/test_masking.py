@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from syncintosh.core.advice import MaskedText
@@ -245,3 +247,27 @@ def test_a_password_inside_a_nested_object_is_masked() -> None:
 
     # then
     assert "hunter2" not in masked.text
+
+
+@pytest.mark.parametrize("scheme", ["Basic", "basic", "BASIC"])
+def test_a_basic_credential_with_no_digit_and_no_padding_is_masked(scheme: str) -> None:
+    # given — the digit-free shape the scan refuses by decoding it (`nbH:QDDtIPyn`)
+    token = "bmJIOlFERHRJUHlu"
+    text = f"curl -u x {scheme} {token}\n"
+
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert token not in masked.text
+
+
+def test_the_tail_of_a_basic_credential_past_the_width_cap_is_masked() -> None:
+    # given — a digit-free credential longer than the 256-character cap the pattern stops at
+    token = base64.b64encode(b"user:" + b"a" * 300).decode()
+
+    # when
+    (masked,) = _masker().mask(f"x Basic {token}\n")
+
+    # then
+    assert token[-8:] not in masked.text
