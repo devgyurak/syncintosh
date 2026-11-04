@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from syncintosh.core.errors import ManifestCorrupt
 from syncintosh.core.ids import FILE_ID_PATTERN
 from syncintosh.core.manifest import Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import dumps_manifest
@@ -64,6 +65,17 @@ TRACKED_PATHS: tuple[str, ...] = (OBJECTS_DIR, MANIFEST_PATH, KEYS_DIR, GITATTRI
 def object_path(file_id: str) -> str:
     """The repo-relative path of `file_id`'s ciphertext."""
     return f"{OBJECTS_DIR}/{file_id}.enc"
+
+
+# The envelope header is fixed: version(1B) | key_id(4B, big-endian) | ... (docs/design/04-envelope-v1.md).
+_ENVELOPE_KEY_ID = slice(1, 5)
+
+
+def envelope_key_id(blob: bytes) -> int:
+    """The key generation a stored envelope names, read from its cleartext header without any key."""
+    if len(blob) < 5:
+        raise ManifestCorrupt("a stored envelope is shorter than its header")
+    return int.from_bytes(blob[_ENVELOPE_KEY_ID], "big")
 
 
 def wrap_path(key_id: int) -> str:

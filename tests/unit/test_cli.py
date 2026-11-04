@@ -527,6 +527,26 @@ def test_diff_hides_values_by_default(monkeypatch) -> None:
     assert "SECRET" not in _combined(result)
 
 
+def test_diff_warns_about_a_policy_it_cannot_judge_and_still_exits_zero(monkeypatch) -> None:
+    # given — the repo side was written under a policy this build lacks
+    from syncintosh.core.errors import PolicyMismatch
+    from syncintosh.services import DiffReport, FileDiff
+
+    _doctor_config()
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    warning = str(PolicyMismatch("zsh", "newer"))
+    report = DiffReport(entries=(FileDiff(".zshrc", "in-sync"),), policy_warnings=(warning,))
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda **_kwargs: report)
+
+    # when
+    result = runner.invoke(main_module.app, ["diff"])
+
+    # then — a warning, then the diff as usual
+    assert result.exit_code == 0
+    assert f"warning: {warning}" in _combined(result)
+    assert "in-sync: .zshrc" in _combined(result)
+
+
 def test_diff_values_shows_the_plaintext_labeled_by_side(monkeypatch) -> None:
     # given — the same changed file
     _doctor_config()

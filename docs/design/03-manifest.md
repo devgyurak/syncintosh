@@ -84,20 +84,56 @@ digest cannot say whether to migrate or to stop. `core/policy.py` compares them 
 | the latest revision | `match` |
 | an earlier revision | `older` |
 
-A preset with records but no stamp is revision 1. Revision 1 is the policy as of #24; there was no release before
-it, so a repo written earlier is taken to match it (the policy did change during #6, #22 and #23, but no such
-repo is in use). A record naming a preset that is not built in (a community preset) makes no claim.
+A preset with records but no stamp is `older`, whatever the length of its history: no stamp claims nothing, and
+the objects may have been written by a build that did not project them (a schema-1 repo, or a build that did not
+own the path). The migration is idempotent, so an object already projected keeps its bytes and only gains the
+stamp. A record naming a preset that is not built in (a community preset) makes no claim.
+
+A path's owner can change between builds. The stamp of the previous owner says nothing about the objects the new
+owner now judges: the new owner is judged by its own stamp (or its absence, hence `older`), never by the earlier
+owner's.
 
 Only the **writer's own build** is ever stamped — a collect, a merge, and (by preserving what it found) a key
 rotation. `key_generation` is independent: a rotation re-seals bytes, a policy change decides which bytes there
 are, and a rotation neither re-derives nor blocks on the stamp.
+
+### The gate
+
+`services/policy_gate.py` reads the repo through the comparison, once per commit, so no path past it asks again:
+
+* the **owner** of a record is found by its path (`PresetCatalog.preset_for`), never by the `preset` it carries, so
+  a community name on a built-in path is judged — and stamped — as the built-in preset it really is;
+* `newer` / `unknown` → `PolicyMismatch` ("upgrade syncintosh on this Mac"). The cycle stops before `collect` when
+  HEAD is the offender, and right after the fetch — before any fast-forward or merge — when origin is. The step-5
+  collect commit stays local and unpushed; nothing is merged, pushed, or applied. A CLI run exits 1, the daemon
+  reports it and does nothing else, and `diff` prints a warning and continues read-only;
+* `older` → each affected object is re-projected **in memory** under the local policy (the static strip only —
+  a carry belongs to a live file, not to a stored object), re-sealed, and served in place of the stored one, with
+  its record's digest, its format (the local one) and the stamp updated. HEAD, base, remote, target and restore
+  all read the same view, so the merge, apply and ledger agree, and the next write persists the migration.
+  A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b` (or
+  `unstamped→b`). A record that cannot be reduced — its format is not the one the catalog uses, or the projection
+  fails — does not stop the cycle and is **not removed from the view**: dropping it would read as a deletion and
+  reach every machine, and its file ID would change when it came back. It stays exactly as stored, is not served
+  as migrated, and the report says `policy not migrated: <path> …`. The preset is **still stamped** with the local
+  revision: one stamp cannot say that one object is older than the rest, and a lower stamp would let an older build
+  past the gate and strip a credential from its live file. So the protection of that record does not rest on the
+  stamp: `apply` refuses a record whose format is not the catalog's, and, when there is no live file to re-attach
+  keys to, any stored object the local static strip would change or cannot reduce. The machine that holds the file
+  replaces it by collecting, under the same file ID.
+
+A write is planned against the **stored** manifest, not the view: a migrated object would otherwise look unchanged
+and never be written. A ledger entry's digest is of the object as it was stored when the entry was made, so a
+read that no longer matches the view falls back to the stored object. `key rotate` reads and preserves the stamp
+and is never blocked by it.
 
 Stamping the local policy is honest only because a cycle brings every object it re-uses to that policy first
 (migrate on `older`, stop on `newer`/`unknown`). A writer that stamped without that gate would turn a policy it
 does not know into a `match`.
 
 The stamp is a claim by whoever wrote the repo, so it is a signal for detection, not a trust boundary: `apply`
-still checks that an object is a projection under the local policy (`docs/design/02-base-and-merge.md`).
+keeps its own projection check as defense in depth (`docs/design/02-base-and-merge.md`); it runs only when a live
+file exists to restore into, and closing that gap is the follow-up PR.
 
 ## Schema versions
 
@@ -272,8 +308,6 @@ same conservative posture as a first-sight file.
 
 ## Open
 
-- Gating a cycle on the stamp (stop on `newer`/`unknown`, migrate on `older`) is the follow-up to this
-  schema change; until it lands the stamp is written and read but nothing acts on it.
 - Whether `schema` should be a per-record field as well as a manifest-wide one. Manifest-wide
   is enough today and simpler; per-record only helps if two record shapes ever coexist.
 - Record `path` is relative to `$HOME`; a preset that writes outside `$HOME` (if one ever

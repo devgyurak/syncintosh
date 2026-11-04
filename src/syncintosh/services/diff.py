@@ -35,6 +35,7 @@ from syncintosh.core.ports import (
     remote_ref,
 )
 from syncintosh.core.presets import ValidatorName
+from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Unresolved, open_live_paths
 from syncintosh.services.sync import (
     _decode,
@@ -46,6 +47,7 @@ from syncintosh.services.sync import (
     _record_refusal,
     _sha256,
     _verified_object,
+    static_projector,
 )
 
 # How a tracked path stands relative to the repo side.
@@ -78,6 +80,9 @@ class DiffReport:
 
     entries: tuple[FileDiff, ...]
     source: str = _REPO_SIDE
+    # Presets whose stored policy this build cannot judge (`services/policy_gate.py`): the diff is still shown,
+    # read-only, but it compares against objects made under a policy this build does not hold.
+    policy_warnings: tuple[str, ...] = ()
 
     @property
     def changed(self) -> tuple[FileDiff, ...]:
@@ -111,7 +116,11 @@ def diff_repo(
     remote = transport.resolve(remote_ref(branch))
     repo_commit = remote or head
     source = _REPO_SIDE if remote is None else f"the repo side is {branch} at {remote[:12]}"
-    manifest = _read_manifest(transport, cipher, repo_commit)
+    # Read-only: a policy this build cannot judge is reported, not a reason to stop (`sync` stops on it).
+    view = PolicyView(
+        transport, cipher=cipher, catalog=catalog, project=static_projector(presets), scanner=None, strict=False
+    )
+    manifest = _read_manifest(view, cipher, repo_commit)
     if manifest is None:
         return DiffReport(entries=(), source=source)
 
@@ -123,8 +132,10 @@ def diff_repo(
             # A path this machine does not track or may not write is not part of *this* machine's
             # diff; `sync` reports it, `diff` stays quiet about it.
             continue
-        entries.append(_diff_record(transport, cipher, live, presets, home, repo_commit, file_id, record, paths, deny))
-    return DiffReport(entries=tuple(entries), source=source)
+        entries.append(_diff_record(view, cipher, live, presets, home, repo_commit, file_id, record, paths, deny))
+    return DiffReport(
+        entries=tuple(entries), source=source, policy_warnings=tuple(str(each) for each in view.mismatches)
+    )
 
 
 def _diff_record(

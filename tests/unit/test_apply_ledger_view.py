@@ -20,6 +20,7 @@ from syncintosh.core.models import LedgerEntry
 from syncintosh.core.ports import Cipher, GitTransport
 from syncintosh.core.repo import object_path
 from syncintosh.presets import BuiltinCatalog, vscode
+from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.sync import NO_APP_INFO, Backup, _apply, _Presets
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
@@ -75,7 +76,13 @@ def test_a_remote_change_to_a_carried_key_does_not_abort_a_file_collect_never_sa
 
     # when
     applied = _apply(
-        transport=cast(GitTransport, _Transport({"old": OLD, "new": NEW})),
+        transport=PolicyView(
+            cast(GitTransport, _Transport({"old": OLD, "new": NEW})),
+            cipher=cast(Cipher, _Plain()),
+            catalog=presets.catalog,
+            project=lambda data, _path, _fmt: data,
+            scanner=None,
+        ),
         cipher=cast(Cipher, _Plain()),
         presets=presets,
         target_commit="new",

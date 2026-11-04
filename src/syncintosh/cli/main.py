@@ -474,6 +474,10 @@ def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
         _say("nothing is tracked here yet")
         return
     _say(report.source)
+    for warning in report.policy_warnings:
+        # A fixed sentence from the service; the diff below compares against objects made under a policy this
+        # build does not hold.
+        _say(f"warning: {warning}", err=True)
     for entry in report.entries:
         keys = ", ".join(path_label(path, element, when_tag=when_tag) for path, element in entry.addresses)
         suffix = f" [{keys}]" if keys else ""

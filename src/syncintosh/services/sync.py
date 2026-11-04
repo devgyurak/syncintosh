@@ -104,6 +104,7 @@ from syncintosh.core.resolution import (
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
+from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved, open_live_paths, profile_directory
 from syncintosh.services.repo_writer import write_repo
 
@@ -428,6 +429,21 @@ def _verified_object(
     return data
 
 
+def _entry_object(transport: PolicyView, cipher: Cipher, commit: str | None, file_id: str, sha256: str) -> bytes | None:
+    """The object a ledger entry accounts for: as the view serves it, else as it was stored.
+
+    An entry's digest is of the object when the entry was made. After a policy migration the view serves that
+    commit's object re-projected, so the stored object is what still matches an entry made before the
+    migration (`services/policy_gate.py`).
+    """
+    try:
+        return _verified_object(transport, cipher, commit, file_id, sha256)
+    except ContentDigestMismatch:
+        if file_id not in transport.migrated_contents(commit):
+            raise
+        return _verified_object(transport.raw, cipher, commit, file_id, sha256)
+
+
 def _current_generation(store: KeyStore, head: Manifest | None) -> int:
     if head is not None:
         return head.key_generation
@@ -537,17 +553,17 @@ def _object_reader(transport: GitTransport, cipher: Cipher, commit: str | None, 
     return read
 
 
-def _entry_reader(transport: GitTransport, cipher: Cipher, file_id: str, entry: LedgerEntry) -> _Source:
+def _entry_reader(transport: PolicyView, cipher: Cipher, file_id: str, entry: LedgerEntry) -> _Source:
     """A reader for the object a ledger entry accounts for, verified against the entry's digest."""
 
     def read() -> bytes | None:
-        return _verified_object(transport, cipher, entry.commit, file_id, entry.sha256)
+        return _entry_object(transport, cipher, entry.commit, file_id, entry.sha256)
 
     return read
 
 
 def _baseline_reader(
-    transport: GitTransport, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
+    transport: PolicyView, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
 ) -> Callable[[ManifestRecord], _Source]:
     """Readers for the object each carried key's value is taken from.
 
@@ -560,7 +576,7 @@ def _baseline_reader(
         def read() -> bytes | None:
             entry = ledger.get(record.file_id)
             if entry is not None:
-                accounted = _verified_object(transport, cipher, entry.commit, record.file_id, entry.sha256)
+                accounted = _entry_object(transport, cipher, entry.commit, record.file_id, entry.sha256)
                 if accounted is not None:
                     return accounted
             return _verified_object(transport, cipher, head_commit, record.file_id, record.sha256)
@@ -631,6 +647,7 @@ _ESCAPES = "the target leaves this machine's home directory"
 _RESTORE_FAILED = "this machine's own keys could not be re-attached to the file"
 _IGNORE_LIST_UNREADABLE = _PROJECTION_FAILURE["ignore-list"]
 _SYNTAX_FAILED = "the file would not pass its syntax check"
+_PROJECTION_FAILURE_MIGRATED = "the stored content could not be reduced to this machine's synced form"
 _PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
 
 # What the report says about an ignore list that is usable but has entries that do nothing. A count, never the
@@ -732,6 +749,23 @@ def _project_merged(
     if projected.failure is not None or projected.view is None:
         raise ProjectionError(f"{path}: {_PROJECTION_FAILURE_MERGED}")
     return projected.view
+
+
+def static_projector(presets: _Presets) -> Callable[[bytes, str, FileFormat], bytes]:
+    """The reducer a policy migration uses: `data` cut by the local static strip only, or `ProjectionError`.
+
+    A migration re-projects a *stored* object, which already holds the carried values of the live files it came
+    from, so the carry is not applied (``docs/design/02-base-and-merge.md``, "Projection"), and a projection that
+    cannot be done raises rather than serving the unprojected bytes (``AGENTS.md`` §3.4).
+    """
+
+    def project(data: bytes, path: str, fmt: FileFormat) -> bytes:
+        projected = _project_file(presets, data, path, fmt, carry=False)
+        if projected.failure is not None or projected.view is None:
+            raise ProjectionError(f"{path}: {_PROJECTION_FAILURE_MIGRATED}")
+        return projected.view
+
+    return project
 
 
 def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
@@ -1600,7 +1634,7 @@ def _record_choices(
 def _merge_stale(
     *,
     config: SyncConfig,
-    transport: GitTransport,
+    transport: PolicyView,
     cipher: Cipher,
     driver: MergeDriver,
     presets: _Presets,
@@ -1618,7 +1652,7 @@ def _merge_stale(
     found: list[_Found] = []
     for change in collected.stale:
         file_id = change.record.file_id
-        base = _verified_object(transport, cipher, change.entry.commit, file_id, change.entry.sha256)
+        base = _entry_object(transport, cipher, change.entry.commit, file_id, change.entry.sha256)
         head_bytes = _verified_object(transport, cipher, head_commit, file_id, change.record.sha256)
         if base is None or head_bytes is None:
             found.append(
@@ -1679,7 +1713,7 @@ class _Merged:
 def _merge_diverged(
     *,
     config: SyncConfig,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -1762,6 +1796,8 @@ def _merge_diverged(
         records=records,
         policy=stamp_policies(records.values(), presets.catalog),
     )
+    # A migrated HEAD changes its manifest's stamp, so a collect commit exists by the time a merge is planned: the
+    # local manifest read here is the stored one, and planning against it cannot skip a migrated object.
     plan = plan_writes(local_manifest, merged_manifest)
     for file_id in plan.objects_to_write:
         if file_id in contents:
@@ -1823,7 +1859,7 @@ class _Publish:
 
 def _publish(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -1856,6 +1892,10 @@ def _publish(
                 published=published,
             )
             verify_commitments(codec, store, published)
+            # The policy gate, before any classification: a fast-forward would apply what a newer build wrote
+            # just as a merge would. After the wraps are absorbed, because reading needs the remote's generation
+            # (`services/policy_gate.py`).
+            _read_manifest(transport, cipher, remote_commit)
         local = transport.head()
         if remote_commit is None:
             outcome = _push_or_raise(transport, config.remote, branch, local_commit)
@@ -1991,7 +2031,7 @@ def _installed(apps: AppDetector, cache: dict[str, bool | None], bundle_id: str)
 
 def _apply(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     cipher: Cipher,
     presets: _Presets,
     target_commit: str,
@@ -2169,6 +2209,14 @@ def _apply(
         if data is None:
             deferred.append(Deferral(record.path, _OBJECT_MISSING))
             continue
+        if live_bytes is None and stripped_policy is not None:
+            # No live file to re-attach keys to, so nothing else checks that the stored object is what the local
+            # policy would have kept. The stamp cannot be trusted for it: one stamp covers a preset's objects of
+            # different ages. An object the static strip would change, or cannot reduce, is never written raw.
+            reduced = _project_file(presets, data, record.path, record.format, carry=False)
+            if reduced.failure is not None or reduced.view != data:
+                unprojectable.append(Refusal(record.path, _PROJECTION_FAILURE_MIGRATED))
+                continue
         if live_bytes is not None and stripped_policy is not None:
             restored = _restore_file(presets, data, live_bytes, stripped_policy)
             if restored is None:
@@ -2383,8 +2431,15 @@ def sync(
         # every file that obeys the user's ignore list against this one reading of it.
         presets = replace(presets, ignores=_read_ignores(catalog, adapters, live, deny, home))
         paths = open_live_paths(config, catalog, profiles)
+        view = PolicyView(
+            transport,
+            cipher=cipher,
+            catalog=catalog,
+            project=static_projector(presets),
+            scanner=scanner,
+        )
         return _cycle(
-            transport=transport,
+            transport=view,
             files=files,
             cipher=cipher,
             scanner=scanner,
@@ -2436,7 +2491,7 @@ def _next(resolution: Resolution, picks: Picks) -> Resolution:
 
 def _cycle(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -2493,6 +2548,8 @@ def _cycle(
         # working tree, are the source of truth.
         transport.materialize(head_commit)
     head_manifest = _read_manifest(transport, cipher, head_commit)
+    # The write is planned against what is stored: against the view, a migrated object would look unchanged.
+    stored_head = _read_manifest(transport.raw, cipher, head_commit)
     collected = _collect(
         config=config,
         head=head_manifest,
@@ -2514,7 +2571,7 @@ def _cycle(
             skipped=tuple(collected.skipped),
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
-            notes=presets.notes(),
+            notes=(*presets.notes(), *transport.notes()),
         )
     if collected.stale:
         found = _merge_stale(
@@ -2557,7 +2614,7 @@ def _cycle(
         records=collected.records,
         policy=stamp_policies(collected.records.values(), presets.catalog),
     )
-    plan = plan_writes(head_manifest, new_manifest)
+    plan = plan_writes(stored_head, new_manifest)
     # A live file that merely matches HEAD again (a crash between apply and the ledger save) must
     # not produce an empty commit; the write plan, not the collect list, decides (step 4–5).
     changed = plan.write_manifest or bool(plan.objects_to_write) or bool(plan.objects_to_delete)
@@ -2566,9 +2623,10 @@ def _cycle(
             files=files,
             cipher=cipher,
             scanner=scanner,
-            head=head_manifest,
+            head=stored_head,
             new=new_manifest,
-            contents=collected.contents,
+            # An object the migration re-projected and this collect did not touch is written from the view.
+            contents={**transport.migrated_contents(head_commit), **collected.contents},
         )
         local_commit = _commit(transport, branch, () if head_commit is None else (head_commit,), "syncintosh: collect")
     else:
@@ -2678,7 +2736,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
-        notes=presets.notes(),
+        notes=(*presets.notes(), *transport.notes()),
     )
 
 

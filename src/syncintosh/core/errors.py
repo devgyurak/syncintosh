@@ -102,6 +102,27 @@ class UnsupportedManifestSchema(ManifestError):
         super().__init__(f"manifest schema {schema} is not supported by this build")
 
 
+class PolicyMismatch(ManifestError):
+    """The repo's objects were made under a preset policy this build does not hold (issue #24).
+
+    `verdict` is `newer` (a build with a policy, or a preset, this one lacks wrote it) or `unknown`
+    (the stamp names a revision this build ships under a different digest, or a record's preset is not
+    the one that owns its path). Either way the objects may hold keys this build would strip, or lack
+    ones it keeps, so the cycle stops before it merges, publishes, or applies anything. The fix is to
+    upgrade, never to repair, so the message says so.
+    """
+
+    def __init__(self, preset: str, verdict: str) -> None:
+        self.preset = preset
+        self.verdict = verdict
+        reason = (
+            "was written under a newer policy than this build ships"
+            if verdict == "newer"
+            else "matches no policy this build has shipped"
+        )
+        super().__init__(f"the repo's {preset!r} preset {reason}; upgrade syncintosh on this Mac")
+
+
 class GenerationDivergence(ManifestError):
     """`local` and `remote` were written under different key generations.
 
