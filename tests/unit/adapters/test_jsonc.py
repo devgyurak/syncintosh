@@ -687,7 +687,7 @@ _LAYOUT = st.one_of(
 
 # Where a document has a trailing comma, as the paths of the containers that end in one. The parser
 # decides, not a regex over the text: it tells a string from a comma, and `_comma_after` steps over a
-# comment, so `, // c\n}` counts as a trailing comma and `[1,]` and a doubled comma at any depth do too.
+# comment, so `, // c\n}` counts as a trailing comma, and so does `[1,]` or a second one at another depth.
 _Path = tuple[str | int, ...]
 
 
@@ -706,7 +706,9 @@ def _trailing_comma_paths(text: str) -> frozenset[_Path]:
             return frozenset()
         found = frozenset().union(*(walk(child, child_path) for _, child_path, child in children))
         last = children[-1][0] if children else None
-        return found | {path} if last is not None and jsonc._comma_after(comments, last) is not None else found
+        if last is not None and jsonc._comma_after(comments, last) is not None:
+            return found | {path}
+        return found
 
     return walk(root, ())
 
@@ -831,6 +833,8 @@ def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout)
     [
         pytest.param('{"o": {"a": 1,},}', frozenset({(), ("o",)}), id="root-and-nested"),
         pytest.param("[1,]", frozenset({()}), id="array"),
+        pytest.param('[{"a": 1,}, 2]', frozenset({(0,)}), id="nested-in-array"),
+        pytest.param('{"a": 1 /* n */,}', frozenset({()}), id="comment-then-comma"),
         pytest.param('{"a": 1, // c\n}', frozenset({()}), id="comma-then-comment"),
         pytest.param('{"a": 1 // c\n}', frozenset(), id="comment-without-comma"),
         pytest.param('{"a": ", }"}', frozenset(), id="comma-inside-string"),
