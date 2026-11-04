@@ -16,6 +16,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from syncintosh.adapters import jsonc
 from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.content_merge import merge_content
@@ -1001,6 +1002,48 @@ def test_an_edit_inside_the_last_member_leaves_lone_commas_and_notes_before_it_b
     head = template[: template.index('"n"')]
     assert rendered.startswith(head)
     assert adapter.parse(rendered) == tree
+
+
+def _rendered_or_reason(adapter, tree, template) -> str:
+    """The render, or the fixed reason it was refused; any other failure propagates."""
+    try:
+        return adapter.render(tree, template)
+    except RenderRefused as refused:
+        return refused.reason
+
+
+@settings(max_examples=500, deadline=None)
+@given(
+    value=_FUZZ_VALUES,
+    how=_MUTATIONS,
+    comments=_COMMENT_LISTS,
+    layout=_LAYOUT_INDENTED,
+)
+def test_a_root_edit_beside_lone_commas_and_notes_is_exact_or_refused_for_the_comma(
+    value, how, comments, layout
+) -> None:
+    # given — every root comma alone on its line, notes in the document, and any edit of the root: this
+    # pins which edits `_lone_comma_touched` sends to a whole rewrite, since that decision restates the
+    # ones `_object` and `_remove_deleted` make
+    adapter = JsoncAdapter()
+    template = _fuzz_template(value, comments=comments, comma="own-line", **layout)
+    tree = tree_from_value(_mutated(value, how))
+    assert adapter.parse(template) == tree_from_value(value)
+
+    # when
+    outcome = _rendered_or_reason(adapter, tree, template)
+
+    # then — a render is the tree it was handed; a refusal names the comma and never the general reason
+    assert outcome == LONE_COMMA_REFUSED or adapter.parse(outcome) == tree
+
+
+def test_the_last_comment_end_before_a_position_with_no_comment_is_refused() -> None:
+    # given — a comment that starts after the position
+    comments = jsonc._Comments("{} /* a */", (jsonc._Span(3, 10),))
+
+    # when & then — index -1 must not hand back the file's last comment
+    with pytest.raises(ValueError, match="no comment ends"):
+        comments.last_end_before(2)
 
 
 @settings(max_examples=200, deadline=None)

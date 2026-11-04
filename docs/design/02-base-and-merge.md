@@ -218,12 +218,17 @@ decide about survives:
   one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
   This predates issue #21. `test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json` pins that
   the result stays valid and merged; it does not pin the layout.
-  An **object** written with its comma alone on a line, or at the start of its line, is treated the same
-  way, but only for an edit that works on that comma: a deleted member, the member a new one is inserted
-  after, or the last survivor whose comma a tail deletion drops. Those rewrite the object whole, and when a
-  comment is inside it the render is refused with its own reason (`LONE_COMMA_REFUSED`) rather than
-  dropping the comment (a conflict, not a broken file). Any other edit — a nested change, a value change, an
-  add at the end or the head — is made in place and keeps the layout and the notes. A member-less object that carries a comment is not part of
+  An **object** has two such layouts, and they differ:
+  - A comma **alone on a line** is rewritten whole only for an edit that works on that comma: a deleted
+    member, the member a new one is inserted after, or the last survivor whose comma a tail deletion drops.
+    When a comment is inside the object the render is refused with its own reason (`LONE_COMMA_REFUSED`)
+    rather than dropping the comment (a conflict, not a broken file). Any other edit — a nested change, a
+    value change, an add at the end or the head — is made in place and keeps the layout and the notes.
+  - A comma at the **start of its line** (`, "b": 2`) is not spliced at all: every edit of that object
+    rewrites it whole, and a comment inside it is refused with the general `VALUE_WITH_NOTE_REFUSED`.
+    This predates issue #29 and is unchanged.
+
+  A member-less object that carries a comment is not part of
   this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block
   comment that shares the closing brace's line keeps the member out of the comment and moves `}` to its own
   line (issue #29). Pinned by `test_a_member_edit_lands_outside_a_comment_and_beside_a_lone_comma`.
