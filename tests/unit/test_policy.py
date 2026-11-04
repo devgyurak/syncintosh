@@ -88,8 +88,8 @@ def _preset(*files: PresetFile, name: str = "x") -> Preset:
         ((A, B), _stamp(1, B), UNKNOWN),
         ((A, B), _stamp(2, A), UNKNOWN),
         ((A,), _stamp(1, C), UNKNOWN),
-        # No stamp is revision 1: what every repo written before stamps was made under.
-        ((A,), None, MATCH),
+        # No stamp claims nothing, so it is never a match, whatever the history's length.
+        ((A,), None, OLDER),
         ((A, B), None, OLDER),
         (None, None, NEWER),
     ],
@@ -235,7 +235,7 @@ def test_verdicts_cover_stamped_presets_and_those_that_own_a_record() -> None:
     verdicts = policy_verdicts({"zsh": _stamp(2, B)}, records, catalog)
 
     # then
-    assert verdicts == {"vscode": MATCH, "zsh": MATCH}
+    assert verdicts == {"vscode": OLDER, "zsh": MATCH}
 
 
 def test_a_community_name_on_a_built_in_path_is_judged_as_the_built_in_preset() -> None:

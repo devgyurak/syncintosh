@@ -104,7 +104,7 @@ from syncintosh.core.resolution import (
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
-from syncintosh.services.policy_gate import PolicyView, migrated_contents, migration_notes, raw_of
+from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved, open_live_paths, profile_directory
 from syncintosh.services.repo_writer import write_repo
 
@@ -429,9 +429,7 @@ def _verified_object(
     return data
 
 
-def _entry_object(
-    transport: GitTransport, cipher: Cipher, commit: str | None, file_id: str, sha256: str
-) -> bytes | None:
+def _entry_object(transport: PolicyView, cipher: Cipher, commit: str | None, file_id: str, sha256: str) -> bytes | None:
     """The object a ledger entry accounts for: as the view serves it, else as it was stored.
 
     An entry's digest is of the object when the entry was made. After a policy migration the view serves that
@@ -441,7 +439,9 @@ def _entry_object(
     try:
         return _verified_object(transport, cipher, commit, file_id, sha256)
     except ContentDigestMismatch:
-        return _verified_object(raw_of(transport), cipher, commit, file_id, sha256)
+        if file_id not in transport.migrated_contents(commit):
+            raise
+        return _verified_object(transport.raw, cipher, commit, file_id, sha256)
 
 
 def _current_generation(store: KeyStore, head: Manifest | None) -> int:
@@ -553,7 +553,7 @@ def _object_reader(transport: GitTransport, cipher: Cipher, commit: str | None, 
     return read
 
 
-def _entry_reader(transport: GitTransport, cipher: Cipher, file_id: str, entry: LedgerEntry) -> _Source:
+def _entry_reader(transport: PolicyView, cipher: Cipher, file_id: str, entry: LedgerEntry) -> _Source:
     """A reader for the object a ledger entry accounts for, verified against the entry's digest."""
 
     def read() -> bytes | None:
@@ -563,7 +563,7 @@ def _entry_reader(transport: GitTransport, cipher: Cipher, file_id: str, entry: 
 
 
 def _baseline_reader(
-    transport: GitTransport, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
+    transport: PolicyView, cipher: Cipher, ledger: Mapping[str, LedgerEntry], head_commit: str | None
 ) -> Callable[[ManifestRecord], _Source]:
     """Readers for the object each carried key's value is taken from.
 
@@ -1634,7 +1634,7 @@ def _record_choices(
 def _merge_stale(
     *,
     config: SyncConfig,
-    transport: GitTransport,
+    transport: PolicyView,
     cipher: Cipher,
     driver: MergeDriver,
     presets: _Presets,
@@ -1796,6 +1796,8 @@ def _merge_diverged(
         records=records,
         policy=stamp_policies(records.values(), presets.catalog),
     )
+    # A migrated HEAD changes its manifest's stamp, so a collect commit exists by the time a merge is planned: the
+    # local manifest read here is the stored one, and planning against it cannot skip a migrated object.
     plan = plan_writes(local_manifest, merged_manifest)
     for file_id in plan.objects_to_write:
         if file_id in contents:
@@ -2029,7 +2031,7 @@ def _installed(apps: AppDetector, cache: dict[str, bool | None], bundle_id: str)
 
 def _apply(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     cipher: Cipher,
     presets: _Presets,
     target_commit: str,
@@ -2481,7 +2483,7 @@ def _next(resolution: Resolution, picks: Picks) -> Resolution:
 
 def _cycle(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -2539,7 +2541,7 @@ def _cycle(
         transport.materialize(head_commit)
     head_manifest = _read_manifest(transport, cipher, head_commit)
     # The write is planned against what is stored: against the view, a migrated object would look unchanged.
-    stored_head = _read_manifest(raw_of(transport), cipher, head_commit)
+    stored_head = _read_manifest(transport.raw, cipher, head_commit)
     collected = _collect(
         config=config,
         head=head_manifest,
@@ -2561,7 +2563,7 @@ def _cycle(
             skipped=tuple(collected.skipped),
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
-            notes=(*presets.notes(), *migration_notes(transport)),
+            notes=(*presets.notes(), *transport.notes()),
         )
     if collected.stale:
         found = _merge_stale(
@@ -2604,6 +2606,12 @@ def _cycle(
         records=collected.records,
         policy=stamp_policies(collected.records.values(), presets.catalog),
     )
+    # A path the view left out is replaced by collecting the live file. Where this machine does not collect it, the
+    # plan would read the omission as a deletion and publish it to every other machine, so the cycle stops instead.
+    collected_paths = {record.path for record in collected.records.values()}
+    uncollected = [path for path in transport.left_out(head_commit) if path not in collected_paths]
+    if uncollected:
+        raise ProjectionError(f"{uncollected[0]}: {_PROJECTION_FAILURE_MIGRATED}, and this machine does not collect it")
     plan = plan_writes(stored_head, new_manifest)
     # A live file that merely matches HEAD again (a crash between apply and the ledger save) must
     # not produce an empty commit; the write plan, not the collect list, decides (step 4–5).
@@ -2616,7 +2624,7 @@ def _cycle(
             head=stored_head,
             new=new_manifest,
             # An object the migration re-projected and this collect did not touch is written from the view.
-            contents={**migrated_contents(transport, head_commit), **collected.contents},
+            contents={**transport.migrated_contents(head_commit), **collected.contents},
         )
         local_commit = _commit(transport, branch, () if head_commit is None else (head_commit,), "syncintosh: collect")
     else:
@@ -2726,7 +2734,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
-        notes=(*presets.notes(), *migration_notes(transport)),
+        notes=(*presets.notes(), *transport.notes()),
     )
 
 

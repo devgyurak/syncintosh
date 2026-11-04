@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 from pathlib import Path
+from typing import cast
 
 from syncintosh.core.config import LocalGlob, SyncConfig
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
@@ -19,6 +20,7 @@ from syncintosh.core.ports import PushOutcome
 from syncintosh.core.presets import MAX_GLOB_EXPANSION, Preset, PresetFile
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.presets import BuiltinCatalog
+from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.sync import (
     NO_APP_INFO,
     Backup,
@@ -361,7 +363,7 @@ def test_a_record_is_not_written_through_a_symlinked_glob_directory(tmp_path) ->
 
     # when
     applied = _apply(
-        transport=_UnusedTransport(),
+        transport=cast(PolicyView, _UnusedTransport()),
         cipher=_UnusedCipher(),
         presets=_presets(),
         target_commit="c" * 40,

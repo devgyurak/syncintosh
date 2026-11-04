@@ -84,9 +84,14 @@ digest cannot say whether to migrate or to stop. `core/policy.py` compares them 
 | the latest revision | `match` |
 | an earlier revision | `older` |
 
-A preset with records but no stamp is revision 1. Revision 1 is the policy as of #24; there was no release before
-it, so a repo written earlier is taken to match it (the policy did change during #6, #22 and #23, but no such
-repo is in use). A record naming a preset that is not built in (a community preset) makes no claim.
+A preset with records but no stamp is `older`, whatever the length of its history: no stamp claims nothing, and
+the objects may have been written by a build that did not project them (a schema-1 repo, or a build that did not
+own the path). The migration is idempotent, so an object already projected keeps its bytes and only gains the
+stamp. A record naming a preset that is not built in (a community preset) makes no claim.
+
+A path's owner can change between builds. The stamp of the previous owner says nothing about the objects the new
+owner now judges: the new owner is judged by its own stamp (or its absence, hence `older`), never by the earlier
+owner's.
 
 Only the **writer's own build** is ever stamped — a collect, a merge, and (by preserving what it found) a key
 rotation. `key_generation` is independent: a rotation re-seals bytes, a policy change decides which bytes there
@@ -106,8 +111,12 @@ are, and a rotation neither re-derives nor blocks on the stamp.
   a carry belongs to a live file, not to a stored object), re-sealed, and served in place of the stored one, with
   its record's digest, its format (the local one) and the stamp updated. HEAD, base, remote, target and restore
   all read the same view, so the merge, apply and ledger agree, and the next write persists the migration.
-  A projection that cannot be done stops the cycle (`ProjectionError`); a changed object passes the secret scan.
-  The sync report says `policy migrated: <preset> rev a→b`.
+  A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b`.
+  A record that cannot be reduced — its format is not the one the catalog uses, or the projection fails — does not
+  stop the cycle: it is left out of the view (never served), its preset's stamp is not raised, and the cycle
+  collects the live file in its place. The report says `policy not migrated: <path> …`. If this machine does not
+  collect that path, the omission would read as a deletion and reach every other machine, so the cycle stops with
+  `ProjectionError` instead.
 
 A write is planned against the **stored** manifest, not the view: a migrated object would otherwise look unchanged
 and never be written. A ledger entry's digest is of the object as it was stored when the entry was made, so a

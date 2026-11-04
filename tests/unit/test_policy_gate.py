@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from syncintosh.core.presets import EMPTY_CATALOG
-from syncintosh.services.policy_gate import PolicyView, migrated_contents, migration_notes, raw_of
+from syncintosh.services.policy_gate import PolicyView
 
 
 def _view(inner: Mock) -> PolicyView:
@@ -75,23 +75,12 @@ def test_a_commit_without_a_manifest_has_nothing_to_migrate() -> None:
     assert (blob, dict(view.migrated_contents("c1")), view.notes(), view.mismatches) == (None, {}, (), ())
 
 
-def test_the_helpers_are_neutral_for_a_transport_that_is_not_a_view() -> None:
-    # given
-    plain = Mock()
-
-    # when
-    results = (raw_of(plain), migrated_contents(plain, "c1"), migration_notes(plain))
-
-    # then
-    assert results == (plain, {}, ())
-
-
-def test_raw_of_a_view_is_the_stored_repo() -> None:
+def test_a_view_exposes_the_stored_repo_as_raw() -> None:
     # given
     inner = Mock()
 
     # when
-    raw = raw_of(_view(inner))
+    raw = _view(inner).raw
 
     # then
     assert raw is inner
@@ -99,7 +88,7 @@ def test_raw_of_a_view_is_the_stored_repo() -> None:
 
 def test_an_owned_record_with_no_policy_or_no_object_is_not_stamped_as_migrated() -> None:
     # given — the preset owns the path but holds no policy for it, so nothing can be projected
-    from syncintosh.core.errors import PolicyMismatch
+    from syncintosh.core.errors import ManifestCorrupt
     from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
     from syncintosh.core.manifest_codec import dumps_manifest
     from syncintosh.core.policy import PolicyStamp
@@ -147,5 +136,5 @@ def test_an_owned_record_with_no_policy_or_no_object_is_not_stamped_as_migrated(
     view = PolicyView(inner, cipher=cipher, catalog=_Catalog(), project=lambda d, _p, _f: d, scanner=None)
 
     # when & then
-    with pytest.raises(PolicyMismatch):
+    with pytest.raises(ManifestCorrupt):
         view.read_blob("c1", "manifest.enc")

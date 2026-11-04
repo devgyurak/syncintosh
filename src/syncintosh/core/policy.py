@@ -123,17 +123,20 @@ def classify_policy(history: tuple[str, ...] | None, stamp: PolicyStamp | None) 
     """How this build's policy for one preset compares with the one `stamp` names.
 
     `history` is the local build's digests for the preset, oldest first, or `None` when the build has
-    no such preset. A missing `stamp` is revision 1, the policy as of #24: no release predates it, so a
-    schema-1 repo is taken to match it, which is what lets one be read without a migration step.
+    no such preset. A missing `stamp` claims nothing, so it is never a `match`: the objects may have been
+    written by a build that did not project them (a schema-1 repo, or a build that did not own the path).
+    It is `older`, and the static strip that migrates it is idempotent, so an object already projected keeps
+    its bytes and only gains the stamp.
     """
     if history is None or len(history) == 0:
         return NEWER
-    effective = stamp if stamp is not None else PolicyStamp.create(rev=1, digest=history[0])
-    if effective.rev > len(history):
+    if stamp is None:
+        return OLDER
+    if stamp.rev > len(history):
         return NEWER
-    if history[effective.rev - 1] != effective.digest:
+    if history[stamp.rev - 1] != stamp.digest:
         return UNKNOWN
-    return MATCH if effective.rev == len(history) else OLDER
+    return MATCH if stamp.rev == len(history) else OLDER
 
 
 def _owners(records: Iterable[ManifestRecord], catalog: PresetCatalog) -> set[str]:
