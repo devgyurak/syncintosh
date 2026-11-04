@@ -806,6 +806,15 @@ YAML_BLOCK_REFUSED = [
     pytest.param(b"Authorization: |\n" + b"\n" * 500 + b"  Bearer abc123\n", id="many-leading-blank-lines"),
     pytest.param(b"Authorization: |\n" + b" " * 9000 + b"\n  Bearer abc123\n", id="long-whitespace-line"),
     pytest.param(b"- Authorization: |\n    Bearer abc123\n", id="list-item-key"),
+    pytest.param(b"X-Authorization: |\n  Token abc123\n", id="prefixed-key"),
+    pytest.param(b"Authorization: &h |\n  Token abc123\n", id="anchor"),
+    pytest.param(b"Authorization: !!str |\n  Token abc123\n", id="tag"),
+    pytest.param(b"Authorization:\n  Token abc123\n", id="value-on-next-line"),
+    pytest.param(b"Authorization: Token\n  abc123\n", id="continued-plain"),
+    pytest.param(b'Authorization: "Bearer\n  abc123"\n', id="continued-double-quoted"),
+    pytest.param(b"Authorization: |\n" + b"\n" * 70_000 + b"  Token abc123\n", id="blank-lines-past-the-byte-cap"),
+    pytest.param(b"Authorization: |\n" + b"  ${A}\n" * 70 + b"  Token abc123\n", id="harmless-lines-past-the-line-cap"),
+    pytest.param(b"Authorization: |\n" + b"  note\n" * 70, id="block-cut-by-the-cap-fails-closed"),
 ]
 
 
@@ -828,6 +837,8 @@ YAML_BLOCK_PASSED = [
     pytest.param(b"Authorization: |\nname: Bearer abc123\n", id="block-ended-by-dedent"),
     pytest.param(b"headers:\n  Authorization: |\n  other: Bearer abc123\n", id="sibling-key-not-deeper"),
     pytest.param(b"Authorization: |\n", id="empty-block"),
+    pytest.param(b"authorization:\n  mode: Webhook\n  webhook:\n    cacheTTL: 0s\n", id="settings-mapping"),
+    pytest.param(b"Authorization: Token\nother: abc123\n", id="plain-value-ended-by-dedent"),
     pytest.param(b"- Authorization: |\n  other: Bearer abc123\n", id="list-item-sibling-key"),
 ]
 
@@ -898,6 +909,12 @@ YAML_REDOS = [
     pytest.param(b"Authorization: |\n  Token\n" * 50_000, id="repeated-keys-unindented"),
     pytest.param(b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 600)), id="nested-keys"),
     pytest.param(b"Authorization: | " + b" " * 200_000 + b"x\n", id="spaces-after-indicator"),
+    pytest.param(b"Authorization: Bearer " + b"${A} " * 60 + b"\n", id="repeated-reference-one-line"),
+    pytest.param(b"Authorization: >\n  Bearer\n" + b"  ${A}\n" * 70, id="repeated-reference-block"),
+    pytest.param(
+        b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 65)) + b"\n" * 65_000 + b"  x\n",
+        id="deepening-headers-over-a-blank-run",
+    ),
 ]
 
 

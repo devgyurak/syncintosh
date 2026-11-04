@@ -257,8 +257,7 @@ def test_a_password_inside_a_nested_object_is_masked() -> None:
     ids=["split-scheme-and-token", "short-token", "blank-line-inside"],
 )
 def test_a_token_on_a_yaml_block_continuation_line_is_masked(text: str, secret: str) -> None:
-    # given — `_KEYED_VALUE` alone would hide only the `>` after the key
-
+    # `_KEYED_VALUE` alone would hide only the `>` after the key
     # when
     (masked,) = _masker().mask(text)
 

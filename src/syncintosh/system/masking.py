@@ -84,7 +84,7 @@ class TextMasker:
             found.extend(match.span() for match in pattern.finditer(data))
         # A YAML block scalar's continuation lines: `_KEYED_VALUE` only hides the `>-` after the key. Run on
         # every text, whatever its format, because the masker must cover at least what the scan refuses.
-        found.extend((start, end) for _, start, end in yaml_block_authorizations(data))
+        found.extend((start, end) for _, start, end in yaml_block_authorizations(data) if start < end)
         found.extend(self._literal_spans(data))
         found.extend(self._host_spans(data))
         return _non_overlapping(found)
