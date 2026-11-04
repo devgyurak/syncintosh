@@ -8,8 +8,8 @@ reads the repo through that comparison, so no code path past it has to ask:
 * `match` — nothing changes;
 * `older` — the objects are re-projected **in memory** under the local policy (the static strip only; a
   carry belongs to a live file, not to a stored object), re-sealed, and served in place of the stored
-  ones, with the stamp raised to the local one (a record that cannot be reduced is kept as stored and never
-  applied or stamped). The view is what a later step merges, publishes, or applies, so the repo converges on
+  ones, with the stamp raised to the local one (a record that cannot be reduced is kept as stored; `apply`
+  refuses it). The view is what a later step merges, publishes, or applies, so the repo converges on
   the next write;
 * `newer` / `unknown` — `PolicyMismatch`: the cycle stops before it merges, publishes, or applies.
 
@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from syncintosh.core.errors import ContentDigestMismatch, ManifestCorrupt, PolicyMismatch, ProjectionError
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord
 from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
-from syncintosh.core.policy import NEWER, OLDER, UNKNOWN, PolicyStamp, policy_verdicts, stamp_policies
+from syncintosh.core.policy import NEWER, OLDER, UNKNOWN, policy_verdicts, stamp_policies
 from syncintosh.core.ports import Cipher, GitTransport, PresetCatalog, PushOutcome, SecretScanner
 from syncintosh.core.repo import MANIFEST_PATH, envelope_key_id, object_file_id, object_path
 
@@ -52,11 +52,10 @@ class Migration:
     sealed: Mapping[str, bytes] = field(repr=False)
     steps: tuple[tuple[str, int | None, int], ...]
     # Records that could not be reduced to the local policy. The view keeps them exactly as stored, so no write
-    # reads their absence as a deletion and their file IDs stay stable, but it never serves them as migrated:
-    # apply refuses them, and a writer keeps their preset's stored stamp (`PolicyView.stamps`).
+    # reads their absence as a deletion and their file IDs stay stable. They are not served as migrated, and the
+    # preset is still stamped: a stamp cannot say that one object is older than the rest, and a lower one would let
+    # an older build through. `apply` re-checks every stored object itself, whatever the stamp says.
     unservable: Mapping[str, ManifestRecord] = field(default_factory=dict)
-    # The stamp each preset holding such a record had in the stored manifest, or None when it had none.
-    stored_stamps: Mapping[str, PolicyStamp | None] = field(default_factory=dict)
 
 
 def _sha256(data: bytes) -> str:
@@ -103,49 +102,6 @@ class PolicyView:
         """The plaintext of each object `commit`'s migration changed, by file ID."""
         migration = None if commit is None else self._migration(commit)
         return {} if migration is None else migration.objects
-
-    def unservable(self, commit: str | None) -> frozenset[str]:
-        """The file IDs of `commit`'s records this build could not reduce to its policy and so will not apply."""
-        migration = None if commit is None else self._migration(commit)
-        return frozenset() if migration is None else frozenset(migration.unservable)
-
-    def stamps(
-        self, records: Mapping[str, ManifestRecord], *commits: str | None, held: frozenset[str] = frozenset()
-    ) -> dict[str, PolicyStamp]:
-        """The stamps a writer records for `records`: its own build's, except where it re-used an unservable record.
-
-        A record the view could not migrate is written back as stored, so the preset that owns it keeps the stamp
-        it had (or none): stamping it as current would claim the stored object holds the local policy. `held` names
-        file IDs that stay held even though their record changed, because the change was not a projection under the
-        local policy (a content merge). When two commits hold the same preset at different stamps, the lower wins.
-        """
-        stamps = stamp_policies(records.values(), self._catalog)
-        kept: dict[str, PolicyStamp | None] = {}
-        for commit in commits:
-            migration = None if commit is None else self._migration(commit)
-            if migration is None:
-                continue
-            for file_id, stored in migration.unservable.items():
-                owner = self._catalog.preset_for(stored.path)
-                if owner is None or (records.get(file_id) != stored and file_id not in held):
-                    continue
-                original = migration.stored_stamps.get(owner.name)
-                if owner.name not in kept:
-                    kept[owner.name] = original
-                else:
-                    current = kept[owner.name]
-                    lower = (
-                        current
-                        if original is None or (current is not None and current.rev <= original.rev)
-                        else original
-                    )
-                    kept[owner.name] = None if current is None or original is None else lower
-        for name, stamp in kept.items():
-            if stamp is None:
-                stamps.pop(name, None)
-            else:
-                stamps[name] = stamp
-        return stamps
 
     def notes(self) -> tuple[str, ...]:
         """One report line per preset migrated, in the order they were first read."""
@@ -198,7 +154,6 @@ class PolicyView:
         objects: dict[str, bytes] = {}
         sealed: dict[str, bytes] = {}
         unservable: dict[str, ManifestRecord] = {}
-        held_back: set[str] = set()
         for file_id, record in manifest.records.items():
             owner = self._catalog.preset_for(record.path)
             if owner is None or owner.name not in older:
@@ -222,10 +177,9 @@ class PolicyView:
                 projected = self._project(data, record.path, policy.format)
             except ProjectionError:
                 # One file that cannot be reduced must not wedge the device. It stays as stored (a record dropped from
-                # the view would be read as deleted and published as such) but is never served as migrated or stamped.
+                # the view would be read as deleted and published as such) but is not served as migrated.
                 records[file_id] = record
                 unservable[file_id] = record
-                held_back.add(owner.name)
                 continue
             if self._scanner is not None:
                 # A diff passes none: what it serves is shown, never sealed or written.
@@ -244,17 +198,16 @@ class PolicyView:
                 sealed[file_id] = self._cipher.seal(
                     projected, domain="object", file_id=file_id, key_id=envelope_key_id(stored)
                 )
-        raised = older - held_back
         local = stamp_policies(records.values(), self._catalog)
         migrated = Manifest.create(
             schema=MANIFEST_SCHEMA,
             key_generation=manifest.key_generation,
             records=records,
-            policy={**manifest.policy, **{name: stamp for name, stamp in local.items() if name in raised}},
+            policy={**manifest.policy, **{name: stamp for name, stamp in local.items() if name in older}},
         )
         steps = tuple(
             (name, manifest.policy[name].rev if name in manifest.policy else None, local[name].rev)
-            for name in sorted(raised)
+            for name in sorted(older)
             if name in local
         )
         manifest_sealed = self._cipher.seal(
@@ -266,7 +219,6 @@ class PolicyView:
             sealed=sealed,
             steps=steps,
             unservable=unservable,
-            stored_stamps={name: manifest.policy.get(name) for name in held_back},
         )
 
     # ----------------------------------------------------------------- everything else is the stored repo

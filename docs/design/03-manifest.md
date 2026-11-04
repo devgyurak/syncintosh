@@ -114,12 +114,13 @@ are, and a rotation neither re-derives nor blocks on the stamp.
   A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b` (or
   `unstamped→b`). A record that cannot be reduced — its format is not the one the catalog uses, or the projection
   fails — does not stop the cycle and is **not removed from the view**: dropping it would read as a deletion and
-  reach every machine, and its file ID would change when it came back. It stays exactly as stored and is never served
-  as migrated: `apply` refuses it for that file, and a writer keeps the stamp its preset had (or none), so the next
-  cycle judges it `older` again. The machine that holds the file replaces it by collecting, under the same file ID (unless its live file already
-  projects to the stored digest and the format differs: then the refusal repeats until a build that owns the path
-  republishes it).
-  The report says `policy not migrated: <path> …`.
+  reach every machine, and its file ID would change when it came back. It stays exactly as stored, is not served
+  as migrated, and the report says `policy not migrated: <path> …`. The preset is **still stamped** with the local
+  revision: one stamp cannot say that one object is older than the rest, and a lower stamp would let an older build
+  past the gate and strip a credential from its live file. So the protection of that record does not rest on the
+  stamp: `apply` refuses a record whose format is not the catalog's, and, when there is no live file to re-attach
+  keys to, any stored object the local static strip would change or cannot reduce. The machine that holds the file
+  replaces it by collecting, under the same file ID.
 
 A write is planned against the **stored** manifest, not the view: a migrated object would otherwise look unchanged
 and never be written. A ledger entry's digest is of the object as it was stored when the entry was made, so a

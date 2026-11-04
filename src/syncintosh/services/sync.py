@@ -54,6 +54,7 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
+from syncintosh.core.policy import stamp_policies
 from syncintosh.core.ports import (
     AppDetector,
     Cipher,
@@ -1793,13 +1794,7 @@ def _merge_diverged(
         schema=MANIFEST_SCHEMA,
         key_generation=max(local_manifest.key_generation, remote_manifest.key_generation),
         records=records,
-        policy=transport.stamps(
-            records,
-            local,
-            remote,
-            held=frozenset(task.file_id for task in result.content_merges)
-            & (transport.unservable(local) | transport.unservable(remote)),
-        ),
+        policy=stamp_policies(records.values(), presets.catalog),
     )
     # A migrated HEAD changes its manifest's stamp, so a collect commit exists by the time a merge is planned: the
     # local manifest read here is the stored one, and planning against it cannot skip a migrated object.
@@ -2083,7 +2078,6 @@ def _apply(
     # The same directory check the collect side makes: a record must not be *written* through a
     # symlinked glob directory either.
     unsafe = _unsafe_glob_directories(config, live, deny, home)
-    unservable = transport.unservable(target_commit)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -2108,11 +2102,6 @@ def _apply(
             deferred.append(Deferral(record.path, _PROFILE_FOLDER_MISSING))
             continue
         policy = presets.policy_for(record.path)
-        if file_id in unservable and (policy is None or policy.format == record.format):
-            # The policy gate could not reduce this stored object to the local policy, and it is not the format
-            # check below. Writing it raw would put what the policy strips into a live file.
-            unprojectable.append(Refusal(record.path, _PROJECTION_FAILURE_MIGRATED))
-            continue
         if policy is not None and policy.format != record.format:
             # The record names a format the local catalog does not use for this path. Apply must
             # refuse it here rather than write it, because settle projects the bytes it reads with
@@ -2220,6 +2209,14 @@ def _apply(
         if data is None:
             deferred.append(Deferral(record.path, _OBJECT_MISSING))
             continue
+        if live_bytes is None and stripped_policy is not None:
+            # No live file to re-attach keys to, so nothing else checks that the stored object is what the local
+            # policy would have kept. The stamp cannot be trusted for it: one stamp covers a preset's objects of
+            # different ages. An object the static strip would change, or cannot reduce, is never written raw.
+            reduced = _project_file(presets, data, record.path, record.format, carry=False)
+            if reduced.failure is not None or reduced.view != data:
+                unprojectable.append(Refusal(record.path, _PROJECTION_FAILURE_MIGRATED))
+                continue
         if live_bytes is not None and stripped_policy is not None:
             restored = _restore_file(presets, data, live_bytes, stripped_policy)
             if restored is None:
@@ -2615,7 +2612,7 @@ def _cycle(
         schema=MANIFEST_SCHEMA,
         key_generation=generation,
         records=collected.records,
-        policy=transport.stamps(collected.records, head_commit),
+        policy=stamp_policies(collected.records.values(), presets.catalog),
     )
     plan = plan_writes(stored_head, new_manifest)
     # A live file that merely matches HEAD again (a crash between apply and the ledger save) must

@@ -21,7 +21,7 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
-from syncintosh.core.errors import PolicyMismatch
+from syncintosh.core.errors import ContentParseError, PolicyMismatch
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.manifest_codec import loads_manifest
@@ -989,8 +989,105 @@ def test_a_record_the_gate_cannot_reduce_is_kept_not_deleted_by_a_machine_that_d
     # when
     report = _run(b, catalog=KEYED_CATALOG)
 
-    # then — the record is still there, with the same file ID, and the preset is not stamped as migrated
+    # then — the record is still there, with the same file ID
     after = {(r.file_id, r.scope, r.machine, r.format) for r in _manifest_at_head(b).records.values()}
     assert after == before
-    assert "keyed-test" not in _manifest_at_head(b).policy
     assert any(note.startswith("policy not migrated: " + JSONC) for note in report.notes)
+
+
+# Two releases of a preset whose second file strips a key too, so projecting it parses it (SECOND_FILE strips nothing).
+NOISY_SECOND = PresetFile.create(path=SECOND, format="jsonc", noise={("window", "zoomLevel")})
+MARKED_1 = Preset.create(
+    name="keyed-test",
+    files=(PresetFile.create(path=JSONC, format="jsonc", noise={("window", "zoomLevel")}), NOISY_SECOND),
+)
+MARKED_2 = Preset.create(name="keyed-test", files=(JSONC_POLICY, NOISY_SECOND))
+MARKED_OLD = _Release(MARKED_1)
+MARKED_NEW = _Release(MARKED_1, MARKED_2)
+
+
+class _RefusesMarked:
+    """A `ContentAdapter` that cannot parse text holding a marker, so one file of a preset will not project."""
+
+    MARKER = "UNPARSEABLE"
+
+    def __init__(self, inner: ContentAdapter) -> None:
+        self._inner = inner
+
+    def parse(self, text: str) -> Tree:
+        if self.MARKER in text:
+            raise ContentParseError("the text holds the marker")
+        return self._inner.parse(text)
+
+    def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
+        return self._inner.render(tree, template)
+
+
+def test_a_stamp_is_never_held_back_so_an_older_build_still_stops(tmp_path, memory_key_store) -> None:
+    # given — release 2 strips the credential from one file and cannot project the other (it has a marker the
+    # new build's adapter will not parse), both under one preset and so one stamp
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, CREDENTIAL)
+    _write(a, SECOND, b'{"editor.fontSize": 13, "x": "UNPARSEABLE"}\n')
+    _run(a, catalog=MARKED_OLD)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _write(b, JSONC, OWN_CREDENTIAL)
+    _write(b, SECOND, b'{"editor.fontSize": 13}\n')
+    migrated = _run(b, adopt="remote", catalog=MARKED_NEW, adapters={"jsonc": _RefusesMarked(JsoncAdapter())})
+    edited = CREDENTIAL.replace(b"13", b"14")
+    _write(a, JSONC, edited)
+
+    # when & then — the preset is stamped with the new release whatever one of its files looked like, so the
+    # older build stops rather than strip the credential it still keeps live
+    assert any(note.startswith("policy not migrated: " + SECOND) for note in migrated.notes)
+    assert _manifest_at_head(b).policy["keyed-test"].rev == 2
+    with pytest.raises(PolicyMismatch):
+        _run(a, catalog=MARKED_OLD)
+    assert _read(a, JSONC) == edited
+
+
+def test_apply_never_writes_a_stored_object_the_local_policy_would_change_to_a_new_file(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the repo holds, under a current stamp, an object the new build cannot project; C has no such file
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, CREDENTIAL)
+    _write(a, SECOND, b'{"editor.fontSize": 13, "x": "UNPARSEABLE"}\n')
+    _run(a, catalog=MARKED_OLD)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _write(b, JSONC, OWN_CREDENTIAL)
+    _write(b, SECOND, b'{"editor.fontSize": 13}\n')
+    refuses: Mapping[FileFormat, ContentAdapter] = {"jsonc": _RefusesMarked(JsoncAdapter())}
+    _run(b, adopt="remote", catalog=MARKED_NEW, adapters=refuses)
+    c = _machine(tmp_path, memory_key_store, "machine-c", remote)
+    _initialize(c, _two_file_config(c), import_from=a.recovery)
+    (c.home / SECOND).parent.mkdir(parents=True)
+
+    # when
+    report = _run(c, catalog=MARKED_NEW, adapters=refuses)
+
+    # then — the unreducible object is refused although nothing is on disk to compare it with
+    assert SECOND in [refusal.path for refusal in report.unprojectable]
+    assert not (c.home / SECOND).exists()
+
+
+def test_a_projected_object_is_written_to_a_machine_that_has_no_such_file(tmp_path, memory_key_store) -> None:
+    # given — B migrated the repo, so its objects are the local policy's projection; C has the directory only
+    a, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    _run(b, adopt="remote", catalog=NEW_BUILD)
+    c = _machine(tmp_path, memory_key_store, "machine-c", b.remote)
+    _initialize(c, _jsonc_config(c), import_from=a.recovery)
+    (c.home / JSONC).parent.mkdir(parents=True)
+
+    # when
+    report = _run(c, catalog=NEW_BUILD)
+
+    # then — the stripped-form check does not refuse an object that is already its own projection
+    assert (report.unprojectable, b"proxyAuthorization" in _read(c, JSONC)) == ((), False)
+    assert JSONC in report.applied
