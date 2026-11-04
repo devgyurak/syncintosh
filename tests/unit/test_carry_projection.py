@@ -218,7 +218,8 @@ def test_restore_still_re_attaches_a_noise_key_beside_a_carried_one() -> None:
 
 
 def test_restore_writes_a_carried_value_as_the_live_file_wrote_it_and_a_noise_value_the_ordinary_way() -> None:
-    # given — both keys hold a number the live file spells in a non-canonical way
+    # given — both keys hold a number the live file spells in a non-canonical way, and the `a` line beside them
+    # differs from the repo's, so the restore re-renders instead of moving the live text across (issue #27)
     policy = _policy(noise={("noise",)})
     repo = '{\n  "a": 2\n}\n'
     live = '{\n  "a": 1,\n  "k": 1e3,\n  "noise": 2.50\n}\n'

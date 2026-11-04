@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
+from syncintosh.core.ports import TextEdit
 from syncintosh.core.tree import Array, ElementId, EmptyObject, KeyPath, Node, Object, Scalar, ScalarKind, Tree
 
 if TYPE_CHECKING:
@@ -295,13 +296,8 @@ def _to_node(node: _AstNode) -> Node:
     return Object(tuple((member.key, _to_node(member.value)) for member in node.members))
 
 
-@dataclass(frozen=True)
-class _Edit:
-    """Replace ``[start, end)`` with ``text``; a zero-width range is an insertion."""
-
-    start: int
-    end: int
-    text: str = field(repr=False)
+# The adapter's own edits are the port's, so `render_edits` hands them out as they are.
+_Edit = TextEdit
 
 
 class JsoncAdapter:
@@ -330,18 +326,33 @@ class JsoncAdapter:
         values to copy from another document as written; one whose value there differs from `tree`'s is not copied.
         """
         try:
-            return self._render(tree, template, arrays or {}, verbatim)
+            return _apply_edits(template, self._edits(tree, template, arrays or {}, verbatim))
         except (ValueError, RecursionError) as exc:
             raise ContentParseError(str(exc)) from exc
 
-    def _render(self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule], verbatim: Verbatim | None) -> str:
+    def render_edits(
+        self,
+        tree: Tree,
+        template: str,
+        arrays: Mapping[KeyPath, ArrayRule] | None = None,
+        verbatim: Verbatim | None = None,
+    ) -> tuple[TextEdit, ...]:
+        """The settled edits :meth:`render` applies to `template`; none when it comes back verbatim."""
+        try:
+            return tuple(_settle(self._edits(tree, template, arrays or {}, verbatim)))
+        except (ValueError, RecursionError) as exc:
+            raise ContentParseError(str(exc)) from exc
+
+    def _edits(
+        self, tree: Tree, template: str, arrays: Mapping[KeyPath, ArrayRule], verbatim: Verbatim | None
+    ) -> list[TextEdit]:
         parser = _Parser(template)
         root = parser.parse()
         copies = _copies(tree, verbatim)
         stale = _stale_copies(root, template, copies)
         if _tree_of(root) == tree and not stale:
-            return template
-        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays, copies, stale).apply()
+            return []
+        return _Diff(tree, root, template, _Comments(template, tuple(parser.comments)), arrays, copies, stale).edits()
 
 
 def _locate(root: _AstNode, path: KeyPath) -> _AstNode | None:
@@ -419,10 +430,10 @@ class _Diff:
                     keys.append(path[index])
         self._indent, self._newline = _detect_style(text, root, comments)
 
-    def apply(self) -> str:
-        edits: list[_Edit] = []
+    def edits(self) -> list[TextEdit]:
+        edits: list[TextEdit] = []
         self._render(self._root, (), edits)
-        return _apply_edits(self._source, edits)
+        return edits
 
     def _children(self, path: KeyPath) -> list[str]:
         return self._kids.get(path, [])
@@ -1484,20 +1495,30 @@ def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
     return bool(node.members) and _comma_after(comments, node.members[-1]) is not None
 
 
-def _apply_edits(text: str, edits: list[_Edit]) -> str:
-    """Apply the edits in offset order.
+def _settle(edits: list[TextEdit]) -> list[TextEdit]:
+    """The edits in offset order, without the ones an earlier edit already covers.
 
     An edit that starts inside an earlier one is skipped only when it takes nothing with it: it removes text the earlier
     edit already removed. One that carries text, or reaches past the earlier edit, would be lost without a trace, so it
     refuses the render instead.
     """
-    pieces: list[str] = []
+    settled: list[TextEdit] = []
     cursor = 0
     for edit in sorted(edits, key=lambda item: item.start):
         if edit.start < cursor:
             if edit.text or edit.end > cursor:
                 raise RenderRefused(EDIT_OVERLAP_REFUSED)
             continue
+        settled.append(edit)
+        cursor = edit.end
+    return settled
+
+
+def _apply_edits(text: str, edits: list[TextEdit]) -> str:
+    """Apply the edits in offset order, as :func:`_settle` leaves them."""
+    pieces: list[str] = []
+    cursor = 0
+    for edit in _settle(edits):
         pieces.append(text[cursor : edit.start])
         pieces.append(edit.text)
         cursor = edit.end

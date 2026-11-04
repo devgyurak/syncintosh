@@ -12,6 +12,7 @@ import json
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import ContentParseError
 from syncintosh.core.models import ContentMerge, TextMerge
+from syncintosh.core.ports import TextEdit
 from syncintosh.core.resolution import Proposal
 from syncintosh.core.tree import Tree, tree_from_value
 
@@ -49,6 +50,9 @@ class JsonAdapter:
         if self._corrupt_render:
             return "{}"
         return json.dumps(tree.to_value())
+
+    def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+        return (TextEdit(0, len(template), self.render(tree, template, arrays, verbatim)),)
 
 
 def test_identical_sides_need_no_driver() -> None:

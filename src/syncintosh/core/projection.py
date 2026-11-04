@@ -17,10 +17,17 @@ The two halves are inverses:
 
 * :func:`project_text` — `render(strip(parse(text)))`, verified by re-parsing the result. This
   is what is sealed, hashed, and compared.
-* :func:`restore_text` — `render(graft(parse(repo), parse(live)))`, rendered against the **repo**
+* :func:`restore_text` — the repo text with `live`'s local keys put back, rendered against the **repo**
   text so comments and layout that changed on the other machine come across, and verified by
   projecting the result back to exactly the repo text. That check is what keeps the apply
   ledger's digest from drifting on every cycle.
+
+Put back means *where the live file had them*. Projecting the live file is a list of text edits, so
+:func:`restore_text` first runs those edits backwards: each one is moved onto the repo text, as long as
+the lines around it are the same there, and the live file's own text for the key — its position, its
+trailing comment, its one-line layout — returns untouched. Only when a neighbouring line changed on the
+other machine, or the result fails either check, does it fall back to :func:`graft` and a re-render, which
+gets the values right but lays a re-attached key out as the renderer would.
 
 A key the *user* chose to ignore is different, and is **carried** instead of stripped. Stripping it
 would make the 3-way merge read it as deleted and erase the value from every other machine, so its
@@ -38,11 +45,13 @@ This module is pure: it takes text, a policy, and a `ContentAdapter` port, and r
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from bisect import bisect_right
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from syncintosh.core.errors import ContentParseError, ProjectionError
-from syncintosh.core.ports import ContentAdapter, Verbatim
+from syncintosh.core.ports import ContentAdapter, TextEdit, Verbatim
 from syncintosh.core.presets import PresetFile
 from syncintosh.core.tree import EmptyObject, KeyPath, Node, Tree
 
@@ -191,18 +200,27 @@ def project_text(adapter: ContentAdapter, text: str, policy: PresetFile, carried
     paths = policy.stripped
     if not paths and not carried.paths:
         return text
-    tree = _parse(adapter, text, policy)
-    source = None if carried.source is None else _parse(adapter, carried.source, policy)
-    projected = strip(carry(strip(tree, paths), carried.paths, source), paths)
+    tree, projected, verbatim = _projection(adapter, text, policy, carried)
     if projected == tree:
         return text
-    # The carried values are copied as the source wrote them, not re-serialized: `1e3` must stay `1e3` for the
-    # next cycle's projection of the same source to be this very text.
-    verbatim = None if carried.source is None or not carried.paths else Verbatim(carried.source, carried.paths)
     rendered = _render(adapter, projected, text, policy, verbatim)
     if _parse(adapter, rendered, policy) != projected:
         raise ProjectionError(f"{policy.path}: stripping the preset's keys did not render cleanly")
     return rendered
+
+
+def _projection(
+    adapter: ContentAdapter, text: str, policy: PresetFile, carried: Carry
+) -> tuple[Tree, Tree, Verbatim | None]:
+    """`text`'s tree, the tree its projection has, and the values the renderer copies as written."""
+    paths = policy.stripped
+    tree = _parse(adapter, text, policy)
+    source = None if carried.source is None else _parse(adapter, carried.source, policy)
+    projected = strip(carry(strip(tree, paths), carried.paths, source), paths)
+    # The carried values are copied as the source wrote them, not re-serialized: `1e3` must stay `1e3` for the
+    # next cycle's projection of the same source to be this very text.
+    verbatim = None if carried.source is None or not carried.paths else Verbatim(carried.source, carried.paths)
+    return tree, projected, verbatim
 
 
 def restore_text(
@@ -218,14 +236,21 @@ def restore_text(
     A carried key takes the live file's value too, absent or not: the key is the machine's own.
     The check projects with **`repo_text` as the carry source**, because it is the object being
     applied and so the next cycle's baseline; whatever `carried.source` was at collect is not.
+
+    The live file's own text for those keys is kept when it can be (:func:`_rebased`). When it cannot, they
+    are re-attached through the renderer, which places a key by its sibling, writes a value on one line as
+    the format's default, and has no place for a trailing comment.
     """
     paths = policy.stripped | carried.paths
     if not paths:
         return repo_text
-    restored = graft(_parse(adapter, repo_text, policy), _parse(adapter, live_text, policy), paths)
+    live = _parse(adapter, live_text, policy)
+    restored = graft(_parse(adapter, repo_text, policy), live, paths)
+    rebased = _rebased(adapter, repo_text, live_text, restored, policy, carried)
+    if rebased is not None:
+        return rebased
     # A carried key comes back as this machine's file wrote it, for the same reason the carry above is copied.
-    # Only those: a noise or excluded key is re-attached the ordinary way, as it always was (layout of a
-    # re-attached key is issue #27).
+    # Only those: a noise or excluded key is re-attached the ordinary way.
     verbatim = Verbatim(live_text, carried.paths) if carried.paths else None
     rendered = _render(adapter, restored, repo_text, policy, verbatim)
     if project_text(adapter, rendered, policy, Carry(carried.paths, repo_text)) != repo_text:
@@ -233,6 +258,119 @@ def restore_text(
             f"{policy.path}: re-attaching this machine's local keys did not round-trip; refusing to write"
         )
     return rendered
+
+
+def _rebased(
+    adapter: ContentAdapter, repo_text: str, live_text: str, restored: Tree, policy: PresetFile, carried: Carry
+) -> str | None:
+    """`repo_text` with the edits that projected `live_text` undone in place, or `None` when that is not safe.
+
+    Projecting the live file is a list of edits to its text. Undoing each one at the matching spot of the repo
+    text puts the live file's own bytes back — a key where it stood, the comment on its line — and leaves every
+    line the other machine changed as it came. A spot only counts when the line it sits on and the lines on each
+    side are the same in both texts (`_place`); an edit beside a changed line is not moved, since where the text
+    belongs relative to that change is not something to guess.
+
+    The result is accepted only if it holds exactly the values :func:`graft` would give and projects back to
+    `repo_text` byte for byte, so this can change a layout but never a value. Any failure is `None`.
+    """
+    source = Carry(carried.paths, repo_text)
+    try:
+        tree, projected, verbatim = _projection(adapter, live_text, policy, source)
+        edits = () if projected == tree else adapter.render_edits(projected, live_text, policy.array_rules, verbatim)
+        shown = _apply(live_text, edits)
+        placed = _place(shown, repo_text, _undo(live_text, edits))
+        if placed is None:
+            return None
+        result = _apply(repo_text, placed)
+        if _parse(adapter, result, policy) != restored:
+            return None
+        return result if project_text(adapter, result, policy, source) == repo_text else None
+    except (ProjectionError, ContentParseError):
+        return None
+
+
+def _apply(text: str, edits: Sequence[TextEdit]) -> str:
+    """`text` with `edits` applied; they are sorted and do not overlap."""
+    pieces: list[str] = []
+    cursor = 0
+    for edit in edits:
+        pieces.append(text[cursor : edit.start])
+        pieces.append(edit.text)
+        cursor = edit.end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _undo(original: str, edits: Sequence[TextEdit]) -> list[TextEdit]:
+    """The edits that turn the text `edits` produce back into `original`, in the produced text's offsets."""
+    undo: list[TextEdit] = []
+    shift = 0
+    for edit in edits:
+        start = edit.start + shift
+        undo.append(TextEdit(start, start + len(edit.text), original[edit.start : edit.end]))
+        shift += len(edit.text) - (edit.end - edit.start)
+    return undo
+
+
+def _place(shown: str, repo_text: str, edits: Sequence[TextEdit]) -> list[TextEdit] | None:
+    """`edits` (offsets in `shown`) moved to the same spot in `repo_text`, or `None` when one has no safe spot.
+
+    The two texts are matched line by line. Both get a marker line at each end, so the first and last lines of a
+    file have a neighbour too, and a file the other machine extended at the end does not match.
+    """
+    if not edits:
+        return []
+    shown_lines = shown.splitlines(keepends=True)
+    repo_lines = repo_text.splitlines(keepends=True)
+    matcher = SequenceMatcher(None, [None, *shown_lines, None], [None, *repo_lines, None], autojunk=False)
+    equal = [(i1, i2, j1) for tag, i1, i2, j1, _ in matcher.get_opcodes() if tag == "equal"]
+    shown_starts = _line_starts(shown_lines)
+    repo_starts = _line_starts(repo_lines)
+
+    def locate(offset: int, first: int, last: int) -> int | None:
+        """`offset` (in `shown`) as an offset in `repo_text`, for an edit that spans lines `first`..`last`."""
+        # The end marker has no line after it; every other line needs both its neighbours.
+        after = min(last + 1, len(shown_starts) + 1)
+        block = next(((i1, j1) for i1, i2, j1 in equal if i1 <= first - 1 and after < i2), None)
+        if block is None:
+            return None
+        line = _line_at(shown_starts, len(shown), offset)
+        mapped = block[1] + (line - block[0])
+        within = offset - (shown_starts[line - 1] if line <= len(shown_starts) else len(shown))
+        return (repo_starts[mapped - 1] if mapped <= len(repo_starts) else len(repo_text)) + within
+
+    placed: list[TextEdit] = []
+    cursor = 0
+    for edit in edits:
+        first = _line_at(shown_starts, len(shown), edit.start)
+        last = first if edit.end == edit.start else _line_at(shown_starts, len(shown), edit.end - 1)
+        start = locate(edit.start, first, last)
+        end = start if edit.end == edit.start or start is None else locate(edit.end - 1, first, last)
+        if start is None or end is None or start < cursor:
+            return None
+        if edit.end != edit.start:
+            end += 1
+        placed.append(TextEdit(start, end, edit.text))
+        cursor = end
+    return placed
+
+
+def _line_starts(lines: Sequence[str]) -> list[int]:
+    starts: list[int] = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    return starts
+
+
+def _line_at(starts: Sequence[int], length: int, offset: int) -> int:
+    """The index of the line holding `offset`, counting the marker line before the first as 0.
+
+    The end of the text belongs to the marker line after the last one.
+    """
+    return len(starts) + 1 if offset >= length else bisect_right(starts, offset)
 
 
 def _parse(adapter: ContentAdapter, text: str, policy: PresetFile) -> Tree:

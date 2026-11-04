@@ -9,6 +9,7 @@ import pytest
 
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.errors import ContentParseError
+from syncintosh.core.ports import TextEdit
 from syncintosh.core.tree import Tree, tree_from_value
 from syncintosh.services import merge_text
 
@@ -52,6 +53,9 @@ def test_merge_text_is_conflicted_when_the_render_does_not_round_trip() -> None:
 
         def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
             return "{}"
+
+        def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+            return (TextEdit(0, len(template), self.render(tree, template, arrays, verbatim)),)
 
     # when
     result = merge_text('{"a": 1}', '{"a": 1}', '{"a": 1}', BrokenRender())

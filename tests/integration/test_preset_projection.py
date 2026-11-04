@@ -28,7 +28,7 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import policy_digest
-from syncintosh.core.ports import ContentAdapter, PresetCatalog
+from syncintosh.core.ports import ContentAdapter, PresetCatalog, TextEdit
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.core.tree import Tree
@@ -599,6 +599,40 @@ def test_apply_keeps_this_machines_excluded_value(tmp_path, memory_key_store) ->
     assert SECRET.encode() in merged
 
 
+def test_apply_keeps_the_layout_of_this_machines_local_keys_when_another_machine_changes_a_setting(
+    tmp_path, memory_key_store
+) -> None:
+    # given — B's file holds a noise key with a comment on its line and an excluded key, none of which the repo has
+    shared = (
+        b'{\n  "editor.fontSize": 13,\n  "editor.tabSize": 4,\n  "editor.wordWrap": "on",\n'
+        b'  "files.autoSave": "off"\n}\n'
+    )
+    a, b = _keyed_pair(tmp_path, memory_key_store, shared)
+    mine = (
+        b'{\n  "editor.fontSize": 13,\n  "editor.tabSize": 4,\n  "editor.wordWrap": "on",\n'
+        b'  "window": {"zoomLevel": 3}, // my zoom\n'
+        b'  "http": {"proxyAuthorization": "' + SECRET.encode() + b'"},\n'
+        b'  "files.autoSave": "off"\n}\n'
+    )
+    _write(b, JSONC, mine)
+    _run(b)
+
+    # when — A changes a setting far from those lines, and B syncs it
+    _write(a, JSONC, shared.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15'))
+    _run(a)
+    _run(b)
+    commits = _git(b.repo, "rev-list", "--count", "HEAD").strip()
+
+    # then — B has A's change and every one of its own lines exactly as it wrote them
+    assert _read(b, JSONC) == mine.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15')
+    assert [blob for blob in _decrypted_objects(b) if SECRET.encode() in blob] == []
+
+    # and the next cycle finds nothing to publish or write
+    report = _run(b)
+    assert report.unchanged is True
+    assert _git(b.repo, "rev-list", "--count", "HEAD").strip() == commits
+
+
 def test_a_settings_file_the_policy_cannot_parse_is_reported_unprojectable(tmp_path, memory_key_store) -> None:
     # given — B's tracked file is malformed for its format
     a, b = _keyed_pair(tmp_path, memory_key_store, b'{\n  "editor.fontSize": 13\n}\n')
@@ -672,6 +706,9 @@ class _CountingAdapter:
 
     def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
         return self._inner.render(tree, template)
+
+    def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+        return self._inner.render_edits(tree, template)
 
 
 def test_a_cycle_projects_a_file_once(tmp_path, memory_key_store) -> None:
@@ -1098,6 +1135,9 @@ class _RefusesMarked:
 
     def render(self, tree: Tree, template: str, arrays=None, verbatim=None) -> str:
         return self._inner.render(tree, template)
+
+    def render_edits(self, tree: Tree, template: str, arrays=None, verbatim=None) -> tuple[TextEdit, ...]:
+        return self._inner.render_edits(tree, template)
 
 
 def test_a_stamp_is_never_held_back_so_an_older_build_still_stops(tmp_path, memory_key_store) -> None:

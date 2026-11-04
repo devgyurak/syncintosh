@@ -87,6 +87,15 @@ class Verbatim:
     paths: frozenset[KeyPath]
 
 
+@dataclass(frozen=True)
+class TextEdit:
+    """Replace ``[start, end)`` of a text with `text`; a zero-width range is an insertion."""
+
+    start: int
+    end: int
+    text: str = field(repr=False)
+
+
 @runtime_checkable
 class ContentAdapter(Protocol):
     """Parses one format to a typed tree and renders a merged tree back to text.
@@ -115,6 +124,22 @@ class ContentAdapter(Protocol):
         """Render `tree` into text, using `template` as the unchanged baseline to edit.
 
         `verbatim` names values to copy from another document as they are written there.
+        """
+        ...
+
+    def render_edits(
+        self,
+        tree: Tree,
+        template: str,
+        arrays: Mapping[KeyPath, ArrayRule] | None = None,
+        verbatim: Verbatim | None = None,
+    ) -> tuple[TextEdit, ...]:
+        """The edits that turn `template` into what :meth:`render` returns, in offset order.
+
+        The list is settled: sorted, non-overlapping, and free of the edits a wider one swallows, so applying
+        them in order, with offsets into `template`, gives exactly the rendered text. A caller that needs to
+        know *where* the render
+        changed the template, not just what it came to, reads this instead of diffing the two texts.
         """
         ...
 
