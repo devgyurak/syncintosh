@@ -137,8 +137,9 @@ class ContentAdapter(Protocol):
         """The edits that turn `template` into what :meth:`render` returns, in offset order.
 
         The list is settled: sorted, non-overlapping, and free of the edits a wider one swallows, so applying
-        each in turn (from the back) gives exactly the rendered text. A caller that needs to know *where* the
-        render changed the template, not just what it came to, reads this instead of diffing the two texts.
+        them in order, with offsets into `template`, gives exactly the rendered text. A caller that needs to
+        know *where* the render
+        changed the template, not just what it came to, reads this instead of diffing the two texts.
         """
         ...
 

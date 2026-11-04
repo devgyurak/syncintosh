@@ -15,8 +15,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.core.ports import TextEdit
 from syncintosh.core.presets import PresetFile
-from syncintosh.core.projection import Carry, graft, project_text, restore_text
+from syncintosh.core.projection import Carry, _place, project_text, restore_text
 
 ADAPTER = JsoncAdapter()
 NOISE_TOP = ("noise",)
@@ -90,30 +91,39 @@ def test_a_line_the_other_machine_changed_far_away_comes_across_and_the_local_li
 
 def test_a_line_the_other_machine_changed_beside_the_key_falls_back_to_a_render_with_the_right_values() -> None:
     # given — the line right above the stripped key changed, so where the key belongs is not known
-    live = '{\n  "p1": 1,\n  "p3": 3,\n  "noise": 2,\n  "z": 9\n}\n'
+    live = '{\n  "p1": 1,\n  "p3": 3,\n  "noise": 2, // why\n  "z": 9\n}\n'
     policy = _policy([NOISE_TOP])
     repo = project_text(ADAPTER, live, policy).replace('"p3": 3', '"p3": 30')
 
     # when
     restored = restore_text(ADAPTER, repo, live, policy)
 
-    # then — the values are the ones the graft defines, and the file still projects back to the repo object
-    assert ADAPTER.parse(restored) == graft(ADAPTER.parse(repo), ADAPTER.parse(live), policy.stripped)
+    # then — exactly what the renderer writes: the key by its sibling, and no comment, which is the limit
+    # the design doc names. A looser neighbour rule would keep `// why` here and fail this.
+    assert restored == '{\n  "p1": 1,\n  "p3": 30,\n  "noise": 2,\n  "z": 9\n}\n'
     assert project_text(ADAPTER, restored, policy) == repo
 
 
-def test_a_member_the_other_machine_added_at_the_end_is_not_skipped_over() -> None:
-    # given — the stripped key was the last member, and the other machine appended one after where it stood
-    live = '{\n  "a": 1,\n  "noise": 2\n}\n'
-    policy = _policy([NOISE_TOP])
-    repo = project_text(ADAPTER, live, policy).replace('"a": 1', '"a": 1,\n  "added": 5')
+def test_an_edit_at_the_end_of_the_text_is_placed_at_the_end_of_the_repo_text() -> None:
+    # given — an insertion after the last line, into a repo text that ends the same way
+    shown = '{\n  "a": 1\n}\n'
 
     # when
-    restored = restore_text(ADAPTER, repo, live, policy)
+    placed = _place(shown, shown, [TextEdit(len(shown), len(shown), "X")])
 
     # then
-    assert ADAPTER.parse(restored).to_value() == {"a": 1, "added": 5, "noise": 2}
-    assert project_text(ADAPTER, restored, policy) == repo
+    assert placed == [TextEdit(len(shown), len(shown), "X")]
+
+
+def test_an_edit_at_the_end_of_the_text_is_not_placed_when_the_repo_text_goes_on() -> None:
+    # given — the other machine appended a line after where the edit stood
+    shown = '{\n  "a": 1\n}\n'
+
+    # when
+    placed = _place(shown, shown + "// more\n", [TextEdit(len(shown), len(shown), "X")])
+
+    # then
+    assert placed is None
 
 
 def test_a_carried_key_and_a_noise_key_each_come_back_as_the_live_file_wrote_them() -> None:
