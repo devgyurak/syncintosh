@@ -461,6 +461,11 @@ BASIC_NOT_A_CREDENTIAL = [
     pytest.param(base64.b64encode(b"user:\xff\xfe\xfd\xfc\xfb\xfa\xf9"), id="not-utf8"),
     pytest.param(base64.b64encode(b"user:\x00\x01\x02\x03\x04\x05\x06\x07"), id="not-printable"),
     pytest.param(b"internationalization", id="prose"),
+    pytest.param(b"NeuroglicTransmuter", id="camelcase-decodes-by-accident-when-trimmed"),
+    pytest.param(b"ImpiSynchiticTruish", id="camelcase-decodes-by-accident-when-trimmed-2"),
+    pytest.param(base64.b64encode(b"username:password\xe2\x82").rstrip(b"="), id="split-multibyte-uncut"),
+    pytest.param(base64.b64encode(b"username:password\xf0\x9f").rstrip(b"="), id="split-4-byte-uncut"),
+    pytest.param(b"abcdefghijklmnopq", id="one-mod-four"),
 ]
 
 
@@ -500,11 +505,12 @@ def test_a_basic_credential_longer_than_the_width_cap_is_still_refused() -> None
     [
         pytest.param(b"user:" + b"a" * 186 + "é".encode(), id="multibyte-cut-by-the-cap"),
         pytest.param(b"user:pass\tword\xc2\xa0ok", id="tab-and-no-break-space"),
+        pytest.param(b"nbH:QDDtIPynq", id="unpadded-token-is-padded-back"),
     ],
 )
 def test_a_basic_credential_the_decode_must_tolerate_is_still_refused(raw: bytes) -> None:
     # given — a character cut in half by the width cap, and a password holding a tab or U+00A0
-    token = base64.b64encode(raw)
+    token = base64.b64encode(raw).rstrip(b"=")
 
     # when
     hits = _basic_hits(token)

@@ -291,6 +291,7 @@ SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 # long value from every position; a run past the cap is cut there and `_is_basic_credential` decodes the
 # prefix, which already holds the `user:` that decides it. The standard alphabet only: Basic is not
 # base64url.
+_BASIC_WIDTH_CAP = 256
 _BASIC_DECODED = re.compile(rb"\b(?i:basic)[ \t]+(?P<token>[A-Za-z0-9+/]{16,256}+={0,2}+)")
 
 
@@ -302,14 +303,22 @@ _CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
 def _is_basic_credential(match: re.Match[bytes]) -> bool:
     """True when the token strictly decodes to printable UTF-8 shaped `user:password` with a user."""
     token = match.group("token")
-    # A run cut at the cap, or one that simply is not a whole number of quads, decodes by its whole
-    # quads: base64 is prefix-stable, and the `user:` that decides the check is at the front.
-    whole = token if token.endswith(b"=") else token[: len(token) - len(token) % 4]
+    # Only a run cut at the width cap is a prefix: it decodes by its whole quads, and `final=False` lets a
+    # multibyte character the cut split in half through. Any other token is the whole value, so it is
+    # padded to a whole number of quads and decoded in full (a length of 1 mod 4 is not base64 at all).
+    # Trimming an uncut token instead would let a dictionary-shaped word decode by accident.
+    capped = len(token) == _BASIC_WIDTH_CAP
+    if capped:
+        whole = token[: len(token) - len(token) % 4]
+    elif token.endswith(b"="):
+        whole = token
+    elif len(token) % 4 == 1:
+        return False
+    else:
+        whole = token + b"=" * (-len(token) % 4)
     try:
         raw = base64.b64decode(whole, validate=True)
-        # `final=False` tolerates a multibyte character the cap or the quad trim cut in half, and still
-        # rejects bytes that are not UTF-8 at all.
-        decoded = codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
+        decoded = codecs.getincrementaldecoder("utf-8")().decode(raw, final=not capped)
     except (binascii.Error, UnicodeDecodeError):
         return False
     user, separator, _ = decoded.partition(":")
