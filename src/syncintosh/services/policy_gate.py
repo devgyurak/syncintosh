@@ -19,8 +19,9 @@ consistent repo, and the digest check that guards each object read keeps working
 against the **stored** manifest (`PolicyView.raw`), never the view, or a migrated object would look
 unchanged and never be written.
 
-The stamp is a claim by whoever wrote the repo, not a trust boundary. `apply` keeps its own projection check as
-defense in depth; it runs only when a live file exists to restore into, and closing that gap is the next PR (C).
+The stamp is a claim by whoever wrote the repo, not a trust boundary. `apply` therefore re-checks each stored object
+itself, whatever the stamp says: the restore round-trip when a live file exists, and a static strip of the stored
+object when none does.
 """
 
 from __future__ import annotations

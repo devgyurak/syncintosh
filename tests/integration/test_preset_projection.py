@@ -1091,3 +1091,31 @@ def test_a_projected_object_is_written_to_a_machine_that_has_no_such_file(tmp_pa
     # then — the stripped-form check does not refuse an object that is already its own projection
     assert (report.unprojectable, b"proxyAuthorization" in _read(c, JSONC)) == ((), False)
     assert JSONC in report.applied
+
+
+class _StaleCatalog(_Release):
+    """A build that stamps release 2 but projects with release 1's files: a stamp that over-claims."""
+
+    def policy_for(self, path: str) -> PresetFile | None:
+        return next((file for file in RELEASE_1.files if file.path == path), None)
+
+
+def test_apply_refuses_an_unstripped_object_under_a_current_stamp_on_a_machine_with_no_file(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the stamp says release 2 but the object still holds the credential (a stamp is a claim, not a proof)
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, CREDENTIAL)
+    _run(a, catalog=_StaleCatalog(RELEASE_1, RELEASE_2))
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    (b.home / JSONC).parent.mkdir(parents=True)
+
+    # when
+    report = _run(b, catalog=NEW_BUILD)
+
+    # then — refused rather than written, although there is no live file to compare it with
+    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
+    assert not (b.home / JSONC).exists()
