@@ -54,7 +54,6 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
-from syncintosh.core.policy import stamp_policies
 from syncintosh.core.ports import (
     AppDetector,
     Cipher,
@@ -1713,7 +1712,7 @@ class _Merged:
 def _merge_diverged(
     *,
     config: SyncConfig,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -1794,7 +1793,13 @@ def _merge_diverged(
         schema=MANIFEST_SCHEMA,
         key_generation=max(local_manifest.key_generation, remote_manifest.key_generation),
         records=records,
-        policy=stamp_policies(records.values(), presets.catalog),
+        policy=transport.stamps(
+            records,
+            local,
+            remote,
+            held=frozenset(task.file_id for task in result.content_merges)
+            & (transport.unservable(local) | transport.unservable(remote)),
+        ),
     )
     # A migrated HEAD changes its manifest's stamp, so a collect commit exists by the time a merge is planned: the
     # local manifest read here is the stored one, and planning against it cannot skip a migrated object.
@@ -1859,7 +1864,7 @@ class _Publish:
 
 def _publish(
     *,
-    transport: GitTransport,
+    transport: PolicyView,
     files: RepoFiles,
     cipher: Cipher,
     scanner: SecretScanner,
@@ -2078,6 +2083,7 @@ def _apply(
     # The same directory check the collect side makes: a record must not be *written* through a
     # symlinked glob directory either.
     unsafe = _unsafe_glob_directories(config, live, deny, home)
+    unservable = transport.unservable(target_commit)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -2102,6 +2108,11 @@ def _apply(
             deferred.append(Deferral(record.path, _PROFILE_FOLDER_MISSING))
             continue
         policy = presets.policy_for(record.path)
+        if file_id in unservable and (policy is None or policy.format == record.format):
+            # The policy gate could not reduce this stored object to the local policy, and it is not the format
+            # check below. Writing it raw would put what the policy strips into a live file.
+            unprojectable.append(Refusal(record.path, _PROJECTION_FAILURE_MIGRATED))
+            continue
         if policy is not None and policy.format != record.format:
             # The record names a format the local catalog does not use for this path. Apply must
             # refuse it here rather than write it, because settle projects the bytes it reads with
@@ -2604,14 +2615,8 @@ def _cycle(
         schema=MANIFEST_SCHEMA,
         key_generation=generation,
         records=collected.records,
-        policy=stamp_policies(collected.records.values(), presets.catalog),
+        policy=transport.stamps(collected.records, head_commit),
     )
-    # A path the view left out is replaced by collecting the live file. Where this machine does not collect it, the
-    # plan would read the omission as a deletion and publish it to every other machine, so the cycle stops instead.
-    collected_paths = {record.path for record in collected.records.values()}
-    uncollected = [path for path in transport.left_out(head_commit) if path not in collected_paths]
-    if uncollected:
-        raise ProjectionError(f"{uncollected[0]}: {_PROJECTION_FAILURE_MIGRATED}, and this machine does not collect it")
     plan = plan_writes(stored_head, new_manifest)
     # A live file that merely matches HEAD again (a crash between apply and the ledger save) must
     # not produce an empty commit; the write plan, not the collect list, decides (step 4–5).

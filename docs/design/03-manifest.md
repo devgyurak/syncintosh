@@ -111,12 +111,15 @@ are, and a rotation neither re-derives nor blocks on the stamp.
   a carry belongs to a live file, not to a stored object), re-sealed, and served in place of the stored one, with
   its record's digest, its format (the local one) and the stamp updated. HEAD, base, remote, target and restore
   all read the same view, so the merge, apply and ledger agree, and the next write persists the migration.
-  A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b`.
-  A record that cannot be reduced — its format is not the one the catalog uses, or the projection fails — does not
-  stop the cycle: it is left out of the view (never served), its preset's stamp is not raised, and the cycle
-  collects the live file in its place. The report says `policy not migrated: <path> …`. If this machine does not
-  collect that path, the omission would read as a deletion and reach every other machine, so the cycle stops with
-  `ProjectionError` instead.
+  A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b` (or
+  `unstamped→b`). A record that cannot be reduced — its format is not the one the catalog uses, or the projection
+  fails — does not stop the cycle and is **not removed from the view**: dropping it would read as a deletion and
+  reach every machine, and its file ID would change when it came back. It stays exactly as stored and is never served
+  as migrated: `apply` refuses it for that file, and a writer keeps the stamp its preset had (or none), so the next
+  cycle judges it `older` again. The machine that holds the file replaces it by collecting, under the same file ID (unless its live file already
+  projects to the stored digest and the format differs: then the refusal repeats until a build that owns the path
+  republishes it).
+  The report says `policy not migrated: <path> …`.
 
 A write is planned against the **stored** manifest, not the view: a migrated object would otherwise look unchanged
 and never be written. A ledger entry's digest is of the object as it was stored when the entry was made, so a

@@ -21,10 +21,11 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
-from syncintosh.core.errors import PolicyMismatch, ProjectionError
+from syncintosh.core.errors import PolicyMismatch
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.manifest_codec import loads_manifest
+from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import policy_digest
 from syncintosh.core.ports import ContentAdapter, PresetCatalog
@@ -705,7 +706,7 @@ def test_a_dangerous_path_is_reported_as_dangerous_not_as_unowned(tmp_path, memo
     assert report.refused == ()
 
 
-def test_a_record_published_in_another_format_is_collected_again_not_served(tmp_path, memory_key_store) -> None:
+def test_a_record_published_in_another_format_is_kept_as_stored_and_refused(tmp_path, memory_key_store) -> None:
     # given — A's catalog does not know the path, so A publishes it as plain `text`; this machine's
     # catalog says it is JSONC and strips keys from it
     remote = _bare_remote(tmp_path)
@@ -722,17 +723,15 @@ def test_a_record_published_in_another_format_is_collected_again_not_served(tmp_
     # when — B's own file is byte-for-byte the one collect read, so collect's projection is cached
     report = _run(b, adopt="remote")
 
-    # then — the record is left out of the policy migration, not served, and the cycle goes on: the live file is
-    # collected under this catalog's format, so one file written by a build that did not know the path cannot
-    # wedge the device
-    assert report.unprojectable == ()
+    # then — refused: reusing that projection across a format mismatch would apply the record here
+    # and refuse it on a machine whose file had been touched in the same window, for the same input. The policy
+    # gate keeps the record as stored instead of failing the cycle, and says so
+    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
+    assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
     assert any(note.startswith("policy not migrated: " + JSONC) for note in report.notes)
-    assert [r.format for r in _manifest_at_head(b).records.values() if r.path == JSONC] == ["jsonc"]
 
 
-def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_collected_again(
-    tmp_path, memory_key_store
-) -> None:
+def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_refused(tmp_path, memory_key_store) -> None:
     # given — A publishes `.zshrc` as JSONC; this machine's catalog says it is plain text and strips
     # nothing from it, so the format check has to run for that policy too
     remote = _bare_remote(tmp_path)
@@ -750,12 +749,12 @@ def test_a_record_whose_format_disagrees_with_a_path_that_strips_nothing_is_coll
     report = _run(b, adopt="remote")
     again = _run(b, adopt="remote")
 
-    # then — the mismatched record is left out of the migration and collected again as text, so the file is not
-    # rewritten from an object in the wrong format, and the next cycle has nothing left to report
-    assert report.unprojectable == ()
-    assert any(note.startswith("policy not migrated: " + ZSH) for note in report.notes)
+    # then — refused rather than written: writing it would leave apply and settle disagreeing, and
+    # the file would be rewritten on every later cycle without ever settling
+    assert [refusal.path for refusal in report.unprojectable] == [ZSH]
+    assert report.unprojectable[0].reason == "the record's format is not the format the catalog uses"
     assert _read(b, ZSH) == b"echo one\n"
-    assert [note for note in again.notes if note.startswith("policy not migrated")] == []
+    assert again.unprojectable == report.unprojectable
 
 
 def test_a_record_is_republished_in_the_format_its_object_is_really_in(tmp_path, memory_key_store) -> None:
@@ -962,25 +961,36 @@ def test_an_unstamped_object_a_build_did_not_project_is_migrated_not_taken_as_ma
     # then — the repo no longer holds the key, and the preset is stamped because it was brought to the policy
     assert [blob for blob in _decrypted_objects(b) if b"FROM-A" in blob] == []
     assert _manifest_at_head(b).policy["keyed-test"].rev == 1
-    assert "policy migrated: keyed-test rev 1→1" in report.notes
+    assert "policy migrated: keyed-test unstamped→1" in report.notes
 
 
-def test_a_path_left_out_of_a_migration_that_this_machine_does_not_collect_stops_the_cycle(
-    tmp_path, memory_key_store
-) -> None:
-    # given — the record is in another format than the catalog's, and this machine tracks no such file, so nothing
-    # would replace it and the omission would read as a deletion
+def _published_unowned(tmp_path, make_store, *, scope: Scope):
+    """A (a build whose catalog does not own the path) has published it as `text`; B tracks nothing."""
     remote = _bare_remote(tmp_path)
-    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
-    item = LocalItem.create(path=JSONC, preset="keyed-test", scope="common", format="text")
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    owner = a.machine_id if scope == "machine" else None
+    item = LocalItem.create(path=JSONC, preset="keyed-test", scope=scope, machine=owner, format="text")
     _initialize(a, _config(a, (item,)))
     _write(a, JSONC, b'{"editor.fontSize": 13}\n')
     _run(a, catalog=_UnawareCatalog())
-    published = _git(a.remote, "rev-parse", BRANCH)
-    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
     _initialize(b, _config(b, ()), import_from=a.recovery)
+    return a, b
 
-    # when & then
-    with pytest.raises(ProjectionError, match="does not collect it"):
-        _run(b, catalog=KEYED_CATALOG)
-    assert _git(b.remote, "rev-parse", BRANCH) == published
+
+@pytest.mark.parametrize("scope", ["common", "machine"])
+def test_a_record_the_gate_cannot_reduce_is_kept_not_deleted_by_a_machine_that_does_not_collect_it(
+    tmp_path, memory_key_store, scope
+) -> None:
+    # given — B tracks no such file, so nothing on B replaces the record the gate could not migrate
+    a, b = _published_unowned(tmp_path, memory_key_store, scope=scope)
+    before = {(r.file_id, r.scope, r.machine, r.format) for r in _manifest_at_head(a).records.values()}
+
+    # when
+    report = _run(b, catalog=KEYED_CATALOG)
+
+    # then — the record is still there, with the same file ID, and the preset is not stamped as migrated
+    after = {(r.file_id, r.scope, r.machine, r.format) for r in _manifest_at_head(b).records.values()}
+    assert after == before
+    assert "keyed-test" not in _manifest_at_head(b).policy
+    assert any(note.startswith("policy not migrated: " + JSONC) for note in report.notes)

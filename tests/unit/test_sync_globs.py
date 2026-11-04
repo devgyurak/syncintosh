@@ -52,6 +52,9 @@ class _RecordingLive(SystemLiveFiles):
 class _UnusedTransport:
     """A `GitTransport` whose every method fails: the apply path must not read an object."""
 
+    def unservable(self, commit: str | None) -> frozenset[str]:
+        return frozenset()
+
     def init(self) -> None:
         raise AssertionError("unused")
 
