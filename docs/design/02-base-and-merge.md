@@ -223,9 +223,12 @@ decide about survives:
   internal layout may differ from what the file had. A scalar value — the usual noise or excluded
   key — is byte-identical.
 
-A strict consequence: **an object that is not itself a projection is refused, not applied.** An
-object can hold a key the local policy strips when the machine that published it did not exclude
-it — two builds disagreeing about the preset. Writing the file then would make its projection
-differ from the object, and the next cycle would publish that difference, which the other build
-would publish back: a churn of commits instead of a fix. The file is reported as `unprojectable`
-(and `sync` exits non-zero) so the user can see the disagreement and act on it.
+A strict consequence: **an object that is not itself a projection is refused, not applied.** Two builds that
+disagree about a preset are told apart before this point, by the policy stamp (`03-manifest.md`, "The gate"): a
+newer repo stops the cycle and an older one is migrated. What reaches apply should therefore be a projection or a
+record the gate could not reduce, but the stamp is only a claim by whoever wrote the repo, so apply checks the
+object itself. With a live file the round trip above must give the object back; with none, the object must be its
+own static strip. Writing anything else would make the file's projection differ from the object, and the next
+cycle would publish that difference, which the other build would publish back: a churn of commits instead of a
+fix. The file is reported as `unprojectable` (and `sync` exits non-zero) so the user can see the disagreement and
+act on it.

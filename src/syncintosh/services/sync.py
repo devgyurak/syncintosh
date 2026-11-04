@@ -734,12 +734,11 @@ def _project_merged(
     and a projection that cannot be done refuses the seal rather than writing the raw bytes
     (``AGENTS.md`` §3.4).
 
-    **Only content this machine creates is projected, and only for a path it tracks.** An object the
-    merge merely re-uses is the very blob the other machine published in its own commit, so projecting
-    it would not remove anything from the history — git keeps the blob either way — while it *would*
-    delete that machine's values: its `window.zoomLevel`, or its own `proxyAuthorization`, would
-    silently drop out of the file the next time it applied. A path this machine does not track is not
-    governed by this machine's policy either: the machine that does track it decides what its preset
+    **Only content this machine creates is projected, and only for a path it tracks.** An object the merge
+    merely re-uses is served by the policy gate (`services/policy_gate.py`), which has already brought it to
+    this build's policy or stopped the cycle, so it needs no second projection here. This one stays as the check
+    on what the merge itself produces, because a stamp is a claim, not a proof. A path this machine does not
+    track is not governed by this machine's policy either: the machine that does track it decides what its preset
     strips, and projecting it here would rewrite that machine's file — and abort the whole sync when
     that machine's record names a format the local catalog does not use.
     """
@@ -783,6 +782,26 @@ def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy:
         return restore_text(adapter, repo_text, live_text, policy, Carry(presets.carried(policy))).encode("utf-8")
     except ProjectionError:
         return None
+
+
+def _reduce_for_apply(
+    presets: _Presets, data: bytes, live_bytes: bytes | None, policy: PresetFile, record: ManifestRecord
+) -> bytes | str:
+    """What apply writes for a stored object under a policy that projects, or the reason it must not be written.
+
+    The one place apply checks that an object is the local policy's projection, because the stamp that says so is
+    a claim by whoever wrote the repo (``docs/design/03-manifest.md``). With a live file, this machine's own keys
+    are re-attached and the round trip must give the object back; with none, the object must be its own static
+    strip, since nothing else could tell a key this policy removes from one it keeps. Either way an object that
+    cannot be reduced is never written raw (``AGENTS.md`` §3.4).
+    """
+    if live_bytes is not None:
+        restored = _restore_file(presets, data, live_bytes, policy)
+        return _RESTORE_FAILED if restored is None else restored
+    reduced = _project_file(presets, data, record.path, record.format, carry=False)
+    if reduced.failure is not None or reduced.view != data:
+        return _PROJECTION_FAILURE_MIGRATED
+    return data
 
 
 def _syntax_ok(presets: _Presets, data: bytes, path: str) -> bool:
@@ -1130,7 +1149,9 @@ def _collect_existing(
             # change with no conflict, so merge instead (step 10, on a stale base).
             # The record this machine republishes carries the catalog's format for the path, the
             # one the object is really in — the same normalization the other collect paths do, so the
-            # merge below projects a format it agrees with instead of aborting the sync.
+            # merge below projects a format it agrees with instead of aborting the sync. It is also how a
+            # record the policy gate kept as stored (a format the catalog does not use) is replaced, under
+            # its own file ID, by the machine that holds the file.
             state.stale.append(
                 _StaleChange(
                     record=_replace_sha(record, record.sha256, format=item.format), entry=entry, live=projected.view
@@ -2125,17 +2146,14 @@ def _apply(
         # projection, and never the content this cycle will publish, which for a merged record is
         # not what the file holds.
         collect_baseline = seen.get(file_id)
-        # Collect's projection stands in for this one only when the file is byte-for-byte the one
-        # it was made from **and** the record names the format the policy uses: reusing it across a
-        # format mismatch would apply a record on the strength of the file not having been touched,
-        # while touching it would refuse it — the same input, two verdicts.
+        # Collect's projection stands in for this one only when the file is byte-for-byte the one it was made from.
+        # A record whose format is not the catalog's never gets here (refused above), so the two agree on the format.
         # A file with carried keys is never reused: collect measured it against the ledger's object, while apply
         # measures it against the one it is about to write, and the two projections differ in the carried keys.
         reusable = (
             live_bytes is not None
             and live_bytes == collect_baseline
             and stripped_policy is not None
-            and stripped_policy.format == record.format
             and not presets.carried(stripped_policy)
         )
         cached = views.get(file_id) if reusable else None
@@ -2209,23 +2227,12 @@ def _apply(
         if data is None:
             deferred.append(Deferral(record.path, _OBJECT_MISSING))
             continue
-        if live_bytes is None and stripped_policy is not None:
-            # No live file to re-attach keys to, so nothing else checks that the stored object is what the local
-            # policy would have kept. The stamp cannot be trusted for it: one stamp covers a preset's objects of
-            # different ages. An object the static strip would change, or cannot reduce, is never written raw.
-            reduced = _project_file(presets, data, record.path, record.format, carry=False)
-            if reduced.failure is not None or reduced.view != data:
-                unprojectable.append(Refusal(record.path, _PROJECTION_FAILURE_MIGRATED))
+        if stripped_policy is not None:
+            reduced = _reduce_for_apply(presets, data, live_bytes, stripped_policy, record)
+            if isinstance(reduced, str):
+                unprojectable.append(Refusal(record.path, reduced))
                 continue
-        if live_bytes is not None and stripped_policy is not None:
-            restored = _restore_file(presets, data, live_bytes, stripped_policy)
-            if restored is None:
-                # Never write a version whose local keys could not be re-attached: the repo's
-                # bytes hold the stripped form, and writing them raw would delete a credential
-                # or a machine-local preference (``AGENTS.md`` §3.4).
-                unprojectable.append(Refusal(record.path, _RESTORE_FAILED))
-                continue
-            data = restored
+            data = reduced
         if not _syntax_ok(presets, data, record.path):
             invalid.append(Refusal(record.path, _SYNTAX_FAILED))
             continue
