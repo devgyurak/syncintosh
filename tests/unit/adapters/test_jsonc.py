@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters import jsonc
@@ -723,8 +723,11 @@ def _comment_in_first_empty_object(value, text: str, comment_text: str) -> str:
     Only the first of two or more members: the shape under test is an *added* key landing in the empty
     object, and a later member is the one a `change` edit rewrites whole (which would refuse, correctly).
     """
-    first = next(iter(value.values()))
-    if first != {} or len(value) < 2:
+    first_key, first = next(iter(value.items()))
+    # `_mutated` builds `add` and `independent` trees around a key `d`, so a commented `d: {}` would be
+    # *overwritten* with a string, which rewrites the comment away and is refused (rightly). That is not the
+    # shape under test, and the properties that draw this placement assume nothing here is refused.
+    if first != {} or len(value) < 2 or first_key == "d":
         return text
     # A `//` comment runs to the end of its line, so the brace must be on the next one.
     body = "{ " + comment_text + ("\n}" if comment_text.startswith("//") else " }")
@@ -773,6 +776,19 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
 
 
 @settings(max_examples=500, deadline=None)
+@example(
+    value={"d": {}, "a": None},
+    how="independent",
+    layout={
+        "indent": "  ",
+        "separators": (",", ":"),
+        "newline": "\n",
+        "trailing": False,
+        "pad": False,
+        "comma": "end",
+        "comments": [("in-empty-object", "// hides **/*.map below")],
+    },
+)
 @given(value=_FUZZ_VALUES, how=_MUTATIONS, layout=_LAYOUT)
 def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout) -> None:
     # given — a file laid out however an editor might have written it, commented wherever a comment
@@ -1004,15 +1020,21 @@ def test_an_edit_inside_the_last_member_leaves_lone_commas_and_notes_before_it_b
     assert adapter.parse(rendered) == tree
 
 
-def _rendered_or_reason(adapter, tree, template) -> str:
-    """The render, or the fixed reason it was refused; any other failure propagates."""
+def _render_or_refusal(adapter, tree, template) -> tuple[str | None, str | None]:
+    """`(render, None)`, or `(None, reason)` when the render was refused; any other failure propagates."""
     try:
-        return adapter.render(tree, template)
+        return adapter.render(tree, template), None
     except RenderRefused as refused:
-        return refused.reason
+        return None, refused.reason
 
 
 @settings(max_examples=500, deadline=None)
+@example(
+    value={"d": {}, "a": None},
+    how="add",
+    comments=[("in-empty-object", "// hides **/*.map below")],
+    layout={"indent": "  ", "separators": (",", ":"), "newline": "\n", "trailing": False, "pad": False},
+)
 @given(
     value=_FUZZ_VALUES,
     how=_MUTATIONS,
@@ -1031,10 +1053,11 @@ def test_a_root_edit_beside_lone_commas_and_notes_is_exact_or_refused_for_the_co
     assert adapter.parse(template) == tree_from_value(value)
 
     # when
-    outcome = _rendered_or_reason(adapter, tree, template)
+    rendered, reason = _render_or_refusal(adapter, tree, template)
 
-    # then — a render is the tree it was handed; a refusal names the comma and never the general reason
-    assert outcome == LONE_COMMA_REFUSED or adapter.parse(outcome) == tree
+    # then — a refusal names the comma and never the general reason; anything else is the tree it was handed
+    assert reason in (None, LONE_COMMA_REFUSED)
+    assert rendered is None or adapter.parse(rendered) == tree
 
 
 def test_the_last_comment_end_before_a_position_with_no_comment_is_refused() -> None:
@@ -1138,6 +1161,12 @@ def test_a_member_added_between_reordered_members_gets_its_comma() -> None:
 
 
 @settings(max_examples=400, deadline=None)
+@example(
+    value={"d": {}, "a": None},
+    how="add",
+    comments=[("in-empty-object", "// hides **/*.map below")],
+    layout={"indent": "  ", "separators": (",", ":"), "newline": "\n", "trailing": False, "pad": False},
+)
 @given(
     value=_FUZZ_VALUES,
     how=st.sampled_from(["drop", "add"]),
