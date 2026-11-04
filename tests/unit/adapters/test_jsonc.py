@@ -16,10 +16,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.content_merge import merge_content
-from syncintosh.core.errors import ContentParseError
+from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.merge import merge_tree
 from syncintosh.core.tree import Scalar, Tree, tree_from_value
 
@@ -753,9 +753,6 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
         text = body[:cut] + "," + body[cut:] + text[len(body) :]
     unit = indent if isinstance(indent, str) else ""
     root_comma = ",\n" + unit + '"'
-    if comma == "own-line" and unit:
-        # Only an indented document: with no indent a nested member's separator looks like a root one.
-        text = text.replace(root_comma, "\n" + unit + "," + "\n" + unit + '"')
     for placement, comment_text in comments:
         if not (isinstance(value, dict) and value and "\n" in text) or placement == "none":
             continue
@@ -767,6 +764,10 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
             "before-close": (head + "\n" + comment_text + found + text[len(head) + len(found) :]) if found else text,
             "in-empty-object": _comment_in_first_empty_object(value, text, comment_text),
         }[placement]
+    if comma == "own-line" and unit:
+        # After the comments, which find the root's `,\n<indent>"` separators; and only for an indented
+        # document, because with no indent a nested member's separator looks like a root one.
+        text = text.replace(root_comma, "\n" + unit + "," + "\n" + unit + '"')
     return text if newline == "\n" else text.replace("\n", newline)
 
 
@@ -889,6 +890,70 @@ def test_a_member_edit_lands_outside_a_comment_and_beside_a_lone_comma(text, wan
     assert adapter.parse(rendered) == tree
 
 
+_LONE_COMMA_NOTED = (
+    '{\n  // my settings\n  "editor.fontSize": 13\n  ,\n  "editor.tabSize": 2,\n'
+    '  "files.exclude": {\n    "**/.git": true\n  },\n  "z": 1\n}\n'
+)
+_LONE_COMMA_TREE = {
+    "editor.fontSize": 13,
+    "editor.tabSize": 2,
+    "files.exclude": {"**/.git": True},
+    "z": 1,
+}
+
+
+@pytest.mark.parametrize(
+    "want",
+    [
+        pytest.param(
+            {k: v for k, v in _LONE_COMMA_TREE.items() if k != "z"}, id="delete-a-member-with-its-comma-at-line-end"
+        ),
+        pytest.param({**_LONE_COMMA_TREE, "n": 1}, id="add-a-member-at-the-end"),
+        pytest.param(
+            {**_LONE_COMMA_TREE, "files.exclude": {"**/.git": True, "**/.DS_Store": True}},
+            id="add-a-key-in-a-nested-object",
+        ),
+        pytest.param({**_LONE_COMMA_TREE, "editor.fontSize": 14}, id="change-the-value-that-owns-the-lone-comma"),
+    ],
+)
+def test_an_edit_away_from_a_lone_comma_keeps_the_layout_and_the_note(want) -> None:
+    # given — a note in the object and a comma alone on one line, but the edit never works on that comma
+    adapter = JsoncAdapter()
+    tree = tree_from_value(want)
+
+    # when
+    rendered = adapter.render(tree, _LONE_COMMA_NOTED)
+
+    # then — the object is edited in place, so the note and the user's comma layout are both still there
+    assert adapter.parse(rendered) == tree
+    assert "  // my settings\n" in rendered
+    assert '"editor.fontSize": 1' in rendered
+    assert "\n  ,\n" in rendered
+
+
+@pytest.mark.parametrize(
+    "want",
+    [
+        pytest.param(
+            {k: v for k, v in _LONE_COMMA_TREE.items() if k != "editor.fontSize"},
+            id="delete-the-member-that-owns-the-comma",
+        ),
+        pytest.param(
+            {"editor.fontSize": 13, "n": 1, **{k: v for k, v in _LONE_COMMA_TREE.items() if k != "editor.fontSize"}},
+            id="insert-after-the-member-that-owns-the-comma",
+        ),
+    ],
+)
+def test_an_edit_that_works_on_a_lone_comma_beside_a_note_is_refused_with_its_own_reason(want) -> None:
+    # given — the edit would strand the lone comma, and rewriting the object whole would lose the note
+    adapter = JsoncAdapter()
+
+    # when & then — the reason names the comma, not "this value has a comment"
+    with pytest.raises(RenderRefused) as refused:
+        adapter.render(tree_from_value(want), _LONE_COMMA_NOTED)
+    assert refused.value.reason == LONE_COMMA_REFUSED
+
+
 def test_a_member_edit_beside_a_lone_comma_and_a_note_is_refused() -> None:
     # given — the comma sits alone on its line, so the object cannot be spliced by line, and the
     # comment above `a` would be lost by rewriting the object whole
@@ -898,6 +963,68 @@ def test_a_member_edit_beside_a_lone_comma_and_a_note_is_refused() -> None:
     # when & then — an honest refusal rather than a file that does not parse
     with pytest.raises(ContentParseError):
         adapter.render(tree_from_value({"b": 2}), text)
+
+
+_NESTED_VALUES = st.dictionaries(
+    _FUZZ_KEYS, st.none() | st.booleans() | st.integers() | _FUZZ_TEXT, min_size=1, max_size=3
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    others=st.dictionaries(_FUZZ_KEYS, st.none() | st.booleans() | st.integers() | _FUZZ_TEXT, min_size=1, max_size=2),
+    nested=_NESTED_VALUES,
+    how=st.sampled_from(["drop", "add", "change"]),
+    comments=_COMMENT_LISTS,
+    layout=_LAYOUT_INDENTED,
+)
+def test_an_edit_inside_the_last_member_leaves_lone_commas_and_notes_before_it_byte_for_byte(
+    others, nested, how, comments, layout
+) -> None:
+    # given — every root comma alone on its line, notes in the document, and an edit that only reaches into
+    # the last member's own object; the document stays as written above that member
+    adapter = JsoncAdapter()
+    value = {**{key: val for key, val in others.items() if key != "n"}, "n": nested}
+    template = _fuzz_template(value, comments=comments, comma="own-line", **layout)
+    edited = {
+        "drop": dict(list(nested.items())[1:]) or {"d": "v"},
+        "add": {**nested, "d": "v"},
+        "change": {**dict(list(nested.items())[:-1]), list(nested)[-1]: "changed"},
+    }[how]
+    tree = tree_from_value({**value, "n": edited})
+    assert adapter.parse(template) == tree_from_value(value)
+
+    # when
+    rendered = adapter.render(tree, template)
+
+    # then
+    head = template[: template.index('"n"')]
+    assert rendered.startswith(head)
+    assert adapter.parse(rendered) == tree
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    others=st.dictionaries(_FUZZ_KEYS, st.none() | st.booleans() | st.integers() | _FUZZ_TEXT, max_size=2),
+    comment=_COMMENT_TEXTS,
+    layout=_LAYOUT_INDENTED,
+)
+def test_a_key_added_to_a_commented_empty_object_lands_after_the_comment(others, comment, layout) -> None:
+    # given — the first member is an empty object that holds a comment; the document is laid out every which way
+    adapter = JsoncAdapter()
+    value = {"e": {}, **{key: val for key, val in others.items() if key != "e"}, "z": 1}
+    template = _fuzz_template(value, comments=[("in-empty-object", comment)], comma="end", **layout)
+    tree = tree_from_value({**value, "e": {"x": 1}})
+    assert adapter.parse(template) == tree_from_value(value)
+    note = comment.replace("\n", layout["newline"])
+    assert note in template
+
+    # when
+    rendered = adapter.render(tree, template)
+
+    # then — the key is a member, not part of the comment, and the comment is still there
+    assert adapter.parse(rendered) == tree
+    assert note in rendered
 
 
 def test_a_member_edit_in_a_one_line_object_that_has_members_and_a_note_is_still_refused() -> None:
