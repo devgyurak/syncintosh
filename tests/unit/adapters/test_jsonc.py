@@ -9,7 +9,6 @@ span that changed.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -686,16 +685,30 @@ _LAYOUT = st.one_of(
     st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comma": st.just("own-line"), "comments": st.just([])}),
 )
 
-# A trailing comma anywhere the file did not have one: a `,`, then only whitespace, then a closing
-# brace — whatever the newline style and however deep the object. A *string* may hold the same bytes
-# (`"a": ", }"`), so the string literals are masked out before the search.
-_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
-_TRAILING_COMMA = re.compile(r",\s*}")
+# Where a document has a trailing comma, as the paths of the containers that end in one. The parser
+# decides, not a regex over the text: it tells a string from a comma, and `_comma_after` steps over a
+# comment, so `, // c\n}` counts as a trailing comma and `[1,]` and a doubled comma at any depth do too.
+_Path = tuple[str | int, ...]
 
 
-def _has_a_trailing_comma(text: str) -> bool:
-    """True when a `,` with only whitespace after it runs into a closing brace."""
-    return _TRAILING_COMMA.search(_STRING_LITERAL.sub('""', text)) is not None
+def _trailing_comma_paths(text: str) -> frozenset[_Path]:
+    """The paths of every object or array whose last entry is followed by a comma."""
+    parser = jsonc._Parser(text)
+    root = parser.parse()
+    comments = jsonc._Comments(text, tuple(parser.comments))
+
+    def walk(node: jsonc._AstNode, path: _Path) -> frozenset[_Path]:
+        if isinstance(node, jsonc._ObjectNode):
+            children = [(member, (*path, member.key), member.value) for member in node.members]
+        elif isinstance(node, jsonc._ArrayNode):
+            children = [(element, (*path, index), element) for index, element in enumerate(node.elements)]
+        else:
+            return frozenset()
+        found = frozenset().union(*(walk(child, child_path) for _, child_path, child in children))
+        last = children[-1][0] if children else None
+        return found | {path} if last is not None and jsonc._comma_after(comments, last) is not None else found
+
+    return walk(root, ())
 
 
 def _mutated(value, how):
@@ -807,10 +820,30 @@ def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout)
     rendered = adapter.render(tree, template)
 
     # then — the render must be the tree it was handed, or the merge publishes what no one decided,
-    # and it must not invent layout the file did not have: a trailing comma, in the file's own
-    # newline style and at any depth, is the one that broke Docker's `config.json`
+    # and it must not invent layout the file did not have: a trailing comma may stay where the
+    # template had one, but never appear anywhere else — the one that broke Docker's `config.json`
     assert adapter.parse(rendered) == tree
-    assert layout["trailing"] or not _has_a_trailing_comma(rendered)
+    assert _trailing_comma_paths(rendered) <= _trailing_comma_paths(template)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param('{"o": {"a": 1,},}', frozenset({(), ("o",)}), id="root-and-nested"),
+        pytest.param("[1,]", frozenset({()}), id="array"),
+        pytest.param('{"a": 1, // c\n}', frozenset({()}), id="comma-then-comment"),
+        pytest.param('{"a": 1 // c\n}', frozenset(), id="comment-without-comma"),
+        pytest.param('{"a": ", }"}', frozenset(), id="comma-inside-string"),
+        pytest.param("{}", frozenset(), id="empty-object"),
+        pytest.param("[]", frozenset(), id="empty-array"),
+    ],
+)
+def test_trailing_comma_paths_names_every_container_ending_in_a_comma(text, expected) -> None:
+    # when
+    found = _trailing_comma_paths(text)
+
+    # then
+    assert found == expected
 
 
 @pytest.mark.parametrize(
@@ -1188,9 +1221,9 @@ def test_a_commented_document_renders_a_member_edit_cleanly(value, how, comments
     # when
     rendered = adapter.render(tree, template)
 
-    # then
+    # then — a trailing comma may stay where the template had one, but never appear anywhere else
     assert adapter.parse(rendered) == tree
-    assert layout["trailing"] or ",\n}" not in rendered
+    assert _trailing_comma_paths(rendered) <= _trailing_comma_paths(template)
 
 
 def test_deleting_the_last_member_does_not_invent_a_trailing_comma() -> None:
