@@ -245,3 +245,23 @@ def test_a_password_inside_a_nested_object_is_masked() -> None:
 
     # then
     assert "hunter2" not in masked.text
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("headers:\n  Authorization: >\n    Bearer\n    eyJhbGciOiJIUzI1NiJ9abcdef\n", "eyJhbGciOiJIUzI1NiJ9abcdef"),
+        ("Authorization: |\n  Token abc123\n", "abc123"),
+        ("Authorization: >-\n  Bearer\n\n  tail-token-xyz\n", "tail-token-xyz"),
+    ],
+    ids=["split-scheme-and-token", "short-token", "blank-line-inside"],
+)
+def test_a_token_on_a_yaml_block_continuation_line_is_masked(text: str, secret: str) -> None:
+    # given — `_KEYED_VALUE` alone would hide only the `>` after the key
+
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert secret not in masked.text
+    assert _masker().unmask(masked.text, masked) == text

@@ -25,7 +25,7 @@ from syncintosh.core.advice import (
     placeholder,
     restore,
 )
-from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS
+from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, yaml_block_authorizations
 
 # Both tables, so masking is at least as broad as either scan. Duplicates only cost a second pass.
 _SECRET_PATTERNS: Final = (*STRUCTURED_PATTERNS, *SHELL_PATTERNS)
@@ -82,6 +82,9 @@ class TextMasker:
         found: list[tuple[int, int]] = []
         for _, pattern in _SECRET_PATTERNS:
             found.extend(match.span() for match in pattern.finditer(data))
+        # A YAML block scalar's continuation lines: `_KEYED_VALUE` only hides the `>-` after the key. Run on
+        # every text, whatever its format, because the masker must cover at least what the scan refuses.
+        found.extend((start, end) for _, start, end in yaml_block_authorizations(data))
         found.extend(self._literal_spans(data))
         found.extend(self._host_spans(data))
         return _non_overlapping(found)

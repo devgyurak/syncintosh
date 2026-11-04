@@ -280,6 +280,75 @@ SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 )
 
 
+# A YAML block scalar carries its value on the lines *after* the key: `Authorization: >-` and then an
+# indented `Bearer eyJ…`. The same-line forms are the structured rules' job (and a bare `Bearer` token is
+# caught without any key); what only this reads is a continuation line, where the scheme and the token may
+# even sit on different lines. The header is the key, `:`, the block indicator (`|`/`>`, a chomping sign,
+# an indentation digit), and then only a comment or the end of the line.
+_YAML_BLOCK_HEADER = re.compile(
+    _AUTHORIZATION_KEY + rb"[\"']?[ \t]*+:[ \t]*+[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*+(?:#[^\n]*)?(?=\r?$)",
+    re.MULTILINE,
+)
+_YAML_CREDENTIAL = re.compile(_AUTHORIZATION_CREDENTIAL)
+
+# Gathering a block is bounded, so a key followed by a very long indented run costs a constant per key
+# rather than a scan to the end of the file. Blank lines do **not** count toward the line cap, and the byte
+# cap is generous: YAML keeps leading blank lines in a block scalar, so a credential can sit after any
+# number of them, and a cap that blank lines could exhaust would let a file hide its credential behind them.
+_YAML_BLOCK_MAX_LINES = 64
+_YAML_BLOCK_MAX_BYTES = 65536
+
+
+def yaml_block_authorizations(plaintext: bytes) -> list[tuple[int, int, int]]:
+    """Every credential-shaped `Authorization` value carried in a YAML block scalar.
+
+    Each result is `(key_line_start, value_start, value_end)`: the scan fingerprints the lines from the key
+    line to the last continuation line (`_lines_at`), and the masker hides `[value_start, value_end)`. The
+    continuation lines are the ones indented deeper than the key's line, with blank lines kept and the
+    block ended by the first line that is not deeper. They are joined with one space and the ordinary
+    `Authorization` credential rule is applied to the result, so `>` (folded) and `|` (literal) are read
+    the same way. This lives here, with the other patterns, so that the scan and the masker share one
+    definition (``AGENTS.md`` §3.4).
+    """
+    found: list[tuple[int, int, int]] = []
+    for header in _YAML_BLOCK_HEADER.finditer(plaintext):
+        key_line_start = plaintext.rfind(b"\n", 0, header.start()) + 1
+        key_line = plaintext[key_line_start : header.start()]
+        # The key's own column, so `- Authorization: |` (a list item) and a quoted key are measured where the
+        # mapping really starts, and a sibling key at the same column ends the block.
+        key_indent = len(key_line.rstrip(b"\"'"))
+        gathered = _gather_block(plaintext, header.end(), key_indent)
+        if gathered is None:
+            continue
+        value_start, value_end, parts = gathered
+        if _YAML_CREDENTIAL.match(b" ".join(parts)) is not None:
+            found.append((key_line_start, value_start, value_end))
+    return found
+
+
+def _gather_block(plaintext: bytes, header_end: int, key_indent: int) -> tuple[int, int, list[bytes]] | None:
+    """The span and stripped non-blank lines of the block after a header, or None when it is empty."""
+    cursor = plaintext.find(b"\n", header_end)
+    parts: list[bytes] = []
+    value_start = value_end = -1
+    while cursor != -1 and len(parts) < _YAML_BLOCK_MAX_LINES and cursor - header_end <= _YAML_BLOCK_MAX_BYTES:
+        line_start = cursor + 1
+        line_end = plaintext.find(b"\n", line_start)
+        line_end = len(plaintext) if line_end == -1 else line_end
+        line = plaintext[line_start:line_end]
+        content = line.strip()
+        indent = len(line) - len(line.lstrip(b" \t"))
+        if content != b"":
+            if indent <= key_indent:
+                break
+            if value_start == -1:
+                value_start = line_start + indent
+            value_end = line_start + len(line.rstrip())
+            parts.append(content)
+        cursor = line_end if line_end < len(plaintext) else -1
+    return None if value_start == -1 else (value_start, value_end, parts)
+
+
 def patterns_for(format: str) -> tuple[tuple[str, re.Pattern[bytes]], ...]:
     """The pattern table for a file's format: the shell one only where a shell reads the text."""
     return SHELL_PATTERNS if format in _SHELL_FORMATS else STRUCTURED_PATTERNS
@@ -347,16 +416,20 @@ class PatternSecretScanner:
         match spans (see `_lines_at`), so an allowlist entry is bound to those lines whatever span
         the pattern matched.
         """
-        allow = self._allow
         for label, pattern in patterns_for(format):
             for match in pattern.finditer(plaintext):
-                digest = (
-                    None if allow is None else fingerprint(allow.key, _lines_at(plaintext, match.start(), match.end()))
-                )
-                if allow is not None and digest is not None and allow.allows(subject, label, digest):
-                    continue
-                line = _line_number(plaintext, match.start())
-                raise SecretScanError(_refusal(subject, label, line, digest))
+                self._refuse_unless_allowed(plaintext, match.start(), match.end(), label, subject)
+        if format == "yaml":
+            for key_line_start, _, value_end in yaml_block_authorizations(plaintext):
+                self._refuse_unless_allowed(plaintext, key_line_start, value_end, AUTHORIZATION_LABEL, subject)
+
+    def _refuse_unless_allowed(self, plaintext: bytes, start: int, end: int, label: str, subject: str) -> None:
+        """Return when the lines `[start, end)` touch are allowed on this machine; raise otherwise."""
+        allow = self._allow
+        digest = None if allow is None else fingerprint(allow.key, _lines_at(plaintext, start, end))
+        if allow is not None and digest is not None and allow.allows(subject, label, digest):
+            return
+        raise SecretScanError(_refusal(subject, label, _line_number(plaintext, start), digest))
 
 
-__all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for"]
+__all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for", "yaml_block_authorizations"]

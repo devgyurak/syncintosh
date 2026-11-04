@@ -12,12 +12,13 @@ different things. Every case names its format.
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import pytest
 
 from syncintosh.core.errors import SecretScanError
-from syncintosh.system.scan_allow import ALLOWABLE_LABELS, ScanAllow, ScanAllowEntry
+from syncintosh.system.scan_allow import ALLOWABLE_LABELS, AUTHORIZATION_LABEL, ScanAllow, ScanAllowEntry
 from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, PatternSecretScanner
 
 # Built from pieces so the source file does not itself contain a token-shaped literal.
@@ -786,3 +787,130 @@ def test_a_json_escaped_whitespace_between_a_scheme_and_its_token_is_refused() -
     # when & then
     with pytest.raises(SecretScanError):
         scanner.scan(b'{"Authorization": "Bearer\\tTOKEN123456789012345"}', subject="settings.json", format="jsonc")
+
+
+# --------------------------------------------------------------------------- YAML block scalars
+
+YAML_BLOCK_REFUSED = [
+    pytest.param(
+        b"headers:\n  Authorization: >\n    Bearer\n    eyJhbGciOiJIUzI1NiJ9abcdef\n", id="folded-split-lines"
+    ),
+    pytest.param(b"Authorization: |\n  Token abc123\n", id="literal-short-token"),
+    pytest.param(b"Authorization: |-\n  Bearer abc123\n", id="literal-strip"),
+    pytest.param(b"Authorization: >2\n   Bearer abc123\n", id="indentation-indicator"),
+    pytest.param(b"Authorization: >+ # note\n  Basic abc123\n", id="header-comment"),
+    pytest.param(b"Proxy-Authorization: |\n  Bearer abc123\n", id="proxy-authorization"),
+    pytest.param(b'"Authorization": |\n  Bearer abc123\n', id="quoted-key"),
+    pytest.param(b"Authorization: |\r\n  Bearer abc123\r\n", id="crlf"),
+    pytest.param(b"Authorization: |\n\n  Bearer\n\n  abc123\n", id="blank-lines-inside"),
+    pytest.param(b"Authorization: |\n" + b"\n" * 500 + b"  Bearer abc123\n", id="many-leading-blank-lines"),
+    pytest.param(b"Authorization: |\n" + b" " * 9000 + b"\n  Bearer abc123\n", id="long-whitespace-line"),
+    pytest.param(b"- Authorization: |\n    Bearer abc123\n", id="list-item-key"),
+]
+
+
+@pytest.mark.parametrize("payload", YAML_BLOCK_REFUSED)
+def test_a_credential_in_a_yaml_block_scalar_is_refused(payload: bytes) -> None:
+    # given
+    scanner = PatternSecretScanner()
+
+    # when & then — the refusal names the location, never the value
+    with pytest.raises(SecretScanError) as caught:
+        scanner.scan(payload, subject="app.yaml", format="yaml")
+    assert AUTHORIZATION_LABEL in str(caught.value)
+    assert "abc123" not in str(caught.value)
+
+
+YAML_BLOCK_PASSED = [
+    pytest.param(b"Authorization: |\n  ${AUTH_TOKEN}\n", id="shell-reference"),
+    pytest.param(b"Authorization: >-\n  Bearer {{ token }}\n", id="template"),
+    pytest.param(b"Authorization: |\n  Sent to the upstream\n", id="plain-sentence"),
+    pytest.param(b"Authorization: |\nname: Bearer abc123\n", id="block-ended-by-dedent"),
+    pytest.param(b"headers:\n  Authorization: |\n  other: Bearer abc123\n", id="sibling-key-not-deeper"),
+    pytest.param(b"Authorization: |\n", id="empty-block"),
+    pytest.param(b"- Authorization: |\n  other: Bearer abc123\n", id="list-item-sibling-key"),
+]
+
+
+@pytest.mark.parametrize("payload", YAML_BLOCK_PASSED)
+def test_a_harmless_yaml_block_scalar_passes(payload: bytes) -> None:
+    # given
+    scanner = PatternSecretScanner()
+
+    # when
+    result = scanner.scan(payload, subject="app.yaml", format="yaml")
+
+    # then
+    assert result is None
+
+
+@pytest.mark.parametrize("fmt", ["jsonc", "toml", "text"])
+def test_a_yaml_block_scalar_is_read_only_in_a_yaml_file(fmt: str) -> None:
+    # given — the continuation line of a block scalar means nothing in another format
+    scanner = PatternSecretScanner()
+
+    # when
+    result = scanner.scan(b"Authorization: |\n  Token abc123\n", subject="settings", format=fmt)
+
+    # then
+    assert result is None
+
+
+def test_allowing_one_yaml_block_does_not_allow_another() -> None:
+    # given — two blocks; the first is allowed by the fingerprint the refusal printed
+    first = b"a:\n  Authorization: |\n    Bearer abc123\n"
+    second = b"b:\n  Authorization: |\n    Bearer xyz789\n"
+    strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        strict.scan(first, subject="app.yaml", format="yaml")
+    digest = str(caught.value).split("fingerprint ")[1].split(";")[0].strip()
+    entry = ScanAllowEntry("app.yaml", AUTHORIZATION_LABEL, digest)
+    relaxed = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when & then
+    assert relaxed.scan(first, subject="app.yaml", format="yaml") is None
+    with pytest.raises(SecretScanError):
+        relaxed.scan(second, subject="app.yaml", format="yaml")
+
+
+def _yaml_block_digest(token: bytes) -> str:
+    """The fingerprint a refusal prints for a folded block whose last continuation line is `token`."""
+    strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        strict.scan(b"Authorization: >\n  Bearer\n  " + token + b"\n", subject="app.yaml", format="yaml")
+    return str(caught.value).split("fingerprint ")[1].split(";")[0]
+
+
+def test_a_continuation_line_changed_in_a_block_changes_its_fingerprint() -> None:
+    # given — the fingerprint covers the key line through the last continuation line
+    first = _yaml_block_digest(b"abc123")
+
+    # when
+    second = _yaml_block_digest(b"abc124")
+
+    # then
+    assert first != second
+
+
+YAML_REDOS = [
+    pytest.param(b"Authorization: |\n" + b"  " + b"a " * 200_000 + b"\n", id="long-continuation"),
+    pytest.param(b"Authorization: |\n" + b"  x\n" * 100_000, id="many-continuation-lines"),
+    pytest.param(b"Authorization: |\n  Token\n" * 50_000, id="repeated-keys-unindented"),
+    pytest.param(b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 600)), id="nested-keys"),
+    pytest.param(b"Authorization: | " + b" " * 200_000 + b"x\n", id="spaces-after-indicator"),
+]
+
+
+@pytest.mark.parametrize("payload", YAML_REDOS)
+def test_a_pathological_yaml_block_is_scanned_in_linear_time(payload: bytes) -> None:
+    # given
+    scanner = PatternSecretScanner()
+    started = time.perf_counter()
+
+    # when — whether it refuses is not the point, only how long the walk takes
+    with contextlib.suppress(SecretScanError):
+        scanner.scan(payload, subject="app.yaml", format="yaml")
+    elapsed = time.perf_counter() - started
+
+    # then — a backtracking or unbounded gather would take seconds
+    assert elapsed < 2.0
