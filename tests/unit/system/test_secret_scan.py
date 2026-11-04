@@ -826,6 +826,11 @@ YAML_BLOCK_REFUSED = [
     pytest.param(b"Authorization:\n  &a Token abc123\n", id="anchor-on-a-next-line-value"),
     pytest.param(b"Authorization:\n  !!str Token abc123\n", id="tag-on-a-next-line-value"),
     pytest.param(b"Authorization:\n  # note\n  Token abc123\n", id="comment-before-the-value"),
+    pytest.param(b"Authorization: Token\n  - abc123def\n", id="plain-continuation-starting-with-a-dash"),
+    pytest.param(b"Authorization:\n  Token\n  - abc123def\n", id="next-line-plain-then-a-dash-line"),
+    pytest.param(b"Authorization:\n# c\n- Bearer abcdefghij\n", id="comment-at-the-key-column"),
+    pytest.param(b"  Authorization:\n  # c\n    Token abc123\n", id="comment-left-of-the-value"),
+    pytest.param(b"Authorization:\n-\n  Bearer abcdefghij\n", id="bare-dash-then-the-value"),
 ]
 
 
@@ -849,6 +854,7 @@ YAML_BLOCK_PASSED = [
     pytest.param(b"headers:\n  Authorization: |\n  other: Bearer abc123\n", id="sibling-key-not-deeper"),
     pytest.param(b"Authorization: |\n", id="empty-block"),
     pytest.param(b"authorization:\n  - Basic\n  - Bearer\n", id="list-of-scheme-names"),
+    pytest.param(b"authorization:\n  - Basic # password\n  - Bearer # jwt\n", id="scheme-names-with-comments"),
     pytest.param(b"authorization:\n- Digest\n- Negotiate\nnext: Token abc123\n", id="sequence-ended-by-a-key"),
     pytest.param(b"Authorization: |\n# not block content\n", id="comment-at-the-key-column-ends-a-block"),
     pytest.param(b"Authorization: |\n" + b"\n" * 70_000, id="trailing-blank-lines-only"),

@@ -302,7 +302,7 @@ _YAML_COMMENT = re.compile(rb"(?:^|[ \t])#.*$")
 _YAML_BLANK_RUN = re.compile(rb"(?:[ \t\r]*\n)*")
 # What may open a plain or quoted value before its scheme: a quote, an anchor, or a tag.
 _YAML_VALUE_LEAD = re.compile(rb"(?:[\"']|[!&]\S*[ \t]+)*")
-_YAML_SEQUENCE_MARKER = re.compile(rb"(?:-[ \t]+)+")
+_YAML_SEQUENCE_MARKER = re.compile(rb"(?:-(?:[ \t]+|$))+")
 _YAML_CREDENTIAL = re.compile(_AUTHORIZATION_CREDENTIAL)
 
 # Gathering a value is bounded, so a key followed by a very long indented run costs a constant per key
@@ -367,16 +367,25 @@ def _yaml_value(plaintext: bytes, key: re.Match[bytes], indent: int) -> tuple[in
     # read past (`Authorization: !!str Token abc`).
     if not lines or not (walk.parts or value_offset > lead):
         return None
-    # A sequence is a list of values, each judged alone: `- Basic` and `- Bearer` are scheme names, not
-    # `Basic -` and a token. Lines without a marker continue the item before them.
-    items: list[bytes] = []
-    for line in lines:
-        marker = _YAML_SEQUENCE_MARKER.match(line)
-        if marker is not None or not items:
-            items.append(line[0 if marker is None else marker.end() :])
-        else:
-            items[-1] += b" " + line
-    if not any(_YAML_CREDENTIAL.match(item, _match_end(_YAML_VALUE_LEAD, item, 0)) is not None for item in items):
+    # A value whose first line carries a `-` is a sequence: a list of values, each judged alone, so `- Basic`
+    # and `- Bearer` are scheme names rather than `Basic -` and a token. Any other value is one scalar, and
+    # a later line that happens to start with `-` is just its text (`Token` / `- abc123`). Inline comments
+    # are not content outside a block scalar.
+    if not block:
+        lines = [_YAML_COMMENT.sub(b"", line).strip() for line in lines]
+    first = _YAML_SEQUENCE_MARKER.match(lines[0])
+    items: list[bytes] = [b" ".join(lines)]
+    if first is not None:
+        items = []
+        for line in lines:
+            marker = _YAML_SEQUENCE_MARKER.match(line)
+            if marker is not None or not items:
+                items.append(line[0 if marker is None else marker.end() :])
+            else:
+                items[-1] += b" " + line
+    if not any(
+        _YAML_CREDENTIAL.match(i, _match_end(_YAML_VALUE_LEAD, i, 0)) is not None for i in map(bytes.strip, items)
+    ):
         return None
     start = walk.start if inline == b"" or block else inline_start
     end = walk.end if walk.parts else inline_start + len(inline)
@@ -429,10 +438,12 @@ def _gather_continuation(plaintext: bytes, header_end: int, indent: int, *, bloc
         line = plaintext[line_start:line_end]
         text = line.lstrip(b" \t")
         column = len(line) - len(text)
-        sibling_item = not block and column == indent and text.startswith(b"- ")
-        if column <= indent and text.strip() != b"" and not sibling_item:
+        # A comment line is skipped at any column outside a block scalar, where it is content.
+        comment = not block and text.startswith(b"#")
+        sibling_item = not block and column == indent and (text.startswith(b"- ") or text.rstrip() == b"-")
+        if column <= indent and text.strip() != b"" and not sibling_item and not comment:
             break
-        if text.strip() != b"" and not (not block and text.startswith(b"#")):
+        if text.strip() != b"" and not comment:
             if len(parts) >= _YAML_BLOCK_MAX_LINES or line_start > limit:
                 if not block:
                     break
