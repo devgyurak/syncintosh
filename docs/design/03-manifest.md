@@ -108,7 +108,8 @@ are, and a rotation neither re-derives nor blocks on the stamp.
   collect commit stays local and unpushed; nothing is merged, pushed, or applied. A CLI run exits 1, the daemon
   reports it and does nothing else, and `diff` prints a warning and continues read-only;
 * `older` → each affected object is re-projected **in memory** under the local policy (the static strip only —
-  a carry belongs to a live file, not to a stored object), re-sealed, and served in place of the stored one, with
+  a carry belongs to a live file, not to a stored object), sealed once by the gate, and served in place of the stored one — the
+  collect commit then writes that sealed blob as it is rather than sealing the plaintext again — with
   its record's digest, its format (the local one) and the stamp updated. HEAD, base, remote, target and restore
   all read the same view, so the merge, apply and ledger agree, and the next write persists the migration.
   A changed object passes the secret scan. The sync report says `policy migrated: <preset> rev a→b` (or

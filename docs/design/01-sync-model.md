@@ -26,7 +26,7 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 9 | **decrypt** | Materialize base, local, and remote into plaintext. Divergence only. |
 | 10 | **merge** | The manifest record merge plus the per-object content merge ([03-manifest.md](03-manifest.md)). Divergence only. |
 | 11 | **gate** | If a conflict is unresolved: write `~/.local/share/syncintosh/pending/`, leave the local commit in place, and **stop without pushing**. Divergence only. |
-| 12 | **publish** | Push the step-5 commit when `origin` is an ancestor; otherwise re-encrypt only what changed and build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), then push. |
+| 12 | **publish** | Push the step-5 commit when `origin` is an ancestor; otherwise write only what changed and build the merge commit with **both parents** and a directly built tree (`git commit-tree`, never `git merge`), then push. |
 | 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
 | 14 | **apply** | Write the merged records into the live files — **after** the push and only after the per-file check below — then settle the apply ledger for every record ([below](#change-detection-is-against-the-apply-ledger)). |
 
@@ -54,6 +54,14 @@ stops a deliberate removal from being undone on every sync.
 ([02-base-and-merge.md](02-base-and-merge.md)), and defers a record whose app is not
 installed, reporting the download URL or brew command instead of writing into a directory that
 does not exist.
+
+**A merge seals only what this machine made.** An object the merge re-uses — the other side's, or one a policy
+migration already sealed — is carried as its stored ciphertext, byte for byte, so `objects/<id>.enc` keeps its
+git blob and a history diff shows only real changes. The same holds when a content merge lands on exactly one
+side's bytes. `write_repo` opens every carried blob itself (the AAD check), holds it to the record's digest and the
+secret scan like any plaintext, and refuses before writing anything if either fails. A blob on another key
+generation than the manifest's is re-sealed, and `key rotate` re-seals everything. Only plaintext this machine
+produced — a content-merge result no side stores, or a collected file — is sealed under a fresh nonce.
 
 **Fast-forward is not a merge.** An ancestor relationship is resolved by moving or pushing,
 never by building a commit with two parents. Merging when one side is already an ancestor is

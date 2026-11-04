@@ -1820,19 +1820,30 @@ def _merge_diverged(
     # A migrated HEAD changes its manifest's stamp, so a collect commit exists by the time a merge is planned: the
     # local manifest read here is the stored one, and planning against it cannot skip a migrated object.
     plan = plan_writes(local_manifest, merged_manifest)
+    # An object either side already stores under the merged digest is carried as that ciphertext; only a plaintext
+    # this merge produced is sealed. `write_repo` opens and re-checks a carried blob, so nothing is trusted here.
+    carried: dict[str, bytes] = {}
     for file_id in plan.objects_to_write:
-        if file_id in contents:
-            continue
-        data = _object_content(transport, cipher, local, remote, file_id, merged_manifest.records[file_id].sha256)
-        if data is None:
+        blob = _object_blob(transport, cipher, local, remote, file_id, merged_manifest.records[file_id].sha256)
+        if blob is not None:
+            carried[file_id] = blob
+            contents.pop(file_id, None)
+        elif file_id not in contents:
             raise ContentDigestMismatch(file_id, merged_manifest.records[file_id].sha256, "no matching object")
-        contents[file_id] = data
-    write_repo(files=files, cipher=cipher, scanner=scanner, head=local_manifest, new=merged_manifest, contents=contents)
+    write_repo(
+        files=files,
+        cipher=cipher,
+        scanner=scanner,
+        head=local_manifest,
+        new=merged_manifest,
+        contents=contents,
+        carried=carried,
+    )
     commit = _commit(transport, branch, (local, remote), "syncintosh: merge")
     return _Merged(commit=commit, conflicts=(), base_commit=base_commit)
 
 
-def _object_content(
+def _object_blob(
     transport: GitTransport,
     cipher: Cipher,
     local: str,
@@ -1840,11 +1851,11 @@ def _object_content(
     file_id: str,
     expected_sha256: str,
 ) -> bytes | None:
-    """The plaintext of a surviving record, from the side whose object matches its digest."""
+    """The stored ciphertext of a surviving record, from the side whose object matches its digest."""
     for commit in (local, remote):
-        data = _read_object(transport, cipher, commit, file_id)
-        if data is not None and _sha256(data) == expected_sha256:
-            return data
+        blob = transport.read_blob(commit, object_path(file_id))
+        if blob is not None and _sha256(cipher.open(blob, domain="object", file_id=file_id)) == expected_sha256:
+            return blob
     return None
 
 
@@ -2632,8 +2643,9 @@ def _cycle(
             scanner=scanner,
             head=stored_head,
             new=new_manifest,
-            # An object the migration re-projected and this collect did not touch is written from the view.
-            contents={**transport.migrated_contents(head_commit), **collected.contents},
+            contents=collected.contents,
+            # An object the migration re-projected and this collect did not touch keeps the gate's sealed blob.
+            carried=transport.migrated_blobs(head_commit),
         )
         local_commit = _commit(transport, branch, () if head_commit is None else (head_commit,), "syncintosh: collect")
     else:

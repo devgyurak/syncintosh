@@ -104,6 +104,15 @@ class PolicyView:
         migration = None if commit is None else self._migration(commit)
         return {} if migration is None else migration.objects
 
+    def migrated_blobs(self, commit: str | None) -> Mapping[str, bytes]:
+        """The gate's sealed ciphertext of each object `commit`'s migration changed, by file ID.
+
+        The same bytes `read_blob` serves for those objects, so a writer can carry them instead of sealing
+        `migrated_contents` a second time.
+        """
+        migration = None if commit is None else self._migration(commit)
+        return {} if migration is None else migration.sealed
+
     def notes(self) -> tuple[str, ...]:
         """One report line per preset migrated, in the order they were first read."""
         seen = dict.fromkeys(

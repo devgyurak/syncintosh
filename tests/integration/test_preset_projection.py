@@ -30,7 +30,7 @@ from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import policy_digest
 from syncintosh.core.ports import ContentAdapter, PresetCatalog
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
+from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.core.tree import Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
@@ -812,6 +812,59 @@ def test_a_diverged_merge_of_two_files_that_need_no_projection_does_not_crash(tm
     assert _read(a, JSONC) == b'{"editor.fontSize": 15}\n'
 
 
+# --------------------------------------------------------------------------- carried ciphertext (issue #26)
+
+
+def _git_blob_id(machine: Machine, commit: str, path: str) -> str:
+    """The git blob ID of `path`'s object at `commit`: equal IDs mean the ciphertext was not rewritten."""
+    return _git(machine.repo, "rev-parse", f"{commit}:{object_path(_record_for(machine, path).file_id)}").strip()
+
+
+def test_a_merge_carries_the_ciphertext_of_an_object_it_only_reuses(tmp_path, memory_key_store) -> None:
+    # given — A changes SECOND and B changes JSONC, so B's merge re-uses A's SECOND object unchanged
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _two_file_config(a))
+    _write(a, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(a, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _two_file_config(b), import_from=a.recovery)
+    _write(b, JSONC, b'{"editor.fontSize": 13}\n')
+    _write(b, SECOND, b'[\n  {"key": "cmd+k"}\n]\n')
+    _run(b)
+    _write(a, SECOND, b'[\n  {"key": "cmd+j"}\n]\n')
+    _run(a)
+    a_commit = _git(b.remote, "rev-parse", BRANCH).strip()
+    _write(b, JSONC, b'{"editor.fontSize": 15}\n')
+
+    # when
+    _run(b)
+    merge_commit = _git(b.repo, "rev-parse", "HEAD").strip()
+
+    # then — the merge commit has A's SECOND blob byte for byte, and it is a merge of two parents
+    assert len(_git(b.repo, "rev-list", "--parents", "-n", "1", merge_commit).split()) == 3
+    assert _git_blob_id(b, merge_commit, SECOND) == _git_blob_id(b, a_commit, SECOND)
+    assert _read(b, SECOND) == b'[\n  {"key": "cmd+j"}\n]\n'
+
+
+def test_a_content_merge_that_equals_the_other_side_carries_its_ciphertext(tmp_path, memory_key_store) -> None:
+    # given — both machines add the same line, and A also appends a blank line, so the merged text is A's exactly
+    a, b = _zsh_pair(tmp_path, memory_key_store, b"echo one\n\necho two\n")
+    _write(a, ZSH, b"echo one\necho x\n\necho two\n\n")
+    _run(a)
+    a_commit = _git(b.remote, "rev-parse", BRANCH).strip()
+    _write(b, ZSH, b"echo one\necho x\n\necho two\n")
+
+    # when
+    _run(b)
+    merge_commit = _git(b.repo, "rev-parse", "HEAD").strip()
+
+    # then
+    assert _read(b, ZSH) == b"echo one\necho x\n\necho two\n\n"
+    assert _git_blob_id(b, merge_commit, ZSH) == _git_blob_id(b, a_commit, ZSH)
+
+
 # --------------------------------------------------------------------------- the policy gate (issue #24)
 
 CREDENTIAL = b'{"editor.fontSize": 13, "http": {"proxyAuthorization": "Basic FROM-A"}}\n'
@@ -850,6 +903,30 @@ def test_a_newer_build_migrates_an_older_repo_and_keeps_its_own_values(tmp_path,
     assert b"Basic FROM-B" in _read(b, JSONC)
     assert _manifest_at_head(b).policy["keyed-test"].rev == 2
     assert "policy migrated: keyed-test rev 1→2" in report.notes
+
+
+def test_a_migrated_object_is_sealed_once_and_collect_commits_the_gates_blob(
+    tmp_path, memory_key_store, monkeypatch
+) -> None:
+    # given — the old build published the credential key, and every object seal is recorded from here on
+    _, b = _published_by_the_old_build(tmp_path, memory_key_store)
+    sealed: list[tuple[str, bytes]] = []
+    real_seal = EnvelopeCipher.seal
+
+    def recording_seal(self, plaintext, *, domain, file_id, key_id):
+        blob = real_seal(self, plaintext, domain=domain, file_id=file_id, key_id=key_id)
+        sealed.append((domain + ":" + file_id, blob))
+        return blob
+
+    monkeypatch.setattr(EnvelopeCipher, "seal", recording_seal)
+
+    # when
+    _run(b, adopt="remote", catalog=NEW_BUILD)
+    file_id = _record_for(b, JSONC).file_id
+    stored = FileRepo(b.repo).read(object_path(file_id))
+
+    # then — the gate sealed the migrated object, and the collect commit holds that very blob
+    assert [blob for subject, blob in sealed if subject == "object:" + file_id] == [stored]
 
 
 def test_an_older_build_stops_on_a_repo_a_newer_build_migrated(tmp_path, memory_key_store) -> None:
