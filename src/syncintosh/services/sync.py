@@ -787,7 +787,7 @@ def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy:
 def _reduce_for_apply(
     presets: _Presets, data: bytes, live_bytes: bytes | None, policy: PresetFile, record: ManifestRecord
 ) -> bytes | str:
-    """What apply writes for a stored object under a stripping policy, or the reason it must not be written.
+    """What apply writes for a stored object under a policy that projects, or the reason it must not be written.
 
     The one place apply checks that an object is the local policy's projection, because the stamp that says so is
     a claim by whoever wrote the repo (``docs/design/03-manifest.md``). With a live file, this machine's own keys

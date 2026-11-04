@@ -225,8 +225,8 @@ decide about survives:
 
 A strict consequence: **an object that is not itself a projection is refused, not applied.** Two builds that
 disagree about a preset are told apart before this point, by the policy stamp (`03-manifest.md`, "The gate"): a
-newer repo stops the cycle and an older one is migrated. What reaches apply is therefore either a projection or a
-record the gate could not reduce, and the stamp is only a claim by whoever wrote the repo, so apply checks the
+newer repo stops the cycle and an older one is migrated. What reaches apply should therefore be a projection or a
+record the gate could not reduce, but the stamp is only a claim by whoever wrote the repo, so apply checks the
 object itself. With a live file the round trip above must give the object back; with none, the object must be its
 own static strip. Writing anything else would make the file's projection differ from the object, and the next
 cycle would publish that difference, which the other build would publish back: a churn of commits instead of a

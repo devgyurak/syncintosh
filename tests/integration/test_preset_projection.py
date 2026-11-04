@@ -1117,5 +1117,30 @@ def test_apply_refuses_an_unstripped_object_under_a_current_stamp_on_a_machine_w
     report = _run(b, catalog=NEW_BUILD)
 
     # then — refused rather than written, although there is no live file to compare it with
-    assert [refusal.path for refusal in report.unprojectable] == [JSONC]
+    assert [(refusal.path, refusal.reason) for refusal in report.unprojectable] == [
+        (JSONC, "the stored content could not be reduced to this machine's synced form")
+    ]
     assert not (b.home / JSONC).exists()
+
+
+def test_apply_refuses_an_unstripped_object_under_a_current_stamp_when_a_live_file_exists(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the same over-claiming stamp, but this machine has a file of its own to re-attach keys to
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, CREDENTIAL)
+    _run(a, catalog=_StaleCatalog(RELEASE_1, RELEASE_2))
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    _write(b, JSONC, OWN_CREDENTIAL)
+
+    # when
+    report = _run(b, adopt="remote", catalog=NEW_BUILD)
+
+    # then — the restore round trip cannot give the object back, so it is refused and the file is untouched
+    assert [(refusal.path, refusal.reason) for refusal in report.unprojectable] == [
+        (JSONC, "this machine's own keys could not be re-attached to the file")
+    ]
+    assert _read(b, JSONC) == OWN_CREDENTIAL
