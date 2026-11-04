@@ -499,7 +499,9 @@ class _Diff:
             return None
         if self._source[node.span.start] != "{" or self._source[node.span.end - 1] != "}":
             return None
-        if self._comments.overlaps(node.span.start + 1, node.span.end - 1):
+        if node.members and self._comments.overlaps(node.span.start + 1, node.span.end - 1):
+            # A member-less object has nothing a splice could move or swallow: the new members go after
+            # the comment (`_splice_inline`), so only an object with members falls back to a rewrite.
             return None
         return self._source[node.span.start + 1 : node.span.end - 1]
 
@@ -535,12 +537,21 @@ class _Diff:
             # empty and the members still need a separator between them.
             join = lead or ", "
             members = [self._inline_member((*path, key)) for key in added]
+            if not node.members and self._comments.overlaps(node.span.start + 1, node.span.end - 1):
+                # `{ /* note */ }`: the members go after the comment, never inside it, and the padding
+                # that was already before `}` stays where it is.
+                lead = " "
             # The block goes after everything that survives — and after any removal, never inside
             # one. The padding before `}` sits between the last member and the brace, so a run that
             # emptied the object ends past that member's value; an insert placed there would be
             # inside the deleted range, and `_apply_edits` refuses an edit that carries text and
             # starts before the cursor. `{"a": 1, "b": 2}` handed `{c}` would then not render at all.
-            natural = node.members[-1].value.span.end if node.members else node.span.end - 1
+            if node.members:
+                natural = node.members[-1].value.span.end
+            elif lead:
+                natural = self._comments.last_end_before(node.span.end - 1)
+            else:
+                natural = node.span.end - 1
             position = max([natural, *(edit.end for edit in removals)])
             edits.append(_Edit(position, position, lead + join.join(members)))
         return True
@@ -605,6 +616,10 @@ class _Diff:
             return "{}" if leaf is None else _leaf_text(leaf)
         entries = ", ".join(self._inline_member((*path, key)) for key in children)
         return "{" + entries + "}"
+
+    def _brace_line_is_comment(self, node: _ObjectNode) -> bool:
+        """True when the line holding a member-less object's `}` begins inside a comment."""
+        return self._comments.inside(_line_start(self._source, node.span.end - 1))
 
     def _open_position(self, node: _ObjectNode) -> int:
         """Where a block that opens the object goes: above the first member's own comment.
@@ -838,6 +853,16 @@ class _Diff:
             member + ("," if index < last or follows or trailing else "") + self._newline
             for index, member in enumerate(pending)
         )
+        if anchor is None and not node.members and self._brace_line_is_comment(node):
+            # `{ /* note\n   more */ }`: the closing brace shares a line with the end of a comment, so a
+            # line start before it is inside the comment. The block goes after the comment and `}` moves
+            # to its own line at the indent of the line the object opened on.
+            close = node.span.end - 1
+            opening = self._source[_line_start(self._source, node.span.start) : node.span.start]
+            closing_indent = opening[: len(opening) - len(opening.lstrip(" \t"))]
+            end = self._comments.last_end_before(close)
+            edits.append(_Edit(end, close, self._newline + block + closing_indent))
+            return
         if anchor is None:
             # Nothing precedes the block *in the tree*, so it opens the object: before the first
             # member the template has. Reaching for the closing brace instead would put the block
@@ -981,6 +1006,9 @@ def _clean_multiline_object(text: str, node: _ObjectNode, comments: _Comments) -
             return False
         if not _member_tail_clean(comments, member.value.span.end):
             return False
+        if not _comma_stays_on_its_line(text, comments, member.value):
+            # A comma alone on its line survives the deletion of its member's line and leaves a lone `,`.
+            return False
     close = node.span.end - 1
     return text[_line_start(text, close) : close].strip() == ""
 
@@ -1021,6 +1049,15 @@ class _Comments:
         if last > first and self.spans[last - 1].end > limit:
             return self.spans[last - 1].end
         return None
+
+    def inside(self, position: int) -> bool:
+        """True when `position` is strictly inside a comment, so a line that starts there starts mid-comment."""
+        span = self._span_at(position)
+        return span is not None and span.start < position
+
+    def last_end_before(self, position: int) -> int:
+        """The end of the last comment that ends at or before `position`; the caller must know one does."""
+        return self.spans[bisect.bisect_right(self._ends, position) - 1].end
 
     def next_meaningful(self, position: int) -> int:
         """The offset of the first character after `position` that is not in a comment or a space."""

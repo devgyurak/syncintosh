@@ -218,6 +218,12 @@ decide about survives:
   one line: the merge result is right, but the user's blank lines and layout inside the array are lost.
   This predates issue #21. `test_a_comma_alone_on_its_line_is_not_spliced_and_stays_valid_json` pins that
   the result stays valid and merged; it does not pin the layout.
+  An **object** written with its comma alone on a line, or at the start of its line, is treated the same
+  way: it is rewritten whole, and when a comment is inside it the render is refused rather than dropping
+  the comment (a conflict, not a broken file). A member-less object that carries a comment is not part of
+  this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block
+  comment that shares the closing brace's line keeps the member out of the comment and moves `}` to its own
+  line (issue #29). Pinned by `test_a_member_edit_lands_outside_a_comment_and_beside_a_lone_comma`.
 - **A re-attached key comes back as the live file wrote it, unless a neighbouring line changed.** Projecting
   the live file is a list of text edits, and apply runs them backwards onto the repo text, so a stripped key
   returns where it stood, with its trailing comment, its one-line layout, and a nested value spelled the way
