@@ -358,15 +358,24 @@ def test_a_carried_blob_from_another_generation_is_sealed_again(memory_key_store
     assert cipher.open(files.read(object_path(ID1)) or b"", domain="object", file_id=ID1) == CONTENT
 
 
-def test_force_reseal_ignores_carried(memory_key_store) -> None:
-    # given — a carried blob on the current generation, but a rotation re-seals everything
+def test_force_reseal_does_not_accept_a_carried_blob_for_a_missing_plaintext(memory_key_store) -> None:
+    # given — a carried blob on the current generation, but a rotation re-seals everything from plaintext
     store = memory_key_store({1: KEY})
     files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
     blob = _stored(store)
 
-    # when & then — with no plaintext supplied, the carried blob is not a substitute
+    # when & then
     with pytest.raises(ValueError):
         _carry(files, cipher, scanner, new=_manifest({ID1: _rec()}), carried={ID1: blob}, force_reseal=True)
+
+
+def test_force_reseal_seals_the_plaintext_instead_of_writing_the_carried_blob(memory_key_store) -> None:
+    # given
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    blob = _stored(store)
+
+    # when
     _carry(
         files,
         cipher,
@@ -376,8 +385,23 @@ def test_force_reseal_ignores_carried(memory_key_store) -> None:
         contents={ID1: CONTENT},
         force_reseal=True,
     )
+
+    # then
     assert ("object", ID1, 1) in cipher.sealed
     assert files.read(object_path(ID1)) != blob
+
+
+def test_a_carried_blob_for_an_object_the_plan_does_not_write_is_never_opened(memory_key_store) -> None:
+    # given — ID1 is unchanged against head, and its carried entry is garbage
+    store = memory_key_store({1: KEY})
+    files, cipher, scanner = InMemoryRepoFiles(), CountingCipher(store), RecordingScanner()
+    head = _manifest({ID1: _rec()})
+
+    # when
+    _carry(files, cipher, scanner, head=head, new=head, carried={ID1: b"not a ciphertext"})
+
+    # then
+    assert object_path(ID1) not in files.files
 
 
 def test_contents_win_over_carried_for_the_same_object(memory_key_store) -> None:

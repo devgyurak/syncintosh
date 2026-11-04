@@ -923,10 +923,10 @@ def test_a_migrated_object_is_sealed_once_and_collect_commits_the_gates_blob(
     # when
     _run(b, adopt="remote", catalog=NEW_BUILD)
     file_id = _record_for(b, JSONC).file_id
-    stored = FileRepo(b.repo).read(object_path(file_id))
+    committed = GitCLITransport(b.repo).read_blob(_git(b.repo, "rev-parse", "HEAD").strip(), object_path(file_id))
 
-    # then — the gate sealed the migrated object, and the collect commit holds that very blob
-    assert [blob for subject, blob in sealed if subject == "object:" + file_id] == [stored]
+    # then — the gate sealed the migrated object, and the committed object is that very blob
+    assert [blob for subject, blob in sealed if subject == "object:" + file_id] == [committed]
 
 
 def test_an_older_build_stops_on_a_repo_a_newer_build_migrated(tmp_path, memory_key_store) -> None:

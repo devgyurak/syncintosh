@@ -1824,7 +1824,7 @@ def _merge_diverged(
     # this merge produced is sealed. `write_repo` opens and re-checks a carried blob, so nothing is trusted here.
     carried: dict[str, bytes] = {}
     for file_id in plan.objects_to_write:
-        blob = _object_blob(transport, cipher, local, remote, file_id, merged_manifest.records[file_id].sha256)
+        blob = _object_blob(transport, ((local, local_manifest), (remote, remote_manifest)), file_id, merged_manifest)
         if blob is not None:
             carried[file_id] = blob
             contents.pop(file_id, None)
@@ -1845,16 +1845,21 @@ def _merge_diverged(
 
 def _object_blob(
     transport: GitTransport,
-    cipher: Cipher,
-    local: str,
-    remote: str,
+    sides: tuple[tuple[str, Manifest], ...],
     file_id: str,
-    expected_sha256: str,
+    merged: Manifest,
 ) -> bytes | None:
-    """The stored ciphertext of a surviving record, from the side whose object matches its digest."""
-    for commit in (local, remote):
-        blob = transport.read_blob(commit, object_path(file_id))
-        if blob is not None and _sha256(cipher.open(blob, domain="object", file_id=file_id)) == expected_sha256:
+    """The stored ciphertext of a surviving record, from the first side whose record has the merged digest.
+
+    The blob is only read, never opened: `write_repo` is the one place that authenticates it and checks its digest.
+    """
+    expected = merged.records[file_id].sha256
+    for commit, manifest in sides:
+        record = manifest.records.get(file_id)
+        blob = (
+            None if record is None or record.sha256 != expected else transport.read_blob(commit, object_path(file_id))
+        )
+        if blob is not None:
             return blob
     return None
 
