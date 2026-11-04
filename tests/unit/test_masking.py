@@ -253,8 +253,11 @@ def test_a_password_inside_a_nested_object_is_masked() -> None:
         ("headers:\n  Authorization: >\n    Bearer\n    eyJhbGciOiJIUzI1NiJ9abcdef\n", "eyJhbGciOiJIUzI1NiJ9abcdef"),
         ("Authorization: |\n  Token abc123\n", "abc123"),
         ("Authorization: >-\n  Bearer\n\n  tail-token-xyz\n", "tail-token-xyz"),
+        ("Authorization: >\n" + "  note\n" * 70 + "  Token tail-token-xyz\n", "tail-token-xyz"),
+        ("Authorization: |\n" + "\n" * 70_000 + "  Token tail-token-xyz\n", "tail-token-xyz"),
+        ('Authorization: !!str "Token tail-token-xyz"\n', "tail-token-xyz"),
     ],
-    ids=["split-scheme-and-token", "short-token", "blank-line-inside"],
+    ids=["split-scheme-and-token", "short-token", "blank-line-inside", "past-the-line-cap", "past-the-byte-cap", "tag"],
 )
 def test_a_token_on_a_yaml_block_continuation_line_is_masked(text: str, secret: str) -> None:
     # `_KEYED_VALUE` alone would hide only the `>` after the key

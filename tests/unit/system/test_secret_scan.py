@@ -815,6 +815,12 @@ YAML_BLOCK_REFUSED = [
     pytest.param(b"Authorization: |\n" + b"\n" * 70_000 + b"  Token abc123\n", id="blank-lines-past-the-byte-cap"),
     pytest.param(b"Authorization: |\n" + b"  ${A}\n" * 70 + b"  Token abc123\n", id="harmless-lines-past-the-line-cap"),
     pytest.param(b"Authorization: |\n" + b"  note\n" * 70, id="block-cut-by-the-cap-fails-closed"),
+    pytest.param(b"Authorization: &a Token abc123\n", id="anchor-on-a-single-line-value"),
+    pytest.param(b"Authorization: !!str Token abc123\n", id="tag-on-a-single-line-value"),
+    pytest.param(b'Authorization:\n  "Token abc123"\n', id="quoted-value-on-next-line"),
+    pytest.param(b"Authorization:\n  - Token abc123\n", id="sequence-item-on-next-line"),
+    pytest.param(b"\xef\xbb\xbfAuthorization: >\n  Token abc123\n", id="byte-order-mark"),
+    pytest.param(b"- &x Authorization: >\n    Token abc123\n", id="anchor-on-the-key"),
 ]
 
 
@@ -837,6 +843,10 @@ YAML_BLOCK_PASSED = [
     pytest.param(b"Authorization: |\nname: Bearer abc123\n", id="block-ended-by-dedent"),
     pytest.param(b"headers:\n  Authorization: |\n  other: Bearer abc123\n", id="sibling-key-not-deeper"),
     pytest.param(b"Authorization: |\n", id="empty-block"),
+    pytest.param(b"Authorization: |\n" + b"\n" * 70_000, id="trailing-blank-lines-only"),
+    pytest.param(
+        b"Authorization: Token\n" + b"  ${A}\n" * 70 + b"  abc123\n", id="plain-value-past-the-cap-is-a-limit"
+    ),
     pytest.param(b"authorization:\n  mode: Webhook\n  webhook:\n    cacheTTL: 0s\n", id="settings-mapping"),
     pytest.param(b"Authorization: Token\nother: abc123\n", id="plain-value-ended-by-dedent"),
     pytest.param(b"- Authorization: |\n  other: Bearer abc123\n", id="list-item-sibling-key"),
@@ -889,6 +899,25 @@ def _yaml_block_digest(token: bytes) -> str:
     strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
     with pytest.raises(SecretScanError) as caught:
         strict.scan(b"Authorization: >\n  Bearer\n  " + token + b"\n", subject="app.yaml", format="yaml")
+    return str(caught.value).split("fingerprint ")[1].split(";")[0]
+
+
+def test_a_token_past_the_cap_of_a_block_changes_its_fingerprint() -> None:
+    # given — a block cut by the line cap is fingerprinted whole, so the unread tail is bound to the entry
+    head = b"Authorization: >\n" + b"  note\n" * 70
+
+    # when
+    first = _yaml_digest(head + b"  Token AAAAAAAAAAAAAAAAAAAA1\n")
+    second = _yaml_digest(head + b"  Token BBBBBBBBBBBBBBBBBBBB2\n")
+
+    # then
+    assert first != second
+
+
+def _yaml_digest(payload: bytes) -> str:
+    strict = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset()))
+    with pytest.raises(SecretScanError) as caught:
+        strict.scan(payload, subject="app.yaml", format="yaml")
     return str(caught.value).split("fingerprint ")[1].split(";")[0]
 
 

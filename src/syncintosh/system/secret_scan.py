@@ -293,19 +293,25 @@ SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 # The key must open its line (after indentation, `- ` list markers, a quote, and a name prefix such as
 # `X-` or `Proxy-`): inside a flow mapping or a longer string the same-line rules own it.
 _YAML_KEY_LINE = re.compile(_AUTHORIZATION_KEY + rb"[\"']?[ \t]*+:(?P<rest>[^\n]*)")
-_YAML_KEY_PREFIX = re.compile(rb"[ \t]*(?:-[ \t]+)*[\"']?[\w.\-]*")
+_YAML_BOM = b"\xef\xbb\xbf"
+_YAML_KEY_PREFIX = re.compile(rb"[ \t]*(?:-[ \t]+)*(?:[!&]\S*[ \t]+)*[\"']?[\w.\-]*")
 _YAML_INDENT = re.compile(rb"[ \t]*(?:-[ \t]+)*")
 _YAML_BLOCK_INDICATOR = re.compile(rb"[|>](?:[+-][1-9]?|[1-9][+-]?)?")
 _YAML_PROPERTIES = re.compile(rb"(?:[!&]\S*(?:[ \t]+|$))*")
 _YAML_COMMENT = re.compile(rb"(?:^|[ \t])#.*$")
 _YAML_BLANK_RUN = re.compile(rb"(?:[ \t\r]*\n)*")
+# What may open a plain or quoted value before its scheme: a quote, or a sequence marker (`- Token abc`).
+_YAML_VALUE_LEAD = re.compile(rb"(?:-[ \t]+|[\"'])*")
 _YAML_CREDENTIAL = re.compile(_AUTHORIZATION_CREDENTIAL)
 
 # Gathering a value is bounded, so a key followed by a very long indented run costs a constant per key
 # rather than a scan to the end of the file. Blank lines are skipped in one step and count toward the byte
 # cap only: YAML keeps leading blank lines in a block scalar, so a credential can sit after any number of
-# them. When a **block scalar** is cut short by a cap rather than ended by a dedent, the scan fails closed
-# (see `yaml_block_authorizations`): what it did not read cannot be called harmless.
+# them. A **block scalar** that a cap cut short is not judged on the lines read: it is refused (and masked)
+# whole, to the end of its indented region, so what was not read cannot be called harmless. A plain or
+# quoted value past the caps is read no further, which is the one place this stays a limit: nothing writes a
+# header credential as a 64-line plain scalar, and refusing every large `authorization:` settings mapping
+# would stop the machine's files for no gain.
 _YAML_BLOCK_MAX_LINES = 64
 _YAML_BLOCK_MAX_BYTES = 65536
 
@@ -314,26 +320,33 @@ def yaml_block_authorizations(plaintext: bytes) -> list[tuple[int, int, int]]:
     """Every credential-shaped `Authorization` value that continues past its key line in YAML.
 
     Each result is `(key_line_start, value_start, value_end)`: the scan fingerprints the lines from the key
-    line to the last continuation line (`_lines_at`), and the masker hides `[value_start, value_end)`. The
+    line to the last line of the value (`_lines_at`), and the masker hides `[value_start, value_end)`. The
     value is the rest of the key line plus the following lines indented deeper than the key (blank lines
     skipped, the first line that is not deeper ends it), joined with one space and tested with the ordinary
     `Authorization` credential rule, so `>` (folded), `|` (literal), and a continued plain scalar are read
-    the same way. A block scalar that a cap stopped before its end is reported whole: it is refused (and
-    masked) rather than passed on the strength of the lines read so far. This lives here, with the other
-    patterns, so that the scan and the masker share one definition (``AGENTS.md`` §3.4).
+    the same way. A key inside a value already reported is skipped, which keeps the walk linear. This lives
+    here, with the other patterns, so that the scan and the masker share one definition (``AGENTS.md``
+    §3.4).
+
+    Not read, and so a limit: a key inside a flow mapping or behind a `?` explicit-key marker, a CR-only
+    line ending, an escaped line break inside a double-quoted value, and a key with a word glued to its
+    front (`my_authorization`), which the same-line rules cannot see either.
     """
     found: list[tuple[int, int, int]] = []
+    reported_until = 0
     for key in _YAML_KEY_LINE.finditer(plaintext):
+        if key.start() < reported_until:
+            continue
         line_start = plaintext.rfind(b"\n", 0, key.start()) + 1
-        prefix = plaintext[line_start : key.start()]
+        prefix = plaintext[line_start : key.start()].removeprefix(_YAML_BOM)
         if _YAML_KEY_PREFIX.fullmatch(prefix) is None:
             continue
         # The key's column: indentation and list markers only, so `X-Authorization:` and a quoted key are
         # measured where the mapping starts, and a sibling at the same column ends the value.
-        indent = _match_end(_YAML_INDENT, prefix, 0)
-        span = _yaml_value(plaintext, key, indent)
+        span = _yaml_value(plaintext, key, _match_end(_YAML_INDENT, prefix, 0))
         if span is not None:
             found.append((line_start, *span))
+            reported_until = span[1]
     return found
 
 
@@ -344,19 +357,20 @@ def _yaml_value(plaintext: bytes, key: re.Match[bytes], indent: int) -> tuple[in
     value_offset = _match_end(_YAML_PROPERTIES, rest, lead)
     inline = rest[value_offset:]
     block = _YAML_BLOCK_INDICATOR.fullmatch(inline) is not None
-    first = key.start("rest") + value_offset
-    parts = [] if block or inline == b"" else [inline.lstrip(b"\"'")]
-    start, end = (first, first + len(inline)) if parts else (-1, -1)
-    gathered = _gather_continuation(plaintext, key.end(), indent)
-    if gathered.parts:
-        parts += gathered.parts
-        start = start if start != -1 else gathered.start
-        end = gathered.end
-    if block and gathered.truncated:
-        return (start, end) if start != -1 else (key.end(), key.end())
-    # A plain value with no continuation is the same-line rules' job.
-    if not gathered.parts or _YAML_CREDENTIAL.match(b" ".join(parts)) is None:
+    inline_start = key.start("rest") + value_offset
+    walk = _gather_continuation(plaintext, key.end(), indent)
+    if block and walk.region_end is not None:
+        return (key.end() if walk.start == -1 else walk.start, walk.region_end)
+    lines = ([] if block or inline == b"" else [inline]) + walk.parts
+    # A same-line value is the same-line rules' job, except behind an anchor or a tag, which they cannot
+    # read past (`Authorization: !!str Token abc`).
+    if not lines or not (walk.parts or value_offset > lead):
         return None
+    joined = b" ".join(lines)
+    if _YAML_CREDENTIAL.match(joined, _match_end(_YAML_VALUE_LEAD, joined, 0)) is None:
+        return None
+    start = walk.start if inline == b"" or block else inline_start
+    end = walk.end if walk.parts else inline_start + len(inline)
     return (start, end)
 
 
@@ -367,28 +381,31 @@ def _match_end(pattern: re.Pattern[bytes], data: bytes, pos: int, endpos: int | 
 
 
 class _Continuation(NamedTuple):
+    """What follows a key line: the content read (`start`..`end`, -1 when none) and the lines' text.
+
+    `region_end` is set only when a cap stopped the walk with more deeper-indented text ahead: it is where
+    that text ends, so a caller that must not pass the unread part can cover all of it.
+    """
+
     start: int
     end: int
     parts: list[bytes]
-    truncated: bool
+    region_end: int | None
 
 
 def _gather_continuation(plaintext: bytes, header_end: int, indent: int) -> _Continuation:
-    """The non-blank lines after a key line that are indented deeper than `indent`.
-
-    `truncated` is True when a cap stopped the walk while more deeper-indented text remained, as opposed
-    to a dedent or the end of the file ending it.
-    """
+    """The non-blank lines after a key line that are indented deeper than `indent`."""
     limit = min(len(plaintext), header_end + _YAML_BLOCK_MAX_BYTES)
     parts: list[bytes] = []
     start = end = -1
     cursor = plaintext.find(b"\n", header_end)
     while cursor != -1:
         line_start = _match_end(_YAML_BLANK_RUN, plaintext, cursor + 1, limit)
+        if line_start >= limit:
+            # Only the byte cap can stop here; look past it once, to see whether text is really ahead.
+            line_start = _match_end(_YAML_BLANK_RUN, plaintext, line_start)
         if line_start >= len(plaintext):
             break
-        if line_start >= limit:
-            return _Continuation(start, end, parts, True)
         line_end = plaintext.find(b"\n", line_start)
         line_end = len(plaintext) if line_end == -1 else line_end
         line = plaintext[line_start:line_end]
@@ -396,13 +413,29 @@ def _gather_continuation(plaintext: bytes, header_end: int, indent: int) -> _Con
         if len(line) - len(text) <= indent and text.strip() != b"":
             break
         if text.strip() != b"":
-            if len(parts) >= _YAML_BLOCK_MAX_LINES:
-                return _Continuation(start, end, parts, True)
+            if len(parts) >= _YAML_BLOCK_MAX_LINES or line_start > limit:
+                return _Continuation(start, end, parts, _region_end(plaintext, line_start, indent))
             start = line_start + len(line) - len(text) if start == -1 else start
             end = line_start + len(line.rstrip())
             parts.append(text.strip())
         cursor = line_end if line_end < len(plaintext) else -1
-    return _Continuation(start, end, parts, False)
+    return _Continuation(start, end, parts, None)
+
+
+def _region_end(plaintext: bytes, position: int, indent: int) -> int:
+    """Where the text indented deeper than `indent` ends, from the content line at `position` on."""
+    end = position
+    cursor = position
+    while cursor < len(plaintext):
+        cursor = _match_end(_YAML_BLANK_RUN, plaintext, cursor)
+        line_end = plaintext.find(b"\n", cursor)
+        line_end = len(plaintext) if line_end == -1 else line_end
+        line = plaintext[cursor:line_end]
+        if cursor >= len(plaintext) or len(line) - len(line.lstrip(b" \t")) <= indent:
+            break
+        end = cursor + len(line.rstrip())
+        cursor = line_end + 1
+    return end
 
 
 def patterns_for(format: str) -> tuple[tuple[str, re.Pattern[bytes]], ...]:
