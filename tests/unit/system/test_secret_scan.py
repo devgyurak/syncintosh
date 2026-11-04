@@ -821,6 +821,11 @@ YAML_BLOCK_REFUSED = [
     pytest.param(b"Authorization:\n  - Token abc123\n", id="sequence-item-on-next-line"),
     pytest.param(b"\xef\xbb\xbfAuthorization: >\n  Token abc123\n", id="byte-order-mark"),
     pytest.param(b"- &x Authorization: >\n    Token abc123\n", id="anchor-on-the-key"),
+    pytest.param(b"Authorization:\n- Token abc123\n", id="sequence-at-the-key-column"),
+    pytest.param(b"- Authorization:\n  - Token abc123\n", id="sequence-under-a-list-item-key"),
+    pytest.param(b"Authorization:\n  &a Token abc123\n", id="anchor-on-a-next-line-value"),
+    pytest.param(b"Authorization:\n  !!str Token abc123\n", id="tag-on-a-next-line-value"),
+    pytest.param(b"Authorization:\n  # note\n  Token abc123\n", id="comment-before-the-value"),
 ]
 
 
@@ -843,6 +848,9 @@ YAML_BLOCK_PASSED = [
     pytest.param(b"Authorization: |\nname: Bearer abc123\n", id="block-ended-by-dedent"),
     pytest.param(b"headers:\n  Authorization: |\n  other: Bearer abc123\n", id="sibling-key-not-deeper"),
     pytest.param(b"Authorization: |\n", id="empty-block"),
+    pytest.param(b"authorization:\n  - Basic\n  - Bearer\n", id="list-of-scheme-names"),
+    pytest.param(b"authorization:\n- Digest\n- Negotiate\nnext: Token abc123\n", id="sequence-ended-by-a-key"),
+    pytest.param(b"Authorization: |\n# not block content\n", id="comment-at-the-key-column-ends-a-block"),
     pytest.param(b"Authorization: |\n" + b"\n" * 70_000, id="trailing-blank-lines-only"),
     pytest.param(
         b"Authorization: Token\n" + b"  ${A}\n" * 70 + b"  abc123\n", id="plain-value-past-the-cap-is-a-limit"
@@ -940,6 +948,11 @@ YAML_REDOS = [
     pytest.param(b"Authorization: | " + b" " * 200_000 + b"x\n", id="spaces-after-indicator"),
     pytest.param(b"Authorization: Bearer " + b"${A} " * 60 + b"\n", id="repeated-reference-one-line"),
     pytest.param(b"Authorization: >\n  Bearer\n" + b"  ${A}\n" * 70, id="repeated-reference-block"),
+    pytest.param(
+        b"".join(b" " * i + b"Authorization:\n" + b" " * (i + 1) + b"x\n" * 70 for i in range(1, 300)),
+        id="staircase-of-plain-values",
+    ),
+    pytest.param(b"".join(b" " * i + b"Authorization:\n\n\n\n" for i in range(1, 1500)), id="staircase-of-blank-runs"),
     pytest.param(
         b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 65)) + b"\n" * 65_000 + b"  x\n",
         id="deepening-headers-over-a-blank-run",

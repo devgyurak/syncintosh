@@ -300,8 +300,9 @@ _YAML_BLOCK_INDICATOR = re.compile(rb"[|>](?:[+-][1-9]?|[1-9][+-]?)?")
 _YAML_PROPERTIES = re.compile(rb"(?:[!&]\S*(?:[ \t]+|$))*")
 _YAML_COMMENT = re.compile(rb"(?:^|[ \t])#.*$")
 _YAML_BLANK_RUN = re.compile(rb"(?:[ \t\r]*\n)*")
-# What may open a plain or quoted value before its scheme: a quote, or a sequence marker (`- Token abc`).
-_YAML_VALUE_LEAD = re.compile(rb"(?:-[ \t]+|[\"'])*")
+# What may open a plain or quoted value before its scheme: a quote, an anchor, or a tag.
+_YAML_VALUE_LEAD = re.compile(rb"(?:[\"']|[!&]\S*[ \t]+)*")
+_YAML_SEQUENCE_MARKER = re.compile(rb"(?:-[ \t]+)+")
 _YAML_CREDENTIAL = re.compile(_AUTHORIZATION_CREDENTIAL)
 
 # Gathering a value is bounded, so a key followed by a very long indented run costs a constant per key
@@ -358,7 +359,7 @@ def _yaml_value(plaintext: bytes, key: re.Match[bytes], indent: int) -> tuple[in
     inline = rest[value_offset:]
     block = _YAML_BLOCK_INDICATOR.fullmatch(inline) is not None
     inline_start = key.start("rest") + value_offset
-    walk = _gather_continuation(plaintext, key.end(), indent)
+    walk = _gather_continuation(plaintext, key.end(), indent, block=block)
     if block and walk.region_end is not None:
         return (key.end() if walk.start == -1 else walk.start, walk.region_end)
     lines = ([] if block or inline == b"" else [inline]) + walk.parts
@@ -366,8 +367,16 @@ def _yaml_value(plaintext: bytes, key: re.Match[bytes], indent: int) -> tuple[in
     # read past (`Authorization: !!str Token abc`).
     if not lines or not (walk.parts or value_offset > lead):
         return None
-    joined = b" ".join(lines)
-    if _YAML_CREDENTIAL.match(joined, _match_end(_YAML_VALUE_LEAD, joined, 0)) is None:
+    # A sequence is a list of values, each judged alone: `- Basic` and `- Bearer` are scheme names, not
+    # `Basic -` and a token. Lines without a marker continue the item before them.
+    items: list[bytes] = []
+    for line in lines:
+        marker = _YAML_SEQUENCE_MARKER.match(line)
+        if marker is not None or not items:
+            items.append(line[0 if marker is None else marker.end() :])
+        else:
+            items[-1] += b" " + line
+    if not any(_YAML_CREDENTIAL.match(item, _match_end(_YAML_VALUE_LEAD, item, 0)) is not None for item in items):
         return None
     start = walk.start if inline == b"" or block else inline_start
     end = walk.end if walk.parts else inline_start + len(inline)
@@ -393,8 +402,15 @@ class _Continuation(NamedTuple):
     region_end: int | None
 
 
-def _gather_continuation(plaintext: bytes, header_end: int, indent: int) -> _Continuation:
-    """The non-blank lines after a key line that are indented deeper than `indent`."""
+def _gather_continuation(plaintext: bytes, header_end: int, indent: int, *, block: bool) -> _Continuation:
+    """The non-blank lines after a key line that are indented deeper than `indent`.
+
+    A plain or quoted value (not a `block`) also continues over a `- ` line at the key's own column, which
+    is how ruamel and PyYAML dump a sequence, and skips comment lines. Inside a block scalar a `#` line is
+    content and a line at the key's column ends it. `region_end` is computed for a block only: it is the
+    one caller that reports the unread part, and walking it for a plain value is wasted work that a
+    staircase of nested keys would turn quadratic.
+    """
     limit = min(len(plaintext), header_end + _YAML_BLOCK_MAX_BYTES)
     parts: list[bytes] = []
     start = end = -1
@@ -402,6 +418,8 @@ def _gather_continuation(plaintext: bytes, header_end: int, indent: int) -> _Con
     while cursor != -1:
         line_start = _match_end(_YAML_BLANK_RUN, plaintext, cursor + 1, limit)
         if line_start >= limit:
+            if not block:
+                break
             # Only the byte cap can stop here; look past it once, to see whether text is really ahead.
             line_start = _match_end(_YAML_BLANK_RUN, plaintext, line_start)
         if line_start >= len(plaintext):
@@ -410,10 +428,14 @@ def _gather_continuation(plaintext: bytes, header_end: int, indent: int) -> _Con
         line_end = len(plaintext) if line_end == -1 else line_end
         line = plaintext[line_start:line_end]
         text = line.lstrip(b" \t")
-        if len(line) - len(text) <= indent and text.strip() != b"":
+        column = len(line) - len(text)
+        sibling_item = not block and column == indent and text.startswith(b"- ")
+        if column <= indent and text.strip() != b"" and not sibling_item:
             break
-        if text.strip() != b"":
+        if text.strip() != b"" and not (not block and text.startswith(b"#")):
             if len(parts) >= _YAML_BLOCK_MAX_LINES or line_start > limit:
+                if not block:
+                    break
                 return _Continuation(start, end, parts, _region_end(plaintext, line_start, indent))
             start = line_start + len(line) - len(text) if start == -1 else start
             end = line_start + len(line.rstrip())
