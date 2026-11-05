@@ -14,14 +14,14 @@ import os
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from syncintosh.core.envelope_header import ENVELOPE_VERSION, HEADER_SIZE
 from syncintosh.core.errors import AuthenticationError, UnknownKeyGeneration, UnsupportedEnvelopeVersion
 from syncintosh.core.ids import is_file_id
 from syncintosh.core.ports import Domain, KeyStore
 from syncintosh.crypto.hkdf import derive_subkey
-from syncintosh.crypto.primitives import KEY_ID_SIZE, KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
+from syncintosh.crypto.primitives import KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
 
-VERSION = 1
-HEADER_SIZE = 1 + KEY_ID_SIZE  # version(1) + key_id(4)
+VERSION = ENVELOPE_VERSION
 # An empty plaintext still costs a header, a nonce, and a tag — anything shorter is not an
 # envelope at all, so it fails as an authentication error rather than a version error.
 MIN_BLOB_SIZE = HEADER_SIZE + NONCE_SIZE + TAG_SIZE
@@ -39,19 +39,6 @@ def build_aad(domain: Domain, header: bytes, subject: bytes) -> bytes:
 def pack_header(key_id: int) -> bytes:
     """`version || key_id` — the first five bytes, authenticated as part of the AAD."""
     return bytes([VERSION]) + be32(key_id)
-
-
-def header_generation(blob: bytes) -> int | None:
-    """The cleartext key generation an envelope names, or `None` when the bytes are not one.
-
-    Reads only the fixed header, so it needs **no key** — which is what lets `key prune` decide
-    reachability without one (``docs/design/05-key-generations.md``). A blob shorter than the
-    header, of an unknown version, or naming the invalid generation 0 is not an envelope.
-    """
-    if len(blob) < HEADER_SIZE or blob[0] != VERSION:
-        return None
-    key_id = from_be32(blob[1:HEADER_SIZE])
-    return None if key_id == 0 else key_id
 
 
 def _resolve_subject(domain: Domain, file_id: str) -> bytes:

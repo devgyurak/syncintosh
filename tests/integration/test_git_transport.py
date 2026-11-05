@@ -9,13 +9,16 @@ the transport contracts the cycle relies on are pinned with real git rather than
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from syncintosh.core.errors import GitError
+from syncintosh.core.errors import GitError, PruneRefused
 from syncintosh.core.ports import remote_ref
+from syncintosh.services.keys import prune_generation
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -334,3 +337,115 @@ def test_a_push_to_an_unusable_remote_is_rejected(tmp_path) -> None:
 
     # then
     assert outcome == "rejected"
+
+
+# -- reachability read (key prune / doctor) -----------------------------------
+
+BIG_BODY = b"x" * (300 * 1024)  # several discard chunks, so the stream is skipped rather than buffered
+ENVELOPE_IDS = ("1" * 32, "2" * 32)
+
+
+class _Lock:
+    def acquire(self) -> None:
+        return None
+
+    def release(self) -> None:
+        return None
+
+
+def _envelope(generation: int, body: bytes = BIG_BODY) -> bytes:
+    return bytes([1]) + generation.to_bytes(4, "big") + body
+
+
+def _history_across_generations(tmp_path: Path) -> tuple[GitCLITransport, str, str]:
+    """A published branch whose commits hold large envelopes under generations 2, 3, then 4."""
+    workdir = tmp_path / "work"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], capture_output=True, check=True)
+    transport = GitCLITransport(workdir)
+    transport.init()
+    commit = _settle(transport, workdir, "manifest.enc", _envelope(2), ())
+    commit = _settle(transport, workdir, "objects/" + ENVELOPE_IDS[0] + ".enc", _envelope(3), (commit,))
+    # An envelope-shaped blob outside a slot must not count, however large or well-formed.
+    commit = _settle(transport, workdir, "notes/stray.enc", _envelope(9), (commit,))
+    commit = _settle(transport, workdir, "manifest.enc", _envelope(4), (commit,))
+    assert transport.push(str(remote), "main", commit) == "ok"
+    return transport, str(remote), commit
+
+
+def test_reachable_generations_include_every_commit_in_the_history(tmp_path) -> None:
+    # given
+    transport, _, commit = _history_across_generations(tmp_path)
+
+    # when
+    generations = transport.generations_in_reachable_objects((commit,))
+
+    # then — gen 2 survives only in an older commit's manifest, gen 9 sits outside a slot
+    assert generations == (2, 3, 4)
+
+
+def test_reachable_generations_without_tips_are_empty(tmp_path) -> None:
+    # given
+    transport = GitCLITransport(tmp_path / "work")
+    transport.init()
+
+    # when & then
+    assert transport.generations_in_reachable_objects(()) == ()
+
+
+def test_prune_refuses_a_generation_a_large_old_envelope_still_uses(tmp_path, memory_key_store) -> None:
+    # given
+    transport, remote, _ = _history_across_generations(tmp_path)
+    store = memory_key_store({1: b"k" * 32, 2: b"k" * 32, 3: b"k" * 32, 5: b"k" * 32})
+
+    # when & then
+    with pytest.raises(PruneRefused):
+        prune_generation(transport=transport, store=store, lock=_Lock(), remote=remote, branch="main", generation=3)
+
+
+def test_prune_drops_a_generation_no_reachable_envelope_names(tmp_path, memory_key_store) -> None:
+    # given
+    transport, remote, _ = _history_across_generations(tmp_path)
+    store = memory_key_store({1: b"k" * 32, 4: b"k" * 32, 5: b"k" * 32})
+
+    # when
+    prune_generation(transport=transport, store=store, lock=_Lock(), remote=remote, branch="main", generation=5)
+
+    # then
+    assert store.generations() == (1, 4)
+
+
+def test_a_failing_rev_list_is_a_git_error(tmp_path) -> None:
+    # given — a directory that is not a repository
+    workdir = tmp_path / "not-a-repo"
+    workdir.mkdir()
+
+    # when & then
+    with pytest.raises(GitError, match="rev-list"):
+        GitCLITransport(workdir).generations_in_reachable_objects(("0" * 40,))
+
+
+def test_a_failing_cat_file_is_a_redacted_git_error(tmp_path, monkeypatch) -> None:
+    # given — a `git` that behaves normally except that `cat-file` dies with a URL-bearing message
+    transport, _, commit = _history_across_generations(tmp_path)
+    real_git = shutil.which("git")
+    shim = tmp_path / "bin" / "git"
+    shim.parent.mkdir()
+    shim.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = cat-file ]; then echo "fatal: https://user:s3cr3t@host/repo" >&2; exit 3; fi\n'
+        "done\n"
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{os.environ['PATH']}")
+
+    # when
+    with pytest.raises(GitError) as raised:
+        transport.generations_in_reachable_objects((commit,))
+
+    # then
+    assert "`git cat-file` failed (exit 3)" in str(raised.value)
+    assert "s3cr3t" not in str(raised.value)

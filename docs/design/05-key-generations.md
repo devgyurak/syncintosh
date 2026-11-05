@@ -96,7 +96,10 @@ KDF it will not run **before** spending work on it:
 - **The reachability walk reads no key.** `key_id` is cleartext in the envelope header
   ([04-envelope-v1.md](04-envelope-v1.md)), so `git rev-list --objects <HEAD> <origin/branch>`
   lists every reachable blob, the `manifest.enc` and `objects/<id>.enc` slots are kept, and one
-  `cat-file --batch` reads each 5-byte header. Git prints one path per unique blob; because every
+  `cat-file --batch` reads each 5-byte header, one object at a time, skipping the body in
+  bounded chunks so memory stays flat on a large history. The header parse lives in
+  `core/envelope_header.py`, the single definition the crypto layer also builds from, so
+  `vcs` needs no `crypto` import. Git prints one path per unique blob; because every
   envelope uses a fresh random nonce, one ciphertext lives at exactly one path, so the listing
   reports the slot path. `keys/*.wrap` is deliberately **not** walked: a wrap's header names the
   generation it is wrapped *under*, not a stored object's generation.
