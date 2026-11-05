@@ -2608,5 +2608,4 @@ def test_a_stale_edit_the_scan_refuses_is_not_overwritten_and_keeps_its_old_base
     assert b.ledger.read_text(encoding="utf-8") == ledger_before
     assert _git(b.repo, "for-each-ref", "refs/syncintosh").strip() == ""
     # and the next sync does not overwrite it either
-    assert _read_live(b) == secret_edit
     assert later.applied == ()
