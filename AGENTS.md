@@ -154,6 +154,7 @@ Every stored object is `version(1B) | key_id(4B, big-endian) | nonce(12B) | ciph
   the pending-conflict state below.
 - The state directory (`~/.local/share/syncintosh/`) holds the apply ledger (`applied.json`,
   content digests only), the pending-conflict state (`pending/`, plaintext), the scan allowlist,
+  the pending-push marker (`pending-push.json`: a generation id and a commit id, no key),
   and the clone — all **outside** the git directory, and the repo itself is a child of it.
 - Nothing under the state directory, and no decrypted object, may be committed. The `guard-secrets`
   hook blocks this; do not work around it.

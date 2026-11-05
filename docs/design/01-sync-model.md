@@ -30,15 +30,22 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
 | 14 | **apply** | Write the merged records into the live files — **after** the push and only after the per-file check below — then settle the apply ledger for every record ([below](#change-detection-is-against-the-apply-ledger)). |
 
-**An unpublished local rotation.** A rotation that never reached the remote (its push outcome could not be
-determined) leaves a generation `n+1` in the ring that the remote does not publish. If the remote then moved
-on at generation `n` (a real divergence), step 7 checks this **before** the commitments check, which would
-otherwise stop the cycle on the unpublished generation. A **hygiene** rotation (its `keys/<n+1>.wrap` is in
-the local tree) is discarded: the remote tip is adopted, the stray generation and its wrap leave the ring, the
-cycle restarts, and the report says so. No data is lost, because the apply ledger is saved only on apply, so
-the live edits are collected again on the new tip. An **out-of-band** rotation is never discarded by sync; it
-stops with `GenerationDivergence` and asks for `syncintosh key rotate --out-of-band` again, since reverting a
-device removal or key replacement silently would leave the removed device with access
+**An unpublished local rotation.** When `key rotate` pushes and never learns the outcome, it keeps the new
+generation `n+1` in the ring **and** leaves a pending-push marker (`pending-push.json` in the state directory:
+the generation and the rotation commit, no key). Until the push is settled the remote does not publish `n+1`, so
+the commitments check would stop every cycle on the held generation. Before that check, step 7 asks whether the
+marker names exactly the generation this branch holds, its commit is in the local history, the remote does not
+publish that generation, and the local branch is not behind the remote: it either **diverged** from the remote
+(someone else published on generation `n`) or is **ahead** of it (the rotation, perhaps with collect commits on
+top, was never pushed). If the remote does publish the marked generation under this machine's key, the push had
+landed and the marker is simply cleared. A **hygiene** rotation (its `keys/<n+1>.wrap` is in the local tree) is
+discarded: the remote tip is adopted, the stray generation and its wrap leave the ring, the marker is cleared, the
+cycle restarts, and the report says so. No data is lost, because the apply ledger is saved only on apply, so the
+live edits are collected again on the new tip. An **out-of-band** rotation is never discarded by sync; it stops
+with `GenerationDivergence` and asks for `syncintosh key rotate --out-of-band` again, since reverting a device
+removal or key replacement silently would leave the removed device with access. **With no marker nothing is
+discarded**: a generation the remote does not publish stays a hard stop, so a remote that omits or forges a
+commitment cannot make this machine drop a key it really published
 ([05-key-generations.md](05-key-generations.md)).
 
 **Apply runs after the push, never before.** The remote is the source of truth: if the push

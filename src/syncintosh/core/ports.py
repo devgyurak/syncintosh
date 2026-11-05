@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from syncintosh.core.advice import Advice, MaskedText
 from syncintosh.core.keyed_array import ArrayRule
-from syncintosh.core.models import LedgerEntry, PendingState, TextMerge
+from syncintosh.core.models import LedgerEntry, PendingPush, PendingState, TextMerge
 from syncintosh.core.tree import KeyPath, Tree
 
 # The keyed tag of a `when` clause, as the machine that holds the key computes it. Core only calls it; the key never
@@ -541,6 +541,28 @@ class PendingStore(Protocol):
 
     def clear(self) -> None:
         """Remove the pending state, if any. Raises on failure."""
+        ...
+
+
+@runtime_checkable
+class RotationMarkerStore(Protocol):
+    """The record of a rotation whose push outcome is unknown, outside the repo.
+
+    `key rotate` writes it just before the push and clears it once the outcome is known (landed, or
+    proven absent). While it is present `sync` may discard that one unpublished rotation; with none,
+    a held generation the remote does not publish stays a hard stop (``AGENTS.md`` §3.1).
+    """
+
+    def load(self) -> PendingPush | None:
+        """Read the marker, or `None` when there is none. Raises when it is corrupt."""
+        ...
+
+    def record(self, marker: PendingPush) -> None:
+        """Write `marker`, replacing any earlier one. Raises on failure."""
+        ...
+
+    def clear(self) -> None:
+        """Remove the marker, if any. Raises on failure."""
         ...
 
 

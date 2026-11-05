@@ -138,7 +138,7 @@ class GenerationDivergence(ManifestError):
         if out_of_band:
             super().__init__(
                 f"the remote publishes no commitment for local key generation {local_generation}, which has no "
-                f"wrap in the repo (an out-of-band rotation), and the remote has moved on at generation "
+                f"wrap in the repo (an out-of-band rotation), and the remote is at generation "
                 f"{remote_generation}; sync will not discard it, because that could undo a device removal or a "
                 "key replacement. If it was never published, run `syncintosh key rotate --out-of-band` again — "
                 "it adopts the remote and rotates anew"
@@ -304,6 +304,13 @@ class ScanAllowCorrupt(DomainError):
 
 class LedgerCorrupt(DomainError):
     """`applied.json` is not a valid apply ledger."""
+
+
+class RotationMarkerCorrupt(DomainError):
+    """The pending-push marker is not a valid record.
+
+    Sync cannot tell whether a rotation may have landed, so it stops rather than guess.
+    """
 
 
 class PendingCorrupt(DomainError):

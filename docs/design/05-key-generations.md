@@ -132,15 +132,32 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
   there is worse than untidy: the abandoned `KG_n` would answer `get(n)` for the *other*
   machine's genuine generation `n`, and every one of its objects would fail authentication as
   if it had been tampered with.
-- **An unpublished rotation is repaired by `sync` only when it is hygiene.** When the local branch diverged
-  from the remote, holds a higher generation, and the remote's `keys/commitments.json` has no entry for it,
-  that generation never left this machine. If its `keys/<n>.wrap` is in the local tree (hygiene), `sync`
-  adopts the remote tip, removes the stray generation and its wrap from the ring (the same sweep as
-  `key rotate`, for the same reason as above), restarts the cycle, and notes that the rotation was
-  discarded and can be repeated with `syncintosh key rotate --hygiene`. An **out-of-band** rotation (no wrap)
-  is never discarded by a daemon: it may be the removal of a device or the answer to a leaked key, and undoing
-  it would leave that access in place. `sync` stops and asks for `syncintosh key rotate --out-of-band`
-  again. A generation the remote *does* publish is a genuine disagreement and keeps failing as before.
+- **A rotation of unknown outcome leaves a pending-push marker.** `key rotate` records `{generation, commit}`
+  in `pending-push.json` (state directory, outside git, no key) inside its discard guard just before the push,
+  and clears it when the push succeeds, when a rejected push turns out to have landed, or when the rotation is
+  proven absent and discarded. An unknown outcome keeps both the generation and the marker. A later `key rotate`
+  clears the stale marker when it sweeps the stray generation and records its own.
+- **`sync` repairs an unpublished rotation only with that marker, and only when it is hygiene.** If the remote
+  publishes the marked generation under this machine's key, the push had landed and the marker is cleared.
+  Otherwise, when the marker names exactly the local generation, its commit is in the local history, the remote
+  does not publish the generation, and the local branch is not behind the remote (it **diverged** from it or is
+  **ahead** of it), the outcome depends on the mode. Hygiene (its `keys/<n>.wrap` is in the local tree): `sync`
+  adopts the remote tip, removes the stray generation and its wrap from the ring (the same sweep as `key rotate`,
+  for the same reason as above), clears the marker, restarts the cycle, and notes that the rotation was discarded
+  and can be repeated with `syncintosh key rotate --hygiene`. Dropping any collect commits stacked on it loses
+  no edit: the apply ledger is saved only after an apply, so the next `sync` still sees every edit as changed and
+  collects it again on the adopted generation. Out-of-band (no wrap): never discarded by a daemon, since it
+  may be the removal of a device or the answer to a leaked key and undoing it would leave that access in place;
+  `sync` stops and asks for `syncintosh key rotate --out-of-band` again.
+- **The marker is what makes this safe against a hostile remote.** The commitments file is unauthenticated input:
+  a remote that omits or forges an entry, or is rewound past a rotation, must not be able to talk a machine out of
+  a key it published. Without a marker a held generation the remote does not publish is still
+  `CommitmentsCorrupt`, as before, and a generation the remote does publish is judged by the normal checks.
+  Every other held generation must be published, so the sweep can only drop the marked one. **Residual window:**
+  while a marker exists for a rotation that in fact landed (a lost response), a remote rewound past that
+  rotation can still make `sync` drop the key until a `sync` sees the generation published and clears the marker.
+  The commit and the wrap (under the retained previous generation) stay in the clone's object store until
+  `git gc`, and another machine or a ring export still holds the key; the report names the discarded generation.
 - Two different keys for one generation id is a **hard error**, not something to reconcile:
   the machines disagree about a key that published objects are already bound to.
 

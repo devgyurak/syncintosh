@@ -52,7 +52,7 @@ from syncintosh.core.keyed_array import ArrayRule, group_leaves
 from syncintosh.core.ledger import AdoptChoice, chosen_digest, classify
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord, mint_file_id, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
-from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingState, Scope
+from syncintosh.core.models import ConflictAddress, LedgerEntry, PendingPush, PendingState, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import stamp_policies
@@ -73,6 +73,7 @@ from syncintosh.core.ports import (
     ProfileIndex,
     RepoFiles,
     RingCodec,
+    RotationMarkerStore,
     SecretScanner,
     SyncLock,
     SyntaxValidator,
@@ -104,7 +105,13 @@ from syncintosh.core.resolution import (
     fingerprint,
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
-from syncintosh.services.keys import absorb_wraps, discard_stray_generations, read_commitments, verify_commitments
+from syncintosh.services.keys import (
+    NO_ROTATION_MARKER,
+    absorb_wraps,
+    discard_stray_generations,
+    read_commitments,
+    verify_commitments,
+)
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved, open_live_paths, profile_directory
 from syncintosh.services.repo_writer import write_repo
@@ -1904,43 +1911,64 @@ ABANDONED_ROTATION_NOTE = (
 )
 
 
+def _landed(codec: RingCodec, store: KeyStore, marker: PendingPush, published: Mapping[int, str]) -> bool:
+    """True when the remote publishes the marked generation under the key this machine holds for it."""
+    expected = published.get(marker.generation)
+    key = store.get(marker.generation)
+    return expected is not None and key is not None and codec.commitment(key) == expected
+
+
 def _abandon_unpublished_rotation(
     *,
     transport: PolicyView,
     files: RepoFiles,
     store: KeyStore,
+    rotation_marker: RotationMarkerStore,
     branch: str,
     remote_commit: str,
     published: Mapping[int, str],
+    marker: PendingPush | None,
     local_generation: int,
 ) -> _Publish | None:
-    """Drop a local-only hygiene rotation the remote diverged from; `None` when this is not that case.
+    """Drop a local-only rotation the remote never saw; `None` when this is not that case.
 
-    The case is a local branch that diverged from the remote at a higher generation the remote does not
-    publish. It runs **before** `verify_commitments`, which would otherwise stop the cycle on the held
-    generation the remote has no commitment for.
+    It applies only when `key rotate` left a pending-push marker for exactly the generation this branch
+    holds (its push outcome was never learned), the marker's commit is in the local history, the remote does
+    not publish that generation, and the local branch is not simply behind the remote: either it diverged
+    from the remote, or it is ahead of it (the rotation, perhaps with collect commits on top, was never
+    pushed). Without the marker the held generation stays a hard stop in `verify_commitments`, so a remote
+    that omits or forges a commitment cannot talk this machine out of a key it really published, and every
+    other held generation must be published, so the sweep can only ever drop the marked one. It runs
+    **before** that check, which would otherwise stop the cycle on the held generation.
 
-    * **Hygiene** (its `keys/<n>.wrap` is in the local tree): the generation was never handed to anyone,
-      so the remote tip is adopted, the stray generation leaves the ring and the cycle restarts. Nothing
-      is lost: the apply ledger is saved only on apply, so the live edits are collected again.
+    * **Hygiene** (its `keys/<n>.wrap` is in the local tree): the remote tip is adopted, the stray generation
+      leaves the ring, the marker is cleared and the cycle restarts. Nothing is lost: the apply ledger is
+      saved only on apply, so the live edits are collected again.
     * **Out-of-band** (no wrap): refused. A removal or a compromise may be the reason for the rotation, and
       silently reverting it would leave the removed device with access.
 
     A generation the remote does publish is a real disagreement and is left to the normal checks.
     """
-    local = transport.head()
-    if local is None or local == remote_commit:
+    if not published or marker is None or marker.generation != local_generation:
         return None
-    if transport.is_ancestor(local, remote_commit) or transport.is_ancestor(remote_commit, local):
+    local = transport.head()
+    if local is None or local == remote_commit or transport.is_ancestor(local, remote_commit):
+        return None
+    if not transport.is_ancestor(marker.commit, local):
         return None
     remote_generation = max(published)
     if local_generation <= remote_generation or local_generation in published:
+        return None
+    if any(held != marker.generation and held not in published for held in store.generations()):
+        # Another held generation the remote does not publish is not the marked rotation's doing: the sweep
+        # below would drop it too on the remote's say-so, so leave it to `verify_commitments`.
         return None
     if transport.read_blob(local, wrap_path(local_generation)) is None:
         raise GenerationDivergence(local_generation, remote_generation, out_of_band=True)
     transport.update_ref(branch, remote_commit)
     transport.materialize(remote_commit)
     discard_stray_generations(files=files, store=store, above=remote_generation)
+    rotation_marker.clear()
     return _Publish(
         restart=True,
         remote_commit=remote_commit,
@@ -1959,6 +1987,7 @@ def _publish(
     codec: RingCodec,
     wrapper: GenerationWrap,
     store: KeyStore,
+    rotation_marker: RotationMarkerStore,
     config: SyncConfig,
     branch: str,
     local_commit: str | None,
@@ -1982,13 +2011,20 @@ def _publish(
                 commit=remote_commit,
                 published=published,
             )
+            marker = rotation_marker.load()
+            if marker is not None and _landed(codec, store, marker, published):
+                # The rotation whose outcome was unknown did land, so the marker has done its job.
+                rotation_marker.clear()
+                marker = None
             abandoned = _abandon_unpublished_rotation(
                 transport=transport,
                 files=files,
                 store=store,
+                rotation_marker=rotation_marker,
                 branch=branch,
                 remote_commit=remote_commit,
                 published=published,
+                marker=marker,
                 local_generation=local_manifest.key_generation,
             )
             if abandoned is not None:
@@ -2500,6 +2536,7 @@ def sync(
     decide: Decide | None = None,
     when_tag: WhenTag | None = None,
     profiles: ProfileIndex | None = None,
+    rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
 
@@ -2540,6 +2577,7 @@ def sync(
             live=live,
             ledger_store=ledger_store,
             pending_store=pending_store,
+            rotation_marker=rotation_marker,
             deny=deny,
             apps=apps,
             source=source,
@@ -2592,6 +2630,7 @@ def _cycle(
     live: LiveFiles,
     ledger_store: LedgerStore,
     pending_store: PendingStore,
+    rotation_marker: RotationMarkerStore,
     deny: DenyList,
     apps: AppDetector,
     source: FileIdSource,
@@ -2618,6 +2657,7 @@ def _cycle(
             live=live,
             ledger_store=ledger_store,
             pending_store=pending_store,
+            rotation_marker=rotation_marker,
             deny=deny,
             apps=apps,
             source=source,
@@ -2734,6 +2774,7 @@ def _cycle(
         codec=codec,
         wrapper=wrapper,
         store=store,
+        rotation_marker=rotation_marker,
         config=config,
         branch=branch,
         local_commit=local_commit,

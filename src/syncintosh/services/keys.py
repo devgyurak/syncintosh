@@ -42,6 +42,7 @@ from syncintosh.core.errors import (
 )
 from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest
 from syncintosh.core.manifest_codec import loads_manifest
+from syncintosh.core.models import PendingPush
 from syncintosh.core.ports import (
     GENERATION_KEY_SIZE,
     Cipher,
@@ -54,6 +55,7 @@ from syncintosh.core.ports import (
     RepoFiles,
     Ring,
     RingCodec,
+    RotationMarkerStore,
     SecretScanner,
     SyncLock,
     remote_ref,
@@ -323,6 +325,26 @@ def export_ring(
 RotationMode = Literal["hygiene", "out-of-band"]
 
 
+class _NoRotationMarker:
+    """A marker store that records nothing, so no unpublished rotation is ever recoverable.
+
+    The default for a caller that wires no store: sync then keeps stopping on an unpublished held
+    generation, the fail-closed behavior, rather than discarding one on weaker evidence.
+    """
+
+    def load(self) -> PendingPush | None:
+        return None
+
+    def record(self, marker: PendingPush) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
+NO_ROTATION_MARKER: RotationMarkerStore = _NoRotationMarker()
+
+
 def rotate_repo(
     *,
     transport: GitTransport,
@@ -337,6 +359,7 @@ def rotate_repo(
     remote: str,
     branch: str,
     mode: RotationMode,
+    marker: RotationMarkerStore = NO_ROTATION_MARKER,
 ) -> int:
     """Rotate to a new generation under the lock; return the new generation id.
 
@@ -363,6 +386,7 @@ def rotate_repo(
             remote=remote,
             branch=branch,
             mode=mode,
+            marker=marker,
         )
     finally:
         lock.release()
@@ -395,6 +419,7 @@ def _rotate(
     remote: str,
     branch: str,
     mode: RotationMode,
+    marker: RotationMarkerStore,
 ) -> int:
     if pending.is_pending():
         # Only `resolve` may run while a conflict is unresolved; a rotation would rewind the
@@ -448,6 +473,10 @@ def _rotate(
         # Checked after the sweep, so a stray generation the discard removed is not reported as a
         # held generation the repo does not commit to.
         verify_commitments(codec, store, published)
+    # A marker left by an earlier rotation of unknown outcome points at a generation just swept (or at one
+    # that landed and is now the published one); the rotation below records its own. Cleared only after the
+    # checks above passed: if one raised, the evidence `sync` needs for that earlier rotation must survive.
+    marker.clear()
     new_id = manifest.key_generation + 1
     try:
         generation_key = os.urandom(GENERATION_KEY_SIZE)
@@ -475,11 +504,17 @@ def _rotate(
         files.write(COMMITMENTS_PATH, _commitments_for(store, codec, published))
         commit = transport.commit((head,), f"syncintosh: rotate key generation {new_id}", TRACKED_PATHS)
         transport.update_ref(branch, commit)
+        # Just before the push, inside the discard guard: if this write fails the rotation is still
+        # undone, and once it succeeds an unknown push outcome leaves proof that the generation may
+        # have been published (the marker is cleared as soon as the outcome is known).
+        marker.record(PendingPush.create(generation=new_id, commit=commit))
     except BaseException:
         # A rotation that never landed must leave nothing behind: the not-yet-published generation
         # goes back out of the ring, so it cannot answer `get(n)` for another machine's generation
         # and cannot be handed out by `key export`.
-        _best_effort_discard(transport=transport, files=files, store=store, branch=branch, head=head, new_id=new_id)
+        _best_effort_discard(
+            transport=transport, files=files, store=store, branch=branch, head=head, new_id=new_id, marker=marker
+        )
         raise
     # The push is outside the discard guard: it can fail **after** the server applied it (a lost
     # response, or an interrupt), so an exception here is not proof the commit is absent. An
@@ -488,19 +523,24 @@ def _rotate(
         outcome: PushOutcome | None = transport.push(remote, branch, commit)
     except Exception:
         outcome = None
-    if outcome != "ok":
-        landed = _rotation_landed(transport, remote, branch, commit)
-        if landed is True:
-            return new_id
-        if landed is None:
-            raise GitError(
-                "the push outcome could not be determined; the new generation was kept. Check the "
-                "remote first (`syncintosh doctor` / `syncintosh sync`), and re-run "
-                "`syncintosh key rotate` only if the rotation did not land"
-            )
-        _best_effort_discard(transport=transport, files=files, store=store, branch=branch, head=head, new_id=new_id)
-        raise GitError("the push did not land; the rotation was discarded — re-run `syncintosh key rotate`")
-    return new_id
+    if outcome == "ok":
+        marker.clear()
+        return new_id
+    landed = _rotation_landed(transport, remote, branch, commit)
+    if landed is True:
+        marker.clear()
+        return new_id
+    if landed is None:
+        # The marker stays: it is the evidence `sync` needs to settle this rotation later.
+        raise GitError(
+            "the push outcome could not be determined; the new generation was kept. Check the "
+            "remote first (`syncintosh doctor` / `syncintosh sync`), and re-run "
+            "`syncintosh key rotate` only if the rotation did not land"
+        )
+    _best_effort_discard(
+        transport=transport, files=files, store=store, branch=branch, head=head, new_id=new_id, marker=marker
+    )
+    raise GitError("the push did not land; the rotation was discarded — re-run `syncintosh key rotate`")
 
 
 def _reject_mismatched_held_keys(*, codec: RingCodec, store: KeyStore, published: Mapping[int, str]) -> None:
@@ -539,14 +579,17 @@ def _best_effort_discard(
     branch: str,
     head: str,
     new_id: int,
+    marker: RotationMarkerStore,
 ) -> None:
     """Discard a failed rotation without masking the failure that led here.
 
     A leftover is repaired by the stray-generation sweep on the next `key rotate`, so a cleanup
-    failure must not hide the original error — the same reasoning as `_discard_export`.
+    failure must not hide the original error — the same reasoning as `_discard_export`. The marker is
+    cleared only once the rotation is really gone; if the discard fails, it stays with the rotation.
     """
     try:
         _discard_rotation(transport=transport, files=files, store=store, branch=branch, head=head, new_id=new_id)
+        marker.clear()
     except Exception:
         return
 
