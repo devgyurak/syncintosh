@@ -330,8 +330,9 @@ def yaml_block_authorizations(plaintext: bytes) -> list[tuple[int, int, int]]:
     §3.4).
 
     Not read, and so a limit: a key inside a flow mapping or behind a `?` explicit-key marker, a CR-only
-    line ending, an escaped line break inside a double-quoted value, and a key with a word glued to its
-    front (`my_authorization`), which the same-line rules cannot see either.
+    line ending, an escaped line break inside a double-quoted value, a key with a word glued to its
+    front (`my_authorization`), which the same-line rules cannot see either, and a `-` line indented deeper
+    than its list item (`- Bearer` / `    - abc`), which YAML reads as the item's text but is split here.
     """
     found: list[tuple[int, int, int]] = []
     reported_until = 0
