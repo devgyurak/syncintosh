@@ -28,5 +28,6 @@ POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "zsh": ("1914db8679f8fc449a7c8b0eeb43a67e8ab6c38bd43d44a21acf052bb6bbcec8",),
         "vscode": ("df4dcae1e246dcbc04cf2bdde13dbb167dacd746d8f26729a040ad497356b602",),
         "docker": ("c7551c6c38d3edcecfa3c038eba3a915b9688423d6cc77474a0628f132b55983",),
+        "zed": ("2c519fa0a61f12834beb399fab8f46703716aebc8b53487ad0c2dc6a847cd484",),
     }
 )

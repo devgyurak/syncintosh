@@ -21,10 +21,11 @@ from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.history import POLICY_HISTORY
 from syncintosh.presets.vscode import VSCODE
+from syncintosh.presets.zed import ZED
 from syncintosh.presets.zsh import ZSH
 
 # Every built-in preset, in the order a catalog lists them.
-BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, VSCODE, DOCKER)
+BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, VSCODE, DOCKER, ZED)
 
 
 @dataclass(frozen=True)
