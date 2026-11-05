@@ -48,6 +48,9 @@ DENIED_PATHS: tuple[str, ...] = (
     # secret scan keeps a key out of the repo if a user adds one by hand. A follow-up adds them
     # when a real setup needs it (docs/design/presets.md, the `docker` notes).
     ".docker/contexts/tls",
+    # Zed's Dev build keeps its sign-in token here as plaintext (`zed_credentials_provider.rs`). The `zed`
+    # preset never tracks it; the entry keeps a user-added item or a glob from pulling it in.
+    ".config/zed/development_credentials",
 )
 
 

@@ -1,0 +1,120 @@
+// Zed settings
+//
+// Key names are the ones in Zed's schema (zed-industries/zed dcf3f98c9a3213, `settings_content`).
+// Every credential value is an obvious fake marker.
+{
+  "ui_font_size": 16,
+  "buffer_font_size": 15,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "One Dark",
+  },
+  "vim_mode": true,
+  // Machine-local values: another Mac installs these elsewhere.
+  "node": {
+    "path": "/usr/local/bin/node",
+    "npm_path": "/usr/local/bin/npm",
+  },
+  "journal": {
+    "path": "/Users/example/journal",
+  },
+  "terminal": {
+    "shell": {
+      "program": "/opt/homebrew/bin/zsh",
+    },
+    "env": {
+      "TERMINAL_TOKEN": "FAKE-TERMINAL-ENV-MARKER",
+    },
+    "font_size": 14,
+  },
+  "ssh_connections": [
+    { "host": "builder.example.test" },
+  ],
+  "lsp": {
+    "rust-analyzer": {
+      "binary": {
+        "path": "/Users/example/.cargo/bin/rust-analyzer",
+        "arguments": ["--log-file", "/Users/example/ra.log"],
+        "env": {
+          "RA_TOKEN": "FAKE-LSP-ENV-MARKER",
+        },
+      },
+      "initialization_options": {
+        "check": { "command": "clippy" },
+      },
+    },
+  },
+  // Credentials, under names the user chose.
+  "context_servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "FAKE-MCP-ENV-MARKER",
+      },
+    },
+    "remote-docs": {
+      "url": "https://mcp.example.test/sse",
+      "headers": {
+        "Authorization": "FAKE-MCP-HEADER-MARKER",
+      },
+      "oauth": {
+        "client_id": "fake-client-id",
+        "client_secret": "FAKE-MCP-OAUTH-MARKER",
+      },
+    },
+    "from-extension": {
+      "settings": {
+        "token": "FAKE-MCP-EXTENSION-MARKER",
+      },
+    },
+  },
+  "agent_servers": {
+    "my-agent": {
+      "command": "my-agent",
+      "env": {
+        "AGENT_TOKEN": "FAKE-AGENT-ENV-MARKER",
+      },
+    },
+  },
+  "language_models": {
+    "anthropic": {
+      "custom_headers": {
+        "X-Team": "FAKE-MODEL-HEADER-MARKER",
+      },
+    },
+  },
+  "dev_container_connections": [
+    { "remote_env": { "TOKEN": "FAKE-DEVCONTAINER-MARKER" } },
+  ],
+  // The same credential in each place an override can sit.
+  "macos": {
+    "buffer_font_size": 17,
+    "context_servers": {
+      "mac-only": {
+        "command": "mac-mcp",
+        "env": { "TOKEN": "FAKE-MACOS-ENV-MARKER" },
+      },
+    },
+  },
+  "preview": {
+    "context_servers": {
+      "preview-only": {
+        "command": "preview-mcp",
+        "env": { "TOKEN": "FAKE-PREVIEW-ENV-MARKER" },
+      },
+    },
+  },
+  "profiles": {
+    "work": {
+      "base": "user",
+      "settings": {
+        "terminal": {
+          "env": { "TOKEN": "FAKE-PROFILE-ENV-MARKER" },
+          "font_size": 12,
+        },
+      },
+    },
+  },
+}
