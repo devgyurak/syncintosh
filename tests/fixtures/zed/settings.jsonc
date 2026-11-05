@@ -84,6 +84,28 @@
         "X-Team": "FAKE-MODEL-HEADER-MARKER",
       },
     },
+    "openai_compatible": {
+      "my-gateway": {
+        "api_url": "https://gateway.example.test/v1",
+        "available_models": [
+          { "name": "fake-model", "max_tokens": 8192 },
+        ],
+        "custom_headers": {
+          "X-Api-Key": "fakeopaquetoken0123456789abcdef",
+        },
+      },
+    },
+    "anthropic_compatible": {
+      "my-proxy": {
+        "api_url": "https://proxy.example.test",
+        "available_models": [
+          { "name": "fake-claude", "max_tokens": 8192 },
+        ],
+        "custom_headers": {
+          "X-Api-Key": "fakeopaquetoken9876543210fedcba",
+        },
+      },
+    },
   },
   "dev_container_connections": [
     { "remote_env": { "TOKEN": "FAKE-DEVCONTAINER-MARKER" } },

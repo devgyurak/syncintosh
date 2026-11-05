@@ -232,6 +232,8 @@ CREDENTIAL_MARKERS = [
     pytest.param(b"FAKE-AGENT-ENV-MARKER", id="root-agent-server-env"),
     pytest.param(b"FAKE-MODEL-HEADER-MARKER", id="root-model-custom-headers"),
     pytest.param(b"FAKE-DEVCONTAINER-MARKER", id="root-dev-container"),
+    pytest.param(b"fakeopaquetoken0123456789abcdef", id="root-openai-compatible-headers"),
+    pytest.param(b"fakeopaquetoken9876543210fedcba", id="root-anthropic-compatible-headers"),
     pytest.param(b"FAKE-MACOS-ENV-MARKER", id="macos"),
     pytest.param(b"FAKE-PREVIEW-ENV-MARKER", id="preview"),
     pytest.param(b"FAKE-PROFILE-ENV-MARKER", id="profile-settings"),
@@ -407,3 +409,79 @@ def test_a_theme_symlinked_to_the_dev_builds_sign_in_file_does_not_publish_it(tm
 
     # then — a symlink is reported rather than followed, and the file itself is no preset path
     assert [blob for blob in _decrypted_objects(a) if b"FAKE-DEV-SIGN-IN-MARKER" in blob] == []
+
+
+# --------------------------------------------------------------------------- an item deleted on the other Mac
+
+GITHUB_SERVER = (
+    b'    "github": {\n'
+    b'      "command": "npx",\n'
+    b'      "args": ["-y", "@modelcontextprotocol/server-github"],\n'
+    b'      "env": {\n'
+    b'        "GITHUB_PERSONAL_ACCESS_TOKEN": "FAKE-MCP-ENV-MARKER",\n'
+    b"      },\n"
+    b"    },\n"
+)
+
+
+def _pair_with_local_values(tmp_path, memory_key_store) -> tuple[Machine, Machine]:
+    """Two Macs in sync where B's own file carries every local value the fixture has."""
+    a, b = _pair(tmp_path, memory_key_store, _fixture("settings.jsonc"))
+    _write(b, SETTINGS, _fixture("settings.jsonc"))
+    _run(b)
+    return a, b
+
+
+def test_a_server_deleted_on_the_other_mac_leaves_no_half_server_here(tmp_path, memory_key_store) -> None:
+    # given — both Macs in sync; B's own file holds the local values of every server
+    a, b = _pair_with_local_values(tmp_path, memory_key_store)
+    assert GITHUB_SERVER in _read(a, SETTINGS)
+
+    # when — A deletes the `github` server and syncs, then B syncs
+    _write(a, SETTINGS, _read(a, SETTINGS).replace(GITHUB_SERVER, b""))
+    _run(a)
+    report = _run(b)
+
+    # then — the server is gone from B's file, env included, and the server that stayed keeps its local values
+    merged = _read(b, SETTINGS)
+    assert report.has_conflicts is False
+    assert b'"github"' not in merged
+    assert b"FAKE-MCP-ENV-MARKER" not in merged
+    assert b"FAKE-MCP-HEADER-MARKER" in merged
+    assert b"FAKE-MCP-OAUTH-MARKER" in merged
+
+
+def test_a_profile_deleted_on_the_other_mac_is_gone_here_too(tmp_path, memory_key_store) -> None:
+    # given — `profiles` is the last member of the fixture
+    a, b = _pair_with_local_values(tmp_path, memory_key_store)
+    original = _read(a, SETTINGS)
+    start = original.index(b'  "profiles": {')
+
+    # when — A deletes the profile and syncs, then B syncs
+    _write(a, SETTINGS, original[:start] + b"}\n")
+    _run(a)
+    _run(b)
+
+    # then — B's profile, with the credential and the font size it held, is removed whole
+    merged = _read(b, SETTINGS)
+    assert b'"profiles"' not in merged
+    assert b"FAKE-PROFILE-ENV-MARKER" not in merged
+    assert b'"work"' not in merged
+
+
+def test_a_server_that_exists_only_here_with_only_settings_survives_a_sync(tmp_path, memory_key_store) -> None:
+    # given — B adds an extension server that has only `settings`; it is stripped whole, so it is in no object
+    a, b = _pair_with_local_values(tmp_path, memory_key_store)
+    local = b'    "mine-ext": {\n      "settings": {\n        "token": "FAKE-LOCAL-EXT-MARKER",\n      },\n    },\n'
+    _write(b, SETTINGS, _read(b, SETTINGS).replace(b'    "from-extension": {', local + b'    "from-extension": {'))
+
+    # when — A changes a shared setting and B syncs
+    _write(a, SETTINGS, _read(a, SETTINGS).replace(b'"buffer_font_size": 15', b'"buffer_font_size": 18'))
+    _run(a)
+    _run(b)
+
+    # then — the shared change landed and the local-only server is untouched
+    merged = _read(b, SETTINGS)
+    assert b'"buffer_font_size": 18' in merged
+    assert b"FAKE-LOCAL-EXT-MARKER" in merged
+    assert [blob for blob in _decrypted_objects(b) if b"FAKE-LOCAL-EXT-MARKER" in blob] == []

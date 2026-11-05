@@ -16,7 +16,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
 | `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` · `…/snippets/*.json` · `…/snippets/*.code-snippets` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
-| `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
+| `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` (and `language_models.openai_compatible`/`anthropic_compatible`.`*.custom_headers`) · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
 
 ### `docker` notes
 
@@ -179,8 +179,15 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 - **Excluded**: any object a credential can sit in. `context_servers.<name>` `env`, `headers`, `oauth` (a
   `client_secret`), `settings` (an extension MCP server's free-form JSON, where a token goes) and the legacy
   `command.env`; `agent_servers.*.env`, `lsp.*.binary.env`, `dap.*.env`, `terminal.env`;
-  `language_models.*.custom_headers` and the unread plaintext slot `language_models.lmstudio.api_key`;
+  `language_models.*.custom_headers` (four levels for `openai_compatible` and `anthropic_compatible`:
+  `language_models.<kind>.<name>.custom_headers`, because those two are maps keyed by a name the user chose, so
+  both get their own rule) and the unread plaintext slot `language_models.lmstudio.api_key`;
   `dev_container_connections` whole (an array whose elements carry `remote_env`).
+- **Two consequences of excluding whole objects.** An extension MCP server that has only `settings` is stripped
+  whole, so *the server's existence* is not carried to another Mac. And when another Mac deletes a server or a
+  profile, this Mac's apply removes that item's local values (its `env`, say) with it: a user-named item the merge
+  deleted is not left behind as a server with no `command` (`02-base-and-merge.md`, "Projection"). Stripped values
+  are never in a commit, so a restore point does not hold them.
 - **Synced, left to the secret scan**: `lsp.*.initialization_options`, `lsp.*.settings`, `proxy` (the scan knows
   `scheme://user:pass@`), `context_servers.*.command` and `.args`. Also synced, and not yet reviewed against the pinned schema (a follow-up):
   `context_servers.*.url`, `agent_servers.*.command`/`args`, and the `api_url` of `language_models` and

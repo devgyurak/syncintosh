@@ -80,6 +80,12 @@ def test_a_credential_is_cut_under_each_of_the_eight_literal_prefixes(prefix) ->
     layer = {
         "context_servers": {"s": {"command": "x", "env": {"K": "FAKE-SECRET"}}},
         "terminal": {"env": {"K": "FAKE"}},
+        "language_models": {
+            "openai_compatible": {"gw": {"api_url": "https://x.test", "custom_headers": {"X-Api-Key": "FAKE-OPAQUE"}}},
+            "anthropic_compatible": {
+                "px": {"api_url": "https://y.test", "custom_headers": {"X-Api-Key": "FAKE-OPAQUE"}}
+            },
+        },
     }
     document = {prefix[0]: layer} if prefix else layer
 
@@ -92,7 +98,14 @@ def test_a_credential_is_cut_under_each_of_the_eight_literal_prefixes(prefix) ->
 
 def test_a_credential_is_cut_under_a_profile() -> None:
     # given
-    document = {"profiles": {"work": {"settings": {"terminal": {"env": {"K": "FAKE-SECRET"}}}}}}
+    settings = {
+        "terminal": {"env": {"K": "FAKE-SECRET"}},
+        "language_models": {
+            "openai_compatible": {"gw": {"custom_headers": {"X-Api-Key": "FAKE-OPAQUE"}}},
+            "anthropic_compatible": {"px": {"custom_headers": {"X-Api-Key": "FAKE-OPAQUE"}}},
+        },
+    }
+    document = {"profiles": {"work": {"settings": settings}}}
 
     # when
     sealed = project_text(ADAPTER, json.dumps(document), SETTINGS)
@@ -163,6 +176,9 @@ def test_the_settings_fixture_seals_no_credential_marker_at_any_layer() -> None:
     markers = [word for word in text.replace('"', " ").split() if word.startswith("FAKE-") and word.endswith("MARKER")]
     assert len(markers) >= 10
     assert [marker for marker in markers if marker in sealed] == []
+    # the opaque header values are not scan-shaped, so only the exclusion keeps them out
+    assert "fakeopaquetoken" not in sealed
+    assert "https://gateway.example.test/v1" in sealed
 
 
 def test_the_settings_fixture_keeps_what_is_synced() -> None:
