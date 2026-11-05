@@ -18,8 +18,9 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+from syncintosh.core.envelope_header import KEY_ID_SIZE
 from syncintosh.core.errors import MasterKeyUnwrapError
-from syncintosh.crypto.primitives import KEY_ID_SIZE, KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
+from syncintosh.crypto.primitives import KEY_SIZE, NONCE_SIZE, TAG_SIZE, be32, from_be32, length_prefixed
 
 MAGIC = b"SNTR"
 FORMAT_VERSION = 1
