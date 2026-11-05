@@ -421,6 +421,13 @@ def _rotate(
                 raise GitError("the local branch and the remote have diverged; run `syncintosh sync` first")
             # Otherwise the local branch is behind, or ahead only by a generation the remote does
             # not have — a rotation that never landed. Either way, adopt the published tip.
+            #
+            # Rewinding an unpushed rotation together with a collect commit stacked on it loses no
+            # edit: a collect commit holds nothing but what the live files already say, the apply
+            # ledger is saved only after an apply (so the next `sync` still sees every edit as
+            # changed), and the next `sync` collects it again on the adopted generation. The §3.5 backup
+            # is the collect commit made before an apply; no apply happened on top of the rewound one,
+            # and the next `sync` makes its own.
         # Move to the published tip: a fast-forward when behind, a discard of a stale collect or an
         # unlanded rotation when ahead (the stray-generation sweep below removes its generation).
         transport.update_ref(branch, remote_commit)
