@@ -368,6 +368,20 @@ def rotate_repo(
         lock.release()
 
 
+def discard_stray_generations(*, files: RepoFiles, store: KeyStore, above: int) -> None:
+    """Drop every held generation newer than `above`, and its wrap from the working tree.
+
+    A held generation newer than the published one can only be a rotation that never landed. It must
+    leave the ring: the abandoned `KG_n` would otherwise answer `get(n)` for another machine's genuine
+    generation `n`, and every object sealed under that one would fail authentication. Its wrap must
+    go with it, or the next commit would publish the abandoned generation
+    (``docs/design/05-key-generations.md``, "Rotation is exclusive").
+    """
+    for stray in [generation for generation in store.generations() if generation > above]:
+        files.delete(wrap_path(stray))
+        store.drop(stray)
+
+
 def _rotate(
     *,
     transport: GitTransport,
@@ -429,12 +443,7 @@ def _rotate(
     if head is None:
         raise GitError("there is nothing to rotate; run `syncintosh init` first")
     manifest = _read_manifest(transport, cipher, head)
-    # Any held generation newer than the published one can only be a rotation that never landed.
-    # Its wrap must go with it: leaving it in the working tree would publish an abandoned
-    # generation on the next commit (``docs/design/05-key-generations.md``).
-    for stray in [generation for generation in store.generations() if generation > manifest.key_generation]:
-        files.delete(wrap_path(stray))
-        store.drop(stray)
+    discard_stray_generations(files=files, store=store, above=manifest.key_generation)
     if remote_commit is not None:
         # Checked after the sweep, so a stray generation the discard removed is not reported as a
         # held generation the repo does not commit to.

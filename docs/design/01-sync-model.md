@@ -30,6 +30,17 @@ is a single blob, so *any* change collides). Instead sync decrypts both sides, m
 | 13 | **retry** | On a non-fast-forward push, discard the unpushed merge commit, re-fetch, and redo 7–12. The step-5 commit is kept. |
 | 14 | **apply** | Write the merged records into the live files — **after** the push and only after the per-file check below — then settle the apply ledger for every record ([below](#change-detection-is-against-the-apply-ledger)). |
 
+**An unpublished local rotation.** A rotation that never reached the remote (its push outcome could not be
+determined) leaves a generation `n+1` in the ring that the remote does not publish. If the remote then moved
+on at generation `n` (a real divergence), step 7 checks this **before** the commitments check, which would
+otherwise stop the cycle on the unpublished generation. A **hygiene** rotation (its `keys/<n+1>.wrap` is in
+the local tree) is discarded: the remote tip is adopted, the stray generation and its wrap leave the ring, the
+cycle restarts, and the report says so. No data is lost, because the apply ledger is saved only on apply, so
+the live edits are collected again on the new tip. An **out-of-band** rotation is never discarded by sync; it
+stops with `GenerationDivergence` and asks for `syncintosh key rotate --out-of-band` again, since reverting a
+device removal or key replacement silently would leave the removed device with access
+([05-key-generations.md](05-key-generations.md)).
+
 **Apply runs after the push, never before.** The remote is the source of truth: if the push
 fails, no live file has been touched and the step-5 commit still holds the collected state.
 

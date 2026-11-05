@@ -24,6 +24,7 @@ from syncintosh.core.errors import (
     CommitmentsCorrupt,
     ConflictsNotCovered,
     ContentDigestMismatch,
+    GenerationDivergence,
     GitError,
     KeyGenerationMismatch,
     PendingConflict,
@@ -2164,3 +2165,75 @@ def test_a_schema_1_repo_is_rewritten_once_and_its_objects_are_left_alone(tmp_pa
     assert _git(a.repo, "rev-list", "--count", f"{before}..HEAD").strip() == "1"
     assert _published_manifest(a).schema == MANIFEST_SCHEMA
     assert _git(a.repo, "ls-tree", "-r", "HEAD", "--", "objects") == objects_before
+
+
+# ------------------------------------------------------------ an unpublished local rotation vs. a moved remote
+
+
+class _StrandedRotationTransport(GitCLITransport):
+    """A transport whose rotation push never reaches the remote and whose later fetches fail.
+
+    Rotation cannot prove the push absent, so it keeps the new generation: the machine is left holding a
+    rotation the remote has never seen (``docs/design/05-key-generations.md``).
+    """
+
+    def __init__(self, workdir: Path) -> None:
+        super().__init__(workdir)
+        self._fetches = 0
+
+    def fetch(self, remote: str, branch: str) -> None:
+        self._fetches += 1
+        if self._fetches > 1:
+            raise GitError("remote unreachable")
+        super().fetch(remote, branch)
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        raise GitError("connection lost before the server answered")
+
+
+def _strand_a_rotation(machine: Machine, *, out_of_band: bool) -> None:
+    with pytest.raises(GitError, match="outcome could not be determined"):
+        _rotate(machine, out_of_band=out_of_band, transport=_StrandedRotationTransport(machine.repo))
+
+
+def _machine_a_stranded_while_b_publishes(tmp_path, make_store, *, out_of_band: bool) -> tuple[Machine, Machine]:
+    """A holds an unpublished generation-2 rotation while B publishes a change on generation 1."""
+    a, b, _ = _pair(tmp_path, make_store)
+    _strand_a_rotation(a, out_of_band=out_of_band)
+    _write_live(b, b"one\ntwo\nthree\nFROM B\n")
+    _run(b)
+    return a, b
+
+
+def test_sync_drops_an_unpublished_hygiene_rotation_and_still_publishes_the_local_edit(
+    tmp_path, memory_key_store
+) -> None:
+    # given — A's rotation never reached the remote, B published an edit, and A has its own unsynced edit
+    a, b = _machine_a_stranded_while_b_publishes(tmp_path, memory_key_store, out_of_band=False)
+    _write_live(a, b"FROM A\none\ntwo\nthree\n")
+
+    # when
+    report = _run(a)
+
+    # then — the rotation is discarded and the cycle says so
+    assert any("generation 2" in note and "key rotate --hygiene" in note for note in report.notes)
+    assert a.store.generations() == (1,)
+    assert wrap_path(2) not in _git(a.repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    # and nothing was lost: the remote carries both edits, and B receives A's
+    _run(b)
+    assert _read_live(a) == _read_live(b)
+    assert (_read_live(a) or b"").startswith(b"FROM A\n")
+    assert b"FROM B" in (_read_live(a) or b"")
+    assert loads_commitments(GitCLITransport(a.repo).read_blob("HEAD", COMMITMENTS_PATH) or b"").keys() == {1}
+
+
+def test_sync_stops_on_an_unpublished_out_of_band_rotation_without_discarding_it(tmp_path, memory_key_store) -> None:
+    # given — A's out-of-band rotation never reached the remote, and B published an edit
+    a, _ = _machine_a_stranded_while_b_publishes(tmp_path, memory_key_store, out_of_band=True)
+    head_before = _git(a.repo, "rev-parse", "HEAD").strip()
+
+    # when & then — sync will not silently undo a removal or key replacement
+    with pytest.raises(GenerationDivergence, match="--out-of-band"):
+        _run(a)
+    assert a.store.get(2) is not None
+    assert _git(a.repo, "rev-parse", "HEAD").strip() == head_before

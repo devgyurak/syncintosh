@@ -132,6 +132,15 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
   there is worse than untidy: the abandoned `KG_n` would answer `get(n)` for the *other*
   machine's genuine generation `n`, and every one of its objects would fail authentication as
   if it had been tampered with.
+- **An unpublished rotation is repaired by `sync` only when it is hygiene.** When the local branch diverged
+  from the remote, holds a higher generation, and the remote's `keys/commitments.json` has no entry for it,
+  that generation never left this machine. If its `keys/<n>.wrap` is in the local tree (hygiene), `sync`
+  adopts the remote tip, removes the stray generation and its wrap from the ring (the same sweep as
+  `key rotate`, for the same reason as above), restarts the cycle, and notes that the rotation was
+  discarded and can be repeated with `syncintosh key rotate --hygiene`. An **out-of-band** rotation (no wrap)
+  is never discarded by a daemon: it may be the removal of a device or the answer to a leaked key, and undoing
+  it would leave that access in place. `sync` stops and asks for `syncintosh key rotate --out-of-band`
+  again. A generation the remote *does* publish is a genuine disagreement and keeps failing as before.
 - Two different keys for one generation id is a **hard error**, not something to reconcile:
   the machines disagree about a key that published objects are already bound to.
 

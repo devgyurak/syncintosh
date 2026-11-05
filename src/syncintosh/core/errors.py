@@ -127,12 +127,23 @@ class GenerationDivergence(ManifestError):
     """`local` and `remote` were written under different key generations.
 
     Rotation is fast-forward only and is never merged (``docs/design/05-key-generations.md``),
-    so two sides on different generations are not reconciled here.
+    so two sides on different generations are not reconciled here. `out_of_band` marks a local
+    rotation that was never published and that sync must not discard on its own: a device removal
+    or a key replacement would silently be undone, and a removed device would keep its access.
     """
 
-    def __init__(self, local_generation: int, remote_generation: int) -> None:
+    def __init__(self, local_generation: int, remote_generation: int, *, out_of_band: bool = False) -> None:
         self.local_generation = local_generation
         self.remote_generation = remote_generation
+        if out_of_band:
+            super().__init__(
+                f"the remote publishes no commitment for local key generation {local_generation}, which has no "
+                f"wrap in the repo (an out-of-band rotation), and the remote has moved on at generation "
+                f"{remote_generation}; sync will not discard it, because that could undo a device removal or a "
+                "key replacement. If it was never published, run `syncintosh key rotate --out-of-band` again — "
+                "it adopts the remote and rotates anew"
+            )
+            return
         super().__init__(
             f"local key generation {local_generation} diverges from remote {remote_generation}; "
             "rotation is fast-forward only and is never merged. If a local rotation was never "

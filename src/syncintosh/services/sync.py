@@ -40,6 +40,7 @@ from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
     ContentDigestMismatch,
     ContentParseError,
+    GenerationDivergence,
     GitError,
     IgnoreListMalformed,
     PendingConflict,
@@ -88,7 +89,7 @@ from syncintosh.core.record_merge import (
     merge_manifests,
     record_path_of,
 )
-from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes
+from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path, plan_writes, wrap_path
 from syncintosh.core.resolution import (
     Choice,
     CollisionChoice,
@@ -103,7 +104,7 @@ from syncintosh.core.resolution import (
     fingerprint,
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
-from syncintosh.services.keys import absorb_wraps, read_commitments, verify_commitments
+from syncintosh.services.keys import absorb_wraps, discard_stray_generations, read_commitments, verify_commitments
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved, open_live_paths, profile_directory
 from syncintosh.services.repo_writer import write_repo
@@ -1892,6 +1893,59 @@ class _Publish:
     # remote tip and the caller must re-collect on the new generation
     # (``docs/design/05-key-generations.md``).
     restart: bool = False
+    # A fixed sentence the report must carry across the restart (an unpublished rotation was discarded).
+    note: str | None = None
+
+
+# Shown when a hygiene rotation that never reached the remote is dropped; the rotation can simply be repeated.
+ABANDONED_ROTATION_NOTE = (
+    "Discarded the unpublished key rotation to generation {generation}, because the remote moved on without it. "
+    "Run `syncintosh key rotate --hygiene` again if you still want to rotate."
+)
+
+
+def _abandon_unpublished_rotation(
+    *,
+    transport: PolicyView,
+    files: RepoFiles,
+    store: KeyStore,
+    branch: str,
+    remote_commit: str,
+    published: Mapping[int, str],
+    local_generation: int,
+) -> _Publish | None:
+    """Drop a local-only hygiene rotation the remote diverged from; `None` when this is not that case.
+
+    The case is a local branch that diverged from the remote at a higher generation the remote does not
+    publish. It runs **before** `verify_commitments`, which would otherwise stop the cycle on the held
+    generation the remote has no commitment for.
+
+    * **Hygiene** (its `keys/<n>.wrap` is in the local tree): the generation was never handed to anyone,
+      so the remote tip is adopted, the stray generation leaves the ring and the cycle restarts. Nothing
+      is lost: the apply ledger is saved only on apply, so the live edits are collected again.
+    * **Out-of-band** (no wrap): refused. A removal or a compromise may be the reason for the rotation, and
+      silently reverting it would leave the removed device with access.
+
+    A generation the remote does publish is a real disagreement and is left to the normal checks.
+    """
+    local = transport.head()
+    if local is None or local == remote_commit:
+        return None
+    if transport.is_ancestor(local, remote_commit) or transport.is_ancestor(remote_commit, local):
+        return None
+    remote_generation = max(published)
+    if local_generation <= remote_generation or local_generation in published:
+        return None
+    if transport.read_blob(local, wrap_path(local_generation)) is None:
+        raise GenerationDivergence(local_generation, remote_generation, out_of_band=True)
+    transport.update_ref(branch, remote_commit)
+    transport.materialize(remote_commit)
+    discard_stray_generations(files=files, store=store, above=remote_generation)
+    return _Publish(
+        restart=True,
+        remote_commit=remote_commit,
+        note=ABANDONED_ROTATION_NOTE.format(generation=local_generation),
+    )
 
 
 def _publish(
@@ -1928,6 +1982,17 @@ def _publish(
                 commit=remote_commit,
                 published=published,
             )
+            abandoned = _abandon_unpublished_rotation(
+                transport=transport,
+                files=files,
+                store=store,
+                branch=branch,
+                remote_commit=remote_commit,
+                published=published,
+                local_generation=local_manifest.key_generation,
+            )
+            if abandoned is not None:
+                return abandoned
             verify_commitments(codec, store, published)
             # The policy gate, before any classification: a fast-forward would apply what a newer build wrote
             # just as a merge would. After the wraps are absorbed, because reading needs the remote's generation
@@ -2537,8 +2602,9 @@ def _cycle(
     resolution: Resolution,
     paths: LivePaths,
     _restarted: bool = False,
+    _carried_notes: tuple[str, ...] = (),
 ) -> SyncReport:
-    def again(next_resolution: Resolution, restarted: bool) -> SyncReport:
+    def again(next_resolution: Resolution, restarted: bool, carried: tuple[str, ...] = _carried_notes) -> SyncReport:
         return _cycle(
             transport=transport,
             files=files,
@@ -2562,6 +2628,7 @@ def _cycle(
             resolution=next_resolution,
             paths=paths,
             _restarted=restarted,
+            _carried_notes=carried,
         )
 
     ledger = dict(ledger_store.load())
@@ -2595,7 +2662,7 @@ def _cycle(
             skipped=tuple(collected.skipped),
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
-            notes=(*presets.notes(), *transport.notes()),
+            notes=(*_carried_notes, *presets.notes(), *transport.notes()),
         )
     if collected.stale:
         found = _merge_stale(
@@ -2679,7 +2746,7 @@ def _cycle(
         # so a second request means the remote rotated again mid-cycle.
         if _restarted:
             raise GitError("the remote rotated again while this machine adopted it; re-run `syncintosh sync`")
-        return again(resolution, True)
+        return again(resolution, True, (*_carried_notes, *(() if outcome.note is None else (outcome.note,))))
     if outcome.conflicts:
         answer = _answer(outcome.views, resolution)
         if answer is not None:
@@ -2761,7 +2828,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
-        notes=(*presets.notes(), *transport.notes()),
+        notes=(*_carried_notes, *presets.notes(), *transport.notes()),
     )
 
 
