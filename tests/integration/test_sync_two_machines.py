@@ -510,6 +510,21 @@ def test_a_secret_pattern_is_refused_before_encryption(tmp_path, memory_key_stor
     assert FileRepo(a.repo).list_paths("objects") == ()
 
 
+def test_a_yaml_block_scalar_authorization_is_refused_before_encryption(tmp_path, memory_key_store) -> None:
+    # given — an item declared as `format: yaml` whose header value sits on continuation lines
+    a = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    yaml_path = ".config/app/settings.yaml"
+    _initialize(a, path=yaml_path, fmt="yaml")
+    _write_file(a, yaml_path, b"headers:\n  Authorization: >\n    Bearer\n    eyJhbGciOiJIUzI1NiJ9abcdef\n")
+
+    # when & then — refused at the encrypt boundary, naming the file and never the value
+    with pytest.raises(SecretScanError) as refusal:
+        _run(a)
+    assert yaml_path in str(refusal.value)
+    assert "eyJhbGci" not in str(refusal.value)
+    assert FileRepo(a.repo).list_paths("objects") == ()
+
+
 def test_a_denylisted_path_is_never_collected(tmp_path, memory_key_store) -> None:
     # given — an item pointing at a private key
     a = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
