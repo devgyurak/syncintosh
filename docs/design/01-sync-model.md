@@ -251,6 +251,15 @@ tell another what not to scan (``AGENTS.md`` §3.3).
   and step 5 commits nothing.
 - **The backup commit is the HEAD before apply** — the step-5 collect commit — **not a fresh
   commit on every sync.** This is what §3.5 means; it avoids empty-commit churn.
+- **The restore point is found per file.** The backup commit holds what collect saw, but a file an
+  earlier cycle published and this machine never applied has its bytes only in the ledger's commit
+  (`entry.commit`). Before apply overwrites a file it asks the cycle's commit whether it holds the file's
+  current projected bytes, then the ledger's commit; the first that does is that file's restore point, and
+  the report names it. An overwrite no commit holds is refused (fail closed), on every sync, not only one a
+  model's proposal settled. A file with carried keys is compared through the ledger's object, as the records
+  were projected. No commit is made for this. Two cases are outside it: a first-sight record applied with
+  `--adopt remote` (its bytes are in no commit yet), and a local edit over a stale baseline, whose bytes the
+  cycle merges into the published result instead of storing.
 - **An object whose plaintext did not change is not rewritten.** A random nonce (§3.1) means
   rewriting an object always changes its bytes, so an unconditional write would rewrite
   every ciphertext on every sync and keep git history permanently dirty. Changed-ness is

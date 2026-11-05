@@ -119,11 +119,11 @@ worked from, the collect commit if the cycle wrote one, or the HEAD it kept othe
 takes that restore point as a required keyword, so no write can be requested without naming it.
 The report and the CLI show it.
 
-**A run that a model's proposal settled is guarded.** Every file that run would overwrite must have
-its current content in the restore point: the projected bytes must match the record the restore point
-holds for that file (`_in_restore_point`). A file that does not match, or cannot be projected, is
-refused and left as it is. So for a model's change, the overwritten bytes are always recoverable from
-the restore point. A run without a proposal is not guarded by this rule (see *Known limits*).
+**Every sync is guarded, not only a model's.** Each file an apply would overwrite must have its current
+content in some commit: the projected bytes must match the record that commit holds for the file
+(`_restore_point`). The cycle's commit is asked first, then the ledger's commit, for a file published
+earlier and never applied; the report names the one that holds it, per file. A file no commit holds, or
+that cannot be projected, is refused and left as it is. See *Known limits* for what is not covered yet.
 
 ## The endpoint
 
@@ -154,9 +154,9 @@ unknown key is refused, so a typo cannot silently disable a guard.
 
 ## Known limits
 
-- **Overwrites outside a proposal run are not guarded.** An `--adopt remote` overwrite, and a file an
-  earlier cycle published but never applied, can replace bytes that only an older commit holds. A
-  plain sync does not check this. It is a separate issue, not part of the model feature.
+- **An `--adopt remote` overwrite of a first-sight file is not guarded yet.** Its bytes are in no commit,
+  so the check does not apply to it. A local edit over a stale baseline is merged into the published
+  result rather than stored, so it is not guarded either.
 - **Values outside the masking rules are sent.** See *What leaves the machine*. Accepted: masking every
   value would leave the model nothing to merge. This includes a nested key that is not on the list.
 - **`auto_apply` is also consent to a change of executable paths.** A VS Code setting such as

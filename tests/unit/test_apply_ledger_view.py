@@ -21,7 +21,7 @@ from syncintosh.core.ports import Cipher, GitTransport
 from syncintosh.core.repo import object_path
 from syncintosh.presets import BuiltinCatalog, vscode
 from syncintosh.services.policy_gate import PolicyView
-from syncintosh.services.sync import NO_APP_INFO, Backup, _apply, _Presets
+from syncintosh.services.sync import NO_APP_INFO, Backup, RestorePoint, _apply, _Presets
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
 
@@ -51,8 +51,8 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def test_a_remote_change_to_a_carried_key_does_not_abort_a_file_collect_never_saw(tmp_path) -> None:
-    # given — the ledger accounts for OLD; the repo moved on to NEW in the tab size *and* the ignored font size;
+def _apply_over_carried_file(tmp_path, held_sha: str):
+    # the ledger accounts for OLD; the repo moved on to NEW in the tab size *and* the ignored font size;
     # this machine edited neither tab size nor the ignored key's meaning, only holds its own font size
     target = tmp_path / vscode.SETTINGS
     target.parent.mkdir(parents=True)
@@ -74,7 +74,6 @@ def test_a_remote_change_to_a_carried_key_does_not_abort_a_file_collect_never_sa
         items=(LocalItem.create(path=vscode.SETTINGS, preset="vscode", scope="common", format="jsonc"),),
     )
 
-    # when
     applied = _apply(
         transport=PolicyView(
             cast(GitTransport, _Transport({"old": OLD, "new": NEW})),
@@ -96,9 +95,43 @@ def test_a_remote_change_to_a_carried_key_does_not_abort_a_file_collect_never_sa
         config=config,
         home=str(tmp_path),
         adopt=None,
-        backup=Backup.create("new"),
+        backup=Backup.create(
+            "new",
+            records_at={
+                "old": {
+                    FILE_ID: ManifestRecord.create(
+                        file_id=FILE_ID,
+                        path=vscode.SETTINGS,
+                        preset="vscode",
+                        scope="common",
+                        format="jsonc",
+                        sha256=held_sha,
+                    )
+                }
+            }.get,
+        ),
     )
 
-    # then — the remote tab size is applied and this machine keeps its font size
-    assert (applied.aborted, applied.applied) == ((), (vscode.SETTINGS,))
+    return applied, target
+
+
+def test_a_remote_change_to_a_carried_key_does_not_abort_a_file_collect_never_saw(tmp_path) -> None:
+    # given — the ledger's commit holds the file as the ledger accounts for it
+    # when
+    applied, target = _apply_over_carried_file(tmp_path, _sha(OLD))
+
+    # then — the remote tab size is applied, this machine keeps its font size, and the ledger's commit is the
+    # restore point even though the file carries a key (the projection is measured against the ledger's object)
+    assert (applied.aborted, applied.applied, applied.refused) == ((), (vscode.SETTINGS,), ())
+    assert applied.restore_points == (RestorePoint(vscode.SETTINGS, "old"),)
     assert json.loads(target.read_text(encoding="utf-8")) == {"editor.tabSize": 2, "editor.fontSize": 99}
+
+
+def test_a_file_whose_bytes_no_commit_holds_is_not_overwritten(tmp_path) -> None:
+    # given — the ledger's commit holds something else than what is on disk
+    # when
+    applied, target = _apply_over_carried_file(tmp_path, _sha(NEW))
+
+    # then — refused, and the live file is untouched
+    assert (applied.applied, [refusal.path for refusal in applied.refused]) == ((), [vscode.SETTINGS])
+    assert json.loads(target.read_text(encoding="utf-8")) == {"editor.tabSize": 1, "editor.fontSize": 99}

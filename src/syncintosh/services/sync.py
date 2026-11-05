@@ -250,26 +250,38 @@ class _Presets:
         return self.adapters.get(fmt)
 
 
+# Reads a commit's manifest records, or `None` when that commit has no manifest. Injected so `Backup` does
+# no I/O of its own (``AGENTS.md`` §2.6); the caller memoizes it, since every overwritten file asks.
+RecordReader = Callable[[str], Mapping[str, ManifestRecord] | None]
+
+
 @dataclass(frozen=True)
 class Backup:
     """The commit this sync's apply works from: the collect commit when the cycle wrote one, else HEAD.
 
     `_apply` takes a `Backup` as a required keyword, so no write can be requested without naming
-    this commit. It does **not** guarantee that every overwritten file's previous bytes are in
-    that commit: an `--adopt remote` overwrite, or a file an earlier cycle published but never applied,
-    can replace bytes that only an older commit (the ledger's) holds. That gap is tracked separately.
-    `commit` is `None` only when nothing has been committed yet; `_apply` then refuses to overwrite
-    a file that exists. `records` is the restore point's manifest records, when there is a commit: an
-    apply that a model proposed checks each overwritten file against them (`_in_restore_point`).
+    this commit. The commit alone does not hold every overwritten file's previous bytes: a file an earlier
+    cycle published but never applied has its bytes only in the ledger's commit. `_apply` therefore finds a
+    restore point **per file** (`_restore_point`) and refuses an overwrite that no commit holds.
+    `commit` is `None` only when nothing has been committed yet; `_apply` then refuses to overwrite a file
+    that exists. `records_at` reads the manifest records of any commit it is asked about.
     """
 
     commit: str | None
-    records: Mapping[str, ManifestRecord] | None = field(default=None, repr=False)
+    records_at: RecordReader | None = field(default=None, repr=False)
 
     @classmethod
-    def create(cls, commit: str | None, records: Mapping[str, ManifestRecord] | None = None) -> Backup:
+    def create(cls, commit: str | None, records_at: RecordReader | None = None) -> Backup:
         """Name the restore point. Called only once the cycle has its collect commit, or its HEAD."""
-        return cls(commit=commit, records=records)
+        return cls(commit=commit, records_at=records_at)
+
+
+@dataclass(frozen=True)
+class RestorePoint:
+    """The commit one overwritten file's previous bytes can be restored from."""
+
+    path: str
+    commit: str
 
 
 @dataclass(frozen=True)
@@ -277,8 +289,11 @@ class SyncReport:
     """What one cycle did, for the CLI to render."""
 
     published_commit: str | None = None
-    # The restore point this sync's apply worked from: the commit its overwrites can be restored from.
+    # The commit this cycle's apply worked from: the collect commit, or the HEAD it kept.
     backup_commit: str | None = None
+    # Per overwritten file, the commit its previous bytes are in. Usually `backup_commit`; a file published
+    # earlier but never applied is restored from the ledger's commit instead.
+    restore_points: tuple[RestorePoint, ...] = ()
     created: tuple[str, ...] = ()
     collected: tuple[str, ...] = ()
     applied: tuple[str, ...] = ()
@@ -305,6 +320,23 @@ class SyncReport:
     def needs_adopt(self) -> bool:
         """True when a first-sight record needs `--adopt local|remote`."""
         return bool(self.first_sight)
+
+    @property
+    def restore_groups(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """`(commit, paths)` for what to restore from, in first-seen order; `paths` is empty for the one-commit case.
+
+        A run whose overwrites all share one commit (or that overwrote nothing, only created files) reports that
+        commit alone, as before; only a run with several commits names the files under each.
+        """
+        if not self.applied:
+            return ()
+        by_commit: dict[str, list[str]] = {}
+        for point in self.restore_points:
+            by_commit.setdefault(point.commit, []).append(point.path)
+        if len(by_commit) > 1:
+            return tuple((commit, tuple(paths)) for commit, paths in by_commit.items())
+        only = next(iter(by_commit), self.backup_commit)
+        return () if only is None else ((only, ()),)
 
 
 @dataclass
@@ -674,9 +706,7 @@ _APP_NOT_INSTALLED = "the app is not installed on this machine"
 _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 _NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
-_NOT_IN_RESTORE_POINT = (
-    "this run applies a model's proposal, and the file's current content is not in the restore point"
-)
+_NOT_IN_RESTORE_POINT = "the file's current content is in no commit it could be restored from"
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -2120,6 +2150,7 @@ class _Applied:
     """What step 14 did with each record, by outcome."""
 
     backup: str | None = None
+    restore_points: tuple[RestorePoint, ...] = ()
     applied: tuple[str, ...] = ()
     deferred: tuple[Deferral, ...] = ()
     symlinks: tuple[str, ...] = ()
@@ -2184,7 +2215,7 @@ def _apply(
     home: str,
     adopt: AdoptChoice | None,
     backup: Backup,
-    guard_overwrites: bool = False,
+    folded: frozenset[str] = frozenset(),
     paths: LivePaths | None = None,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
@@ -2203,9 +2234,14 @@ def _apply(
     the target stays under `$HOME` (resolving the parent), is one this machine's local allowlist
     already tracks, and is one the local catalog lets that preset name
     (``docs/design/03-manifest.md``). A refusal is reported, never silent.
+
+    An overwrite must replace only bytes some commit holds (`_restore_point`), or the write is refused. `folded`
+    names the files whose live bytes this cycle merged into the published result — a local edit over a stale
+    baseline — which no commit holds verbatim but whose content the result carries.
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     applied: list[str] = []
+    restore_points: list[RestorePoint] = []
     deferred: list[Deferral] = []
     symlinks: list[str] = []
     aborted: list[str] = []
@@ -2294,10 +2330,11 @@ def _apply(
         # With no collect baseline, `_decision` compares the view with the ledger digest. That digest is of the
         # ledger's object, so a file with carried keys is measured against that object here, not the one about
         # to be written: a remote change to a carried key would otherwise read as an edit and abort the write.
+        # The restore-point check below needs the same view even when collect did read the file, because the
+        # records a commit holds were projected against the ledger's object too.
         ledger_view = live_view
         if (
-            collect_baseline is None
-            and entry is not None
+            entry is not None
             and live_bytes is not None
             and stripped_policy is not None
             and presets.carried(stripped_policy)
@@ -2357,19 +2394,24 @@ def _apply(
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
-        # A proposal settled this run, so an overwrite must replace only what the restore point holds.
         if (
-            guard_overwrites
-            and live_bytes is not None
+            live_bytes is not None
             and live_bytes != data
-            and not _in_restore_point(backup, file_id, live_view)
+            and file_id not in folded
+            and not (entry is None or entry.suppressed)
         ):
-            refused.append(Refusal(record.path, _NOT_IN_RESTORE_POINT))
-            continue
+            # A first-sight or suppressed record is written here only on `--adopt remote`, and its bytes are in
+            # no commit yet; that gap is closed by sealing them first (the restore ref), not by this check.
+            held_in = _restore_point(backup, file_id, ledger_view, entry.commit if entry is not None else None)
+            if held_in is None:
+                refused.append(Refusal(record.path, _NOT_IN_RESTORE_POINT))
+                continue
+            restore_points.append(RestorePoint(record.path, held_in))
         live.write(live_path, data)
         applied.append(record.path)
     return _Applied(
         backup=backup.commit,
+        restore_points=tuple(restore_points),
         applied=tuple(applied),
         deferred=tuple(deferred),
         symlinks=tuple(symlinks),
@@ -2380,16 +2422,25 @@ def _apply(
     )
 
 
-def _in_restore_point(backup: Backup, file_id: str, live_view: bytes | None) -> bool:
-    """True when the restore point holds this file's current projected content, byte for byte.
+def _restore_point(backup: Backup, file_id: str, view: bytes | None, ledger_commit: str | None) -> str | None:
+    """The commit that holds this file's current projected content byte for byte, or `None` when none does.
 
-    The digest is of the projection, the form a record holds. A file that cannot be projected cannot be
-    shown to be in the restore point, so it is not.
+    The cycle's own commit is asked first: it holds what collect saw. A file an earlier cycle published but never
+    applied is not in it (the repo moved on), so the ledger's commit — the last one this machine accounted for —
+    is asked next; `key prune` refuses a generation that reachable history still uses, so it still decrypts.
+    The digest is of the projection, the form a record holds; a file that cannot be projected is in neither.
     """
-    if backup.records is None or live_view is None:
-        return False
-    record = backup.records.get(file_id)
-    return record is not None and _sha256(live_view) == record.sha256
+    if backup.records_at is None or view is None:
+        return None
+    digest = _sha256(view)
+    for commit in (backup.commit, ledger_commit):
+        if commit is None:
+            continue
+        records = backup.records_at(commit)
+        record = None if records is None else records.get(file_id)
+        if record is not None and record.sha256 == digest:
+            return commit
+    return None
 
 
 def _decision(
@@ -2814,11 +2865,17 @@ def _cycle(
 
     target_commit = outcome.published or local_commit or ""
     target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
-    # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge.
-    # Only a run that applies a proposal checks overwrites against its records, so only that run reads them.
-    guard_overwrites = any(isinstance(pick, Proposal) for pick in resolution.picks.values())
-    restore_manifest = _read_manifest(transport, cipher, local_commit) if guard_overwrites and local_commit else None
-    backup_records = None if restore_manifest is None else restore_manifest.records
+    # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge; a file
+    # published earlier but not yet applied is restored from the ledger's commit instead (`_restore_point`).
+    # One manifest decrypt per commit per cycle, however many files ask.
+    records_cache: dict[str, Mapping[str, ManifestRecord] | None] = {}
+
+    def records_at(commit: str) -> Mapping[str, ManifestRecord] | None:
+        if commit not in records_cache:
+            manifest = _read_manifest(transport, cipher, commit)
+            records_cache[commit] = None if manifest is None else manifest.records
+        return records_cache[commit]
+
     applied = _apply(
         transport=transport,
         cipher=cipher,
@@ -2834,8 +2891,8 @@ def _cycle(
         config=config,
         home=home,
         adopt=adopt,
-        backup=Backup.create(local_commit, records=backup_records),
-        guard_overwrites=guard_overwrites,
+        backup=Backup.create(local_commit, records_at=records_at),
+        folded=frozenset(change.record.file_id for change in collected.stale),
         paths=paths,
     )
     ledger_store.save(
@@ -2855,6 +2912,7 @@ def _cycle(
     return SyncReport(
         published_commit=outcome.published,
         backup_commit=applied.backup,
+        restore_points=applied.restore_points,
         created=tuple(collected.created),
         collected=tuple(collected.collected),
         applied=applied.applied,
@@ -2881,7 +2939,9 @@ __all__ = [
     "NO_VALIDATORS",
     "Backup",
     "Deferral",
+    "RecordReader",
     "Resolution",
+    "RestorePoint",
     "SyncReport",
     "sync",
 ]
