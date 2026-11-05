@@ -257,9 +257,19 @@ tell another what not to scan (``AGENTS.md`` §3.3).
   current projected bytes, then the ledger's commit; the first that does is that file's restore point, and
   the report names it. An overwrite no commit holds is refused (fail closed), on every sync, not only one a
   model's proposal settled. A file with carried keys is compared through the ledger's object, as the records
-  were projected. No commit is made for this. Two cases are outside it: a first-sight record applied with
-  `--adopt remote` (its bytes are in no commit yet), and a local edit over a stale baseline, whose bytes the
-  cycle merges into the published result instead of storing.
+  were projected. No commit is made for this.
+- **The restore ref covers a file no commit holds.** A first-sight (or suppressed) record applied with
+  `--adopt remote` has live bytes that are in no commit. Before it is overwritten its projected bytes pass the
+  secret scan, are sealed (object domain, the record's file ID — the same AAD an object in the repo has), and
+  committed to `refs/syncintosh/restore`; that commit is the file's restore point. The ref is **local-only**:
+  push names `<commit>:refs/heads/<branch>`, so it never leaves the machine, and it is encrypted, so the
+  bytes are not plaintext on disk. It is one chain: each new commit's parents are the cycle commit and the
+  previous tip, and its tree is the previous tip's tree with the new blob laid over it. The commit is built
+  through a scratch index, so the working tree, the index, and the branch are not touched. A scan refusal
+  refuses that file's overwrite (it is left as it is) and points at `syncintosh scan allow`. `key prune`
+  counts this ref's tip as reachable history, so it will not drop a generation the ref still uses.
+  One case remains outside the guard: a local edit over a stale baseline, which the cycle merges into the
+  published result instead of storing, so no commit holds its bytes verbatim.
 - **An object whose plaintext did not change is not rewritten.** A random nonce (§3.1) means
   rewriting an object always changes its bytes, so an unconditional write would rewrite
   every ciphertext on every sync and keep git history permanently dirty. Changed-ness is

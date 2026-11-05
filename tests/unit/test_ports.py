@@ -281,6 +281,9 @@ def test_git_transport_port_is_structural() -> None:
 
         def update_ref(self, branch: str, commit: str) -> None: ...
 
+        def commit_restore(self, cycle_commit: str | None, blobs, message: str) -> str:
+            return "0" * 40
+
         def materialize(self, commit: str) -> None: ...
 
         def push(self, remote: str, branch: str, commit: str) -> str:

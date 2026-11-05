@@ -53,6 +53,12 @@ Ring = tuple[tuple[int, bytes], ...]
 REMOTE_REF_PREFIX = "refs/remotes/syncintosh/"
 
 
+# The local-only ref that chains the encrypted restore commits made before an `--adopt remote` overwrite. Push
+# names `<commit>:refs/heads/<branch>` explicitly, so this ref never leaves the machine. It lives here so
+# `services` can resolve it without importing `vcs` (``AGENTS.md`` §2.2).
+RESTORE_REF = "refs/syncintosh/restore"
+
+
 def remote_ref(branch: str) -> str:
     """The local tracking ref a fetch of `branch` writes (``syncintosh/<branch>``)."""
     return f"{REMOTE_REF_PREFIX}{branch}"
@@ -446,6 +452,16 @@ class GitTransport(Protocol):
 
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
+        ...
+
+    def commit_restore(self, cycle_commit: str | None, blobs: Mapping[str, bytes], message: str) -> str:
+        """Commit `blobs` (repo-relative path -> sealed bytes) to the local-only restore ref; return the commit id.
+
+        The new commit's parents are `cycle_commit` and the ref's previous tip, so the ref is one chain
+        (``docs/design/01-sync-model.md``). Its tree is the previous tip's tree with `blobs` laid over it. The
+        working tree, the index, and the branch are not touched, and the ref is never pushed. The caller seals
+        the bytes first: nothing here sees a plaintext.
+        """
         ...
 
     def materialize(self, commit: str) -> None:

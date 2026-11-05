@@ -90,8 +90,9 @@ KDF it will not run **before** spending work on it:
 
 - **Generations are retained by default.** There is no automatic expiry.
 - **Prune is explicit** (`key prune <generation>`) and must refuse while the generation is
-  still needed. *Needed* means reachable: some commit reachable from this machine's `HEAD` or
-  from `origin/<branch>` has a tree holding an envelope encrypted under it. Generation 1 — the
+  still needed. *Needed* means reachable: some commit reachable from this machine's `HEAD`,
+  from `origin/<branch>`, or from the local `refs/syncintosh/restore` (the sealed bytes an `--adopt remote`
+  overwrite replaced) has a tree holding an envelope encrypted under it. Generation 1 — the
   master generation, without which the ring cannot be exported — is refused outright.
 - **The reachability walk reads no key.** `key_id` is cleartext in the envelope header
   ([04-envelope-v1.md](04-envelope-v1.md)), so `git rev-list --objects <HEAD> <origin/branch>`

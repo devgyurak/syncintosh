@@ -45,6 +45,7 @@ from syncintosh.core.errors import (
     IgnoreListMalformed,
     PendingConflict,
     ProjectionError,
+    SecretScanError,
     SyntaxInvalid,
 )
 from syncintosh.core.ignore import NO_IGNORES, IgnoreSpec
@@ -707,6 +708,12 @@ _DIRECTORY_MISSING = "the file's directory is not on this machine yet"
 _OBJECT_MISSING = "the stored content is missing from the repo"
 _NO_RESTORE_POINT = "nothing is committed yet, so the file this would overwrite has no restore point"
 _NOT_IN_RESTORE_POINT = "the file's current content is in no commit it could be restored from"
+# Fixed: the scan names a location, never the matched bytes. `scan allow` is how a person accepts a false positive.
+_RESTORE_SCAN_REFUSED = (
+    "the file's current content failed the secret scan, so it could not be saved for restore; "
+    "review it, or accept it with `syncintosh scan allow`"
+)
+_RESTORE_MESSAGE = "syncintosh: restore point before --adopt remote"
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -2215,6 +2222,7 @@ def _apply(
     home: str,
     adopt: AdoptChoice | None,
     backup: Backup,
+    scanner: SecretScanner,
     folded: frozenset[str] = frozenset(),
     paths: LivePaths | None = None,
 ) -> _Applied:
@@ -2237,7 +2245,9 @@ def _apply(
 
     An overwrite must replace only bytes some commit holds (`_restore_point`), or the write is refused. `folded`
     names the files whose live bytes this cycle merged into the published result — a local edit over a stale
-    baseline — which no commit holds verbatim but whose content the result carries.
+    baseline — which no commit holds verbatim but whose content the result carries. A first-sight or suppressed
+    record applied with `--adopt remote` has no commit either, so its bytes are scanned, sealed, and committed to
+    the local-only restore ref first (`_save_restore_point`); a scan refusal leaves the file as it is.
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     applied: list[str] = []
@@ -2394,17 +2404,24 @@ def _apply(
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
-        if (
-            live_bytes is not None
-            and live_bytes != data
-            and file_id not in folded
-            and not (entry is None or entry.suppressed)
-        ):
-            # A first-sight or suppressed record is written here only on `--adopt remote`, and its bytes are in
-            # no commit yet; that gap is closed by sealing them first (the restore ref), not by this check.
-            held_in = _restore_point(backup, file_id, ledger_view, entry.commit if entry is not None else None)
-            if held_in is None:
-                refused.append(Refusal(record.path, _NOT_IN_RESTORE_POINT))
+        if live_bytes is not None and live_bytes != data and file_id not in folded:
+            if entry is None or entry.suppressed:
+                # Written here only on `--adopt remote`, and its bytes are in no commit: save them first.
+                held_in = _save_restore_point(
+                    transport=transport,
+                    cipher=cipher,
+                    scanner=scanner,
+                    backup=backup,
+                    key_generation=target_manifest.key_generation,
+                    record=record,
+                    view=live_view,
+                )
+            else:
+                held_in = _restore_point(backup, file_id, ledger_view, entry.commit)
+                if held_in is None:
+                    held_in = Refusal(record.path, _NOT_IN_RESTORE_POINT)
+            if isinstance(held_in, Refusal):
+                refused.append(held_in)
                 continue
             restore_points.append(RestorePoint(record.path, held_in))
         live.write(live_path, data)
@@ -2420,6 +2437,34 @@ def _apply(
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
     )
+
+
+def _save_restore_point(
+    *,
+    transport: GitTransport,
+    cipher: Cipher,
+    scanner: SecretScanner,
+    backup: Backup,
+    key_generation: int,
+    record: ManifestRecord,
+    view: bytes | None,
+) -> str | Refusal:
+    """Seal a file's current projected bytes into the local-only restore ref; the commit, or why not.
+
+    The bytes are scanned first, exactly as a collect would scan them: the restore ref is encrypted and never
+    pushed, but a secret the scan refuses stays out of every store this tool writes (``AGENTS.md`` §3.4). The
+    seal uses the object domain and the record's file ID, the same AAD an object in the repo carries, so a
+    restore commit's blob opens with `Cipher.open(domain="object", file_id=...)`. The projection is what is
+    saved because it is what the overwrite replaces: an excluded key stays in the live file.
+    """
+    if view is None:
+        return Refusal(record.path, _NOT_IN_RESTORE_POINT)
+    try:
+        scanner.scan(view, subject=record.path, format=record.format)
+    except SecretScanError:
+        return Refusal(record.path, _RESTORE_SCAN_REFUSED)
+    sealed = cipher.seal(view, domain="object", file_id=record.file_id, key_id=key_generation)
+    return transport.commit_restore(backup.commit, {object_path(record.file_id): sealed}, _RESTORE_MESSAGE)
 
 
 def _restore_point(backup: Backup, file_id: str, view: bytes | None, ledger_commit: str | None) -> str | None:
@@ -2892,6 +2937,7 @@ def _cycle(
         home=home,
         adopt=adopt,
         backup=Backup.create(local_commit, records_at=records_at),
+        scanner=scanner,
         folded=frozenset(change.record.file_id for change in collected.stale),
         paths=paths,
     )

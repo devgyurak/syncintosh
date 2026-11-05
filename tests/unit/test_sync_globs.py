@@ -49,6 +49,13 @@ class _RecordingLive(SystemLiveFiles):
         return super().read(path)
 
 
+class _CleanScanner:
+    """A scanner that finds nothing; these tests never reach a first-sight overwrite."""
+
+    def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
+        return None
+
+
 class _UnusedTransport:
     """A `GitTransport` whose every method fails: the apply path must not read an object."""
 
@@ -377,6 +384,7 @@ def test_a_record_is_not_written_through_a_symlinked_glob_directory(tmp_path) ->
         config=_config(),
         home=str(home),
         adopt=None,
+        scanner=_CleanScanner(),
         backup=Backup.create("c" * 40),
     )
 

@@ -23,14 +23,14 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO
 
 from syncintosh.core.envelope_header import HEADER_SIZE, header_generation
 from syncintosh.core.errors import GitError
-from syncintosh.core.ports import REMOTE_REF_PREFIX, PushOutcome
+from syncintosh.core.ports import REMOTE_REF_PREFIX, RESTORE_REF, PushOutcome
 from syncintosh.core.repo import MANIFEST_PATH, object_file_id
 
 # The commits syncintosh writes are machine-generated and deterministic; a fixed identity keeps
@@ -74,12 +74,27 @@ class GitCLITransport:
         )
         return env
 
-    def _run(self, args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    def _run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
         argv = ["git", "-c", "commit.gpgsign=false", *args]
-        return subprocess.run(argv, cwd=str(cwd), env=self._env(), capture_output=True, check=False)
+        environment = {**self._env(), **(env or {})}
+        return subprocess.run(argv, cwd=str(cwd), env=environment, input=stdin, capture_output=True, check=False)
 
-    def _checked(self, args: Sequence[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
-        result = self._run(args, cwd=self._workdir if cwd is None else cwd)
+    def _checked(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        result = self._run(args, cwd=self._workdir if cwd is None else cwd, env=env, stdin=stdin)
         if result.returncode != 0:
             # The subcommand plus a redacted detail. A remote URL can carry a credential, and
             # git echoes the URL, so the userinfo is stripped (``AGENTS.md`` §4).
@@ -201,6 +216,28 @@ class GitCLITransport:
     def update_ref(self, branch: str, commit: str) -> None:
         """Point `refs/heads/<branch>` at `commit` without touching the working tree."""
         self._checked(["update-ref", f"refs/heads/{branch}", commit])
+
+    def commit_restore(self, cycle_commit: str | None, blobs: Mapping[str, bytes], message: str) -> str:
+        """Commit `blobs` to `refs/syncintosh/restore` through a scratch index (`hash-object`, `commit-tree`).
+
+        The scratch index is a private file, so neither the working tree's index nor the branch moves. The
+        tree starts from the ref's previous tip, so an older file's restore object stays reachable in the
+        newest commit as well as through the parent chain.
+        """
+        previous = self._rev_parse(RESTORE_REF)
+        parents = tuple(dict.fromkeys(parent for parent in (cycle_commit, previous) if parent is not None))
+        with tempfile.TemporaryDirectory(prefix="syncintosh-restore-") as scratch:
+            index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+            if previous is not None:
+                self._checked(["read-tree", previous], env=index)
+            for relpath, data in blobs.items():
+                oid = self._checked(["hash-object", "-w", "--stdin"], stdin=data).stdout.decode("ascii").strip()
+                self._checked(["update-index", "--add", "--cacheinfo", f"100644,{oid},{relpath}"], env=index)
+            tree = self._checked(["write-tree"], env=index).stdout.decode("ascii").strip()
+        parent_args = [token for parent in parents for token in ("-p", parent)]
+        commit = self._checked(["commit-tree", tree, *parent_args, "-m", message]).stdout.decode("ascii").strip()
+        self._checked(["update-ref", RESTORE_REF, commit])
+        return commit
 
     def materialize(self, commit: str) -> None:
         """Reset the index and working tree to `commit`'s tree (`read-tree --reset`).

@@ -25,6 +25,14 @@ from syncintosh.services.sync import NO_APP_INFO, Backup, RestorePoint, _apply, 
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
 
+
+class _CleanScanner:
+    """A scanner that finds nothing; these tests never reach a first-sight overwrite."""
+
+    def scan(self, plaintext: bytes, *, subject: str, format: str) -> None:
+        return None
+
+
 FILE_ID = "1" * 32
 OLD = (json.dumps({"editor.tabSize": 1, "editor.fontSize": 1}, indent=2) + "\n").encode()
 NEW = (json.dumps({"editor.tabSize": 2, "editor.fontSize": 2}, indent=2) + "\n").encode()
@@ -95,6 +103,7 @@ def _apply_over_carried_file(tmp_path, held_sha: str):
         config=config,
         home=str(tmp_path),
         adopt=None,
+        scanner=_CleanScanner(),
         backup=Backup.create(
             "new",
             records_at={

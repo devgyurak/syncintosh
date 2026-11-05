@@ -45,6 +45,7 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import PendingPush
 from syncintosh.core.ports import (
     GENERATION_KEY_SIZE,
+    RESTORE_REF,
     Cipher,
     GenerationWrap,
     GitTransport,
@@ -635,8 +636,9 @@ def prune_generation(
 ) -> None:
     """Drop a generation no reachable commit uses; refuse one that is still needed.
 
-    A generation is needed when a reachable commit — this machine's HEAD or the remote's branch
-    tip — holds an envelope encrypted under it, or when it is the manifest's current generation.
+    A generation is needed when a reachable commit — this machine's HEAD, the remote's branch
+    tip, or the tip of the local restore ref — holds an envelope encrypted under it, or when it is the
+    manifest's current generation.
     The `key_id` is cleartext, so this is decided **without any key**
     (``docs/design/05-key-generations.md``). Reachability frees almost nothing: without rewriting
     history every commit stays reachable, so the only generation this can drop is one that was
@@ -648,7 +650,13 @@ def prune_generation(
     lock.acquire()
     try:
         transport.fetch(remote, branch)
-        tips = tuple(tip for tip in (transport.head(), transport.resolve(remote_ref(branch))) if tip is not None)
+        # The restore ref's tip is reachable history too: it holds sealed bytes an `--adopt remote` overwrite
+        # replaced, and dropping their generation would make them unrecoverable.
+        tips = tuple(
+            tip
+            for tip in (transport.head(), transport.resolve(remote_ref(branch)), transport.resolve(RESTORE_REF))
+            if tip is not None
+        )
         if not tips:
             # No reachable history could be read (an unborn branch, or a branch name the remote does
             # not use): with nothing to compare against, "unreferenced" cannot be established, so
