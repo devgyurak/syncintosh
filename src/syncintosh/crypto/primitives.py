@@ -9,7 +9,6 @@ ring export cannot drift apart (``docs/design/04-envelope-v1.md``).
 from __future__ import annotations
 
 KEY_SIZE = 32
-KEY_ID_SIZE = 4
 NONCE_SIZE = 12
 TAG_SIZE = 16
 

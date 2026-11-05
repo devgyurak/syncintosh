@@ -96,7 +96,10 @@ KDF it will not run **before** spending work on it:
 - **The reachability walk reads no key.** `key_id` is cleartext in the envelope header
   ([04-envelope-v1.md](04-envelope-v1.md)), so `git rev-list --objects <HEAD> <origin/branch>`
   lists every reachable blob, the `manifest.enc` and `objects/<id>.enc` slots are kept, and one
-  `cat-file --batch` reads each 5-byte header. Git prints one path per unique blob; because every
+  `cat-file --batch` reads each 5-byte header, one object at a time, skipping the body in
+  bounded chunks so memory stays flat on a large history. The header parse lives in
+  `core/envelope_header.py`, the single definition the crypto layer also builds from, so
+  `vcs` needs no `crypto` import. Git prints one path per unique blob; because every
   envelope uses a fresh random nonce, one ciphertext lives at exactly one path, so the listing
   reports the slot path. `keys/*.wrap` is deliberately **not** walked: a wrap's header names the
   generation it is wrapped *under*, not a stored object's generation.
@@ -132,6 +135,13 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
   there is worse than untidy: the abandoned `KG_n` would answer `get(n)` for the *other*
   machine's genuine generation `n`, and every one of its objects would fail authentication as
   if it had been tampered with.
+- When the local branch is ahead of the remote at a higher generation, `key rotate` adopts the remote
+  tip and discards the unpushed rotation **together with any collect commit stacked on it**. That loses
+  no edit: a collect commit contains only what the live files already say, the apply ledger is saved
+  only after an apply, so the next `sync` still sees every edit as changed and collects it again on the
+  adopted generation (`tests/integration/test_sync_two_machines.py` pins this). Refusing instead would
+  strand the machine, because `sync` cannot publish while the ring holds a generation the remote does
+  not publish (a pending-push marker lets `sync` settle that case itself, below).
 - **A rotation of unknown outcome leaves a pending-push marker.** `key rotate` records `{generation, commit}`
   in `pending-push.json` (state directory, outside git, no key) inside its discard guard just before the push,
   and clears it when the push succeeds, when a rejected push turns out to have landed, or when the rotation is

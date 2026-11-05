@@ -981,6 +981,53 @@ def test_rotate_refuses_to_rewind_an_unpushed_collect_commit(tmp_path, memory_ke
     assert _git(a.repo, "rev-parse", "HEAD").strip() == before
 
 
+class _UnlandedRotationTransport(GitCLITransport):
+    """A transport whose rotation push never reaches the remote and whose later fetches fail.
+
+    Rotation cannot prove the push absent, so it keeps the new generation and the machine is left
+    holding a rotation the remote has never seen.
+    """
+
+    def __init__(self, workdir: Path) -> None:
+        super().__init__(workdir)
+        self._fetches = 0
+
+    def fetch(self, remote: str, branch: str) -> None:
+        self._fetches += 1
+        if self._fetches > 1:
+            raise GitError("remote unreachable")
+        super().fetch(remote, branch)
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        raise GitError("connection lost before the server answered")
+
+
+def test_rewinding_a_collect_commit_stacked_on_an_unlanded_rotation_loses_no_edit(tmp_path, memory_key_store) -> None:
+    # given — A's rotation never landed, and a sync then committed A's edit on top of it before it stopped
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    remote_tip = _git(Path(remote), "rev-parse", BRANCH).strip()
+    with pytest.raises(GitError, match="outcome could not be determined"):
+        _rotate(a, transport=_UnlandedRotationTransport(a.repo))
+    # With its pending-push marker `sync` would settle this itself; without one (a crash before the marker was
+    # written) it stops and leaves the collect commit, which is the state `key rotate` then has to rewind.
+    a.marker.clear()
+    _write_live(a, b"one\ntwo\nthree\nFROM A\n")
+    with pytest.raises(CommitmentsCorrupt):
+        _run(a)
+    assert _git(a.repo, "rev-parse", "HEAD^^").strip() == remote_tip
+
+    # when — A rotates again (rewinding the rotation and the collect commit), then syncs
+    generation = _rotate(a)
+    _run(a)
+    _run(b)
+
+    # then — the new rotation was published, and the edit the rewound commit held reached the other machine
+    assert generation == 2
+    assert _git(Path(remote), "rev-parse", BRANCH).strip() == _git(a.repo, "rev-parse", "HEAD").strip()
+    assert (_read_live(b) or b"").endswith(b"FROM A\n")
+    assert b.store.get(2) == a.store.get(2)
+
+
 # --------------------------------------------------------------------------- key prune
 
 

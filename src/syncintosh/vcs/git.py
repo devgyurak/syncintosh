@@ -22,13 +22,16 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Sequence
+import tempfile
+from collections.abc import Generator, Iterable, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import IO
 
+from syncintosh.core.envelope_header import HEADER_SIZE, header_generation
 from syncintosh.core.errors import GitError
 from syncintosh.core.ports import REMOTE_REF_PREFIX, PushOutcome
 from syncintosh.core.repo import MANIFEST_PATH, object_file_id
-from syncintosh.crypto.envelope import header_generation
 
 # The commits syncintosh writes are machine-generated and deterministic; a fixed identity keeps
 # them reproducible and keeps a test off the developer's real git config.
@@ -40,6 +43,8 @@ COMMIT_EMAIL = "syncintosh@localhost"
 # (``AGENTS.md`` §4).
 _CREDENTIALS_RE = re.compile(r"://[^/@\s]*@")
 _MAX_DETAIL = 400
+# A blob's body is skipped in bounded chunks so a large object never sits in memory whole.
+_DISCARD_CHUNK = 64 * 1024
 
 
 def _redact(text: str) -> str:
@@ -220,80 +225,143 @@ class GitCLITransport:
 
         Only the cleartext key-generation header is read, so no key is needed. `rev-list --objects`
         lists each reachable blob once with the path it is first found under; the envelope slots are
-        filtered out, their blobs are read in one `cat-file --batch`, and each header's generation is
-        collected.
+        filtered out, and each blob is then asked of one `cat-file --batch` whose answer is read
+        5 bytes deep and skipped, so memory stays flat however large the history is.
         """
         if not tips:
             return ()
-        listing = self._checked(["rev-list", "--objects", *tips])
-        oids: list[str] = []
-        for line in listing.stdout.decode("ascii", "replace").splitlines():
-            oid, separator, path = line.partition(" ")
-            # The repo's own slot recogniser decides what is an envelope: `objects/<id>.enc` or
-            # `manifest.enc`. `object_file_id` full-matches the slot, so a nested or unrelated
-            # path never counts (``core/repo.py``).
-            if separator and (path == MANIFEST_PATH or object_file_id(path) is not None):
-                oids.append(oid)
-        return _envelope_generations(self._batch_contents(tuple(dict.fromkeys(oids))))
+        oids: dict[str, None] = {}
+        with self._spawn(["rev-list", "--objects", *tips], feed=False) as listing:
+            assert listing.stdout is not None
+            for raw in listing.stdout:
+                oid, separator, path = raw.decode("ascii", "replace").rstrip("\n").partition(" ")
+                # The repo's own slot recogniser decides what is an envelope: `objects/<id>.enc` or
+                # `manifest.enc`. `object_file_id` full-matches the slot, so a nested or unrelated
+                # path never counts (``core/repo.py``).
+                if separator and (path == MANIFEST_PATH or object_file_id(path) is not None):
+                    oids[oid] = None
+        if not oids:
+            return ()
+        with self._spawn(["cat-file", "--batch"], feed=True) as batch:
+            assert batch.stdin is not None and batch.stdout is not None
+            try:
+                return _batch_generations(batch.stdin, batch.stdout, oids)
+            except BrokenPipeError as exc:
+                # git died mid-run; `_spawn` swaps in its exit code and stderr.
+                raise GitError("`git cat-file --batch` closed its input early") from exc
 
     def remote_reachable(self, remote: str) -> bool:
         """True when `remote` answers a read-only `git ls-remote`, without fetching objects."""
         result = self._run(["ls-remote", "--quiet", remote], cwd=self._workdir)
         return result.returncode == 0
 
-    def _batch_contents(self, oids: tuple[str, ...]) -> list[bytes]:
-        """The content of each object in `oids`, in one `git cat-file --batch`."""
-        if not oids:
-            return []
-        argv = ["git", "-c", "commit.gpgsign=false", "cat-file", "--batch"]
-        result = subprocess.run(
-            argv,
-            cwd=str(self._workdir),
-            env=self._env(),
-            input=("\n".join(oids) + "\n").encode("ascii"),
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = _redact(result.stderr.decode("utf-8", "replace"))
-            raise GitError(f"`git cat-file --batch` failed (exit {result.returncode}): {detail}")
+    @contextmanager
+    def _spawn(self, args: Sequence[str], *, feed: bool) -> Generator[subprocess.Popen[bytes]]:
+        """Run a git subcommand whose output is read incrementally, and always reap the child.
+
+        stderr goes to a temporary file rather than a pipe: nothing reads it while stdout is being
+        streamed, so a pipe could fill and stall git. Without `--buffer`, `cat-file --batch` flushes
+        after each object, so one request then one response needs no reader thread to stay live.
+        """
+        argv = ["git", "-c", "commit.gpgsign=false", *args]
+        with tempfile.TemporaryFile() as errors:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(self._workdir),
+                env=self._env(),
+                stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+            )
+            try:
+                try:
+                    yield proc
+                except GitError as exc:
+                    # The block gave up on git's output (cut off, malformed, or its input closed). If git
+                    # itself failed, its exit code and stderr are the real cause, so surface them.
+                    detailed = self._with_exit_detail(exc, proc, errors, args[0])
+                    if detailed is exc:
+                        raise  # nothing more to say; chaining an error to itself would make a self-referential cause
+                    raise detailed from exc
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                assert proc.stdout is not None
+                proc.stdout.read()  # let git finish writing so `wait` cannot block on a full pipe
+                code = proc.wait()
+                if code != 0:
+                    raise GitError(f"`git {args[0]}` failed (exit {code}): {self._stderr_detail(errors)}")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                for pipe in (proc.stdin, proc.stdout):
+                    if pipe is not None:
+                        # A pipe to a dead child can raise again on close (it flushes buffered bytes);
+                        # that must not stop the child from being reaped below.
+                        with suppress(OSError):
+                            pipe.close()
+                proc.wait()
+
+    @staticmethod
+    def _stderr_detail(errors: IO[bytes]) -> str:
+        errors.seek(0)
+        return _redact(errors.read().decode("utf-8", "replace"))
+
+    def _with_exit_detail(
+        self, failure: GitError, proc: subprocess.Popen[bytes], errors: IO[bytes], subcommand: str
+    ) -> GitError:
+        """`failure`, or a `GitError` naming git's own exit code and stderr when git already died."""
         try:
-            return _split_batch(result.stdout)
-        except (ValueError, IndexError) as exc:
-            # A malformed stream is a git failure, not a caller error; keep it a `DomainError`.
-            raise GitError("could not parse `git cat-file --batch` output") from exc
+            code = proc.wait(timeout=1)  # a dying child may not be reapable the instant its pipe breaks
+        except subprocess.TimeoutExpired:
+            return failure  # git is alive, so the stream really was malformed
+        if code == 0:
+            return failure
+        return GitError(f"`git {subcommand}` failed (exit {code}): {self._stderr_detail(errors)}")
 
 
-def _split_batch(data: bytes) -> list[bytes]:
-    """Split `git cat-file --batch` output into each object's content bytes.
-
-    The stream is `<oid> SP <type> SP <size> LF <size bytes> LF` per object, and `<oid> SP missing
-    LF` for one that is absent; a missing object contributes nothing.
-    """
-    contents: list[bytes] = []
-    position = 0
-    total = len(data)
-    while position < total:
-        newline = data.index(b"\n", position)
-        header = data[position:newline].split(b" ")
-        position = newline + 1
-        if len(header) < 3:
-            continue
-        size = int(header[2])
-        contents.append(data[position : position + size])
-        position += size + 1  # skip the content's trailing LF
-    return contents
+def _read_exact(stream: IO[bytes], size: int) -> bytes:
+    """Exactly `size` bytes of `stream`; a short read means git's output was cut off."""
+    data = stream.read(size)
+    if len(data) != size:
+        raise GitError("`git cat-file --batch` ended before the object did")
+    return data
 
 
-def _envelope_generations(contents: Iterable[bytes]) -> tuple[int, ...]:
-    """The distinct, positive key generations named in the first header of each envelope.
+def _discard(stream: IO[bytes], size: int) -> None:
+    """Skip `size` bytes of `stream` in bounded chunks."""
+    while size > 0:
+        chunk = stream.read(min(size, _DISCARD_CHUNK))
+        if not chunk:
+            raise GitError("`git cat-file --batch` ended before the object did")
+        size -= len(chunk)
 
-    The header parse has one owner — `crypto.envelope.header_generation` — so a format change
-    cannot silently make this walk miss a generation and let `key prune` drop a needed key.
+
+def _batch_generations(stdin: IO[bytes], stdout: IO[bytes], oids: Iterable[str]) -> tuple[int, ...]:
+    """The distinct, positive key generations named in the first header of each object in `oids`.
+
+    Speaks the `cat-file --batch` protocol one object at a time: write an oid, read its
+    `<oid> SP <type> SP <size> LF` line, keep the first `HEADER_SIZE` bytes of the body, and skip the
+    rest plus its trailing LF. `<oid> SP missing LF` contributes nothing. The header parse has one
+    owner — `core.envelope_header.header_generation` — so a format change cannot silently make this
+    walk miss a generation and let `key prune` drop a needed key.
     """
     generations: set[int] = set()
-    for content in contents:
-        key_id = header_generation(content)
-        if key_id is not None:
-            generations.add(key_id)
+    for oid in oids:
+        stdin.write(oid.encode("ascii") + b"\n")
+        stdin.flush()
+        fields = stdout.readline().split()
+        if len(fields) == 2 and fields[1] == b"missing":
+            continue
+        try:
+            if len(fields) != 3 or fields[0] != oid.encode("ascii"):
+                raise ValueError(fields)
+            size = int(fields[2])
+        except ValueError as exc:
+            # A malformed stream is a git failure, not a caller error; keep it a `DomainError`.
+            raise GitError("could not parse `git cat-file --batch` output") from exc
+        head = _read_exact(stdout, min(size, HEADER_SIZE))
+        _discard(stdout, size - len(head) + 1)  # the rest of the body, then its trailing LF
+        generation = header_generation(head)
+        if generation is not None:
+            generations.add(generation)
     return tuple(sorted(generations))
