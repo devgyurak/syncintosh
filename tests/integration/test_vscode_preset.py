@@ -354,6 +354,25 @@ def test_a_proxy_url_with_a_password_is_refused_by_the_secret_scan(tmp_path, mem
     assert FileRepo(machine.repo).list_paths("objects") == ()
 
 
+def test_a_basic_credential_without_a_digit_in_a_comment_is_refused_at_collect(tmp_path, memory_key_store) -> None:
+    # given — the preset strips `http.proxyAuthorization` by key, so a commented-out copy of the header
+    # is the scan's to catch; the token is digit-free and unpadded, which only decoding can see
+    machine = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    _initialize(machine)
+    _write(
+        machine, SETTINGS, b'{\n  // "http.proxyAuthorization": "Basic bmJIOlFERHRJUHlu"\n  "editor.tabSize": 2\n}\n'
+    )
+
+    # when
+    with pytest.raises(SecretScanError) as refusal:
+        _run(machine)
+
+    # then — refused at the encrypt boundary, naming the location only (§3.4, §4)
+    assert SETTINGS in str(refusal.value)
+    assert "bmJIOlFERHRJUHlu" not in str(refusal.value)
+    assert FileRepo(machine.repo).list_paths("objects") == ()
+
+
 # --------------------------------------------------------------------------- keybindings
 
 

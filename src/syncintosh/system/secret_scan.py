@@ -18,8 +18,12 @@ location, and can be allowed on the machine that hit it (#25, #28).
 
 from __future__ import annotations
 
+import base64
+import binascii
+import codecs
 import re
 import shlex
+from collections.abc import Callable
 from typing import NamedTuple
 
 from syncintosh.core.errors import SecretScanError
@@ -283,6 +287,55 @@ SHELL_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 )
 
 
+# A `Basic` credential is decoded, not shape-guessed: the scheme is defined as `base64(user ":" password)`
+# (RFC 7617), so a token that decodes to printable text with a `user:` in front is a credential whatever
+# its digits and padding look like. `_SCHEME_SHAPE` only sees a digit or `=`, and misses a 16-character
+# token that has neither. The width is capped (and the run possessive) so the engine cannot re-scan a
+# long value from every position; a run past the cap is cut there and `_is_basic_credential` decodes the
+# prefix, which already holds the `user:` that decides it. The standard alphabet only: Basic is not
+# base64url.
+_BASIC_WIDTH_CAP = 256
+_BASIC_DECODED = re.compile(rb"\b(?i:basic)[ \t]+(?P<token>[A-Za-z0-9+/]{16,256}+={0,2}+)")
+
+
+# C0 controls except tab, DEL, and C1 controls: what a password does not hold. `str.isprintable` is
+# stricter than that and would reject a password with a tab or a no-break space.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
+
+def _is_basic_credential(match: re.Match[bytes]) -> bool:
+    """True when the token strictly decodes to printable UTF-8 shaped `user:password` with a user."""
+    token = match.group("token")
+    # Only a run cut at the width cap is a prefix: it decodes by its whole quads, and `final=False` lets a
+    # multibyte character the cut split in half through. Any other token is the whole value, so it is
+    # padded to a whole number of quads and decoded in full (a length of 1 mod 4 is not base64 at all).
+    # Trimming an uncut token instead would let a dictionary-shaped word decode by accident.
+    capped = len(token) == _BASIC_WIDTH_CAP
+    if capped:
+        whole = token[: len(token) - len(token) % 4]
+    elif token.endswith(b"="):
+        whole = token
+    elif len(token) % 4 == 1:
+        return False
+    else:
+        whole = token + b"=" * (-len(token) % 4)
+    try:
+        raw = base64.b64decode(whole, validate=True)
+        decoded = codecs.getincrementaldecoder("utf-8")().decode(raw, final=not capped)
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    user, separator, _ = decoded.partition(":")
+    return separator == ":" and user != "" and _CONTROL.search(decoded) is None
+
+
+# `(label, pattern, check)` — a pattern whose match is only a *candidate*, confirmed by `check`. Kept
+# apart from the `(label, pattern)` tables so those keep their shape; the scanner and the masker both
+# read this one, so the masker covers exactly what the scan refuses.
+CHECKED_PATTERNS: tuple[tuple[str, re.Pattern[bytes], Callable[[re.Match[bytes]], bool]], ...] = (
+    (BASIC_LABEL, _BASIC_DECODED, _is_basic_credential),
+)
+
+
 # A YAML value can sit on the lines *after* its key, where the same-line rules cannot see it:
 #
 # * a **block scalar** (`Authorization: >-` / `|`, with an optional anchor or tag before the indicator),
@@ -541,8 +594,11 @@ class PatternSecretScanner:
         match spans (see `_lines_at`), so an allowlist entry is bound to those lines whatever span
         the pattern matched.
         """
-        for label, pattern in patterns_for(format):
+        checked = ((label, pattern, lambda _match: True) for label, pattern in patterns_for(format))
+        for label, pattern, check in (*checked, *CHECKED_PATTERNS):
             for match in pattern.finditer(plaintext):
+                if not check(match):
+                    continue
                 self._refuse_unless_allowed(plaintext, match.start(), match.end(), label, subject)
         if format == "yaml":
             for key_line_start, _, value_end in yaml_block_authorizations(plaintext):
@@ -557,4 +613,4 @@ class PatternSecretScanner:
         raise SecretScanError(_refusal(subject, label, _line_number(plaintext, start), digest))
 
 
-__all__ = ["COMMON_PATTERNS", "PatternSecretScanner", "patterns_for", "yaml_block_authorizations"]
+__all__ = ["CHECKED_PATTERNS", "COMMON_PATTERNS", "PatternSecretScanner", "patterns_for", "yaml_block_authorizations"]

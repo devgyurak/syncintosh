@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The `Masker` that hides secrets, internal hosts, the home path, and the username from a model.
 
-The secret patterns are the scanner's own, both tables (``system/secret_scan.py``): the structured
-one and the shell one, so a credential the scanner would refuse under either format is masked here.
+The secret patterns are the scanner's own (``system/secret_scan.py``): the structured table, the shell
+table, and the candidates a check confirms, so a credential the scanner would refuse under either format
+is masked here.
 Matching runs on bytes, the way the scanner runs, and placeholder tokens are ASCII, so the masked
 text decodes exactly as the original did.
 
@@ -25,10 +26,18 @@ from syncintosh.core.advice import (
     placeholder,
     restore,
 )
-from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, yaml_block_authorizations
+from syncintosh.system.secret_scan import (
+    CHECKED_PATTERNS,
+    SHELL_PATTERNS,
+    STRUCTURED_PATTERNS,
+    yaml_block_authorizations,
+)
 
 # Both tables, so masking is at least as broad as either scan. Duplicates only cost a second pass.
 _SECRET_PATTERNS: Final = (*STRUCTURED_PATTERNS, *SHELL_PATTERNS)
+
+# What follows a capped credential token: the rest of the base64 run, empty-matching at worst.
+_B64_RUN: Final = re.compile(rb"[A-Za-z0-9+/=]*")
 
 # The host patterns are the advice module's, so masking and the new-host check read one definition.
 _HOST: Final = re.compile(HOST_TOKEN_PATTERN.encode("ascii"))
@@ -82,6 +91,11 @@ class TextMasker:
         found: list[tuple[int, int]] = []
         for _, pattern in _SECRET_PATTERNS:
             found.extend(match.span() for match in pattern.finditer(data))
+        for _, pattern, check in CHECKED_PATTERNS:
+            # The pattern stops at its width cap; the rest of the run is still the credential's tail.
+            found.extend(
+                (match.start(), _run_end(data, match.end())) for match in pattern.finditer(data) if check(match)
+            )
         # A YAML block scalar's continuation lines: `_KEYED_VALUE` only hides the `>-` after the key. Run on
         # every text, whatever its format, because the masker must cover at least what the scan refuses.
         found.extend((start, end) for _, start, end in yaml_block_authorizations(data) if start < end)
@@ -113,6 +127,12 @@ class TextMasker:
         for match in _KEYED_VALUE.finditer(data):
             spans.append(match.span(1))
         return spans
+
+
+def _run_end(data: bytes, end: int) -> int:
+    """Where the base64 run that starts at `end` stops (`end` itself when none follows)."""
+    tail = _B64_RUN.match(data, end)
+    return end if tail is None else tail.end()
 
 
 def _non_overlapping(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
