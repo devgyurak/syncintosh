@@ -263,6 +263,9 @@ class PolicyView:
     def update_ref(self, branch: str, commit: str) -> None:
         self.raw.update_ref(branch, commit)
 
+    def commit_restore(self, cycle_commit: str | None, blobs: Mapping[str, bytes], message: str) -> str:
+        return self.raw.commit_restore(cycle_commit, blobs, message)
+
     def materialize(self, commit: str) -> None:
         self.raw.materialize(commit)
 

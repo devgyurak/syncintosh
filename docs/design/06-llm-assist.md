@@ -123,7 +123,10 @@ The report and the CLI show it.
 content in some commit: the projected bytes must match the record that commit holds for the file
 (`_restore_point`). The cycle's commit is asked first, then the ledger's commit, for a file published
 earlier and never applied; the report names the one that holds it, per file. A file no commit holds, or
-that cannot be projected, is refused and left as it is. See *Known limits* for what is not covered yet.
+that cannot be projected, is refused and left as it is. A first-sight file applied with `--adopt remote`,
+or a local edit over a stale baseline (merged, or settled by a pick or a proposal), has no such commit, so
+its bytes are scanned, sealed, and committed to the local-only restore ref first, and that commit is its
+restore point (``01-sync-model.md``, "Commits and rewrites").
 
 ## The endpoint
 
@@ -154,9 +157,6 @@ unknown key is refused, so a typo cannot silently disable a guard.
 
 ## Known limits
 
-- **An `--adopt remote` overwrite of a first-sight file is not guarded yet.** Its bytes are in no commit,
-  so the check does not apply to it. A local edit over a stale baseline is merged into the published
-  result rather than stored, so it is not guarded either.
 - **Values outside the masking rules are sent.** See *What leaves the machine*. Accepted: masking every
   value would leave the model nothing to merge. This includes a nested key that is not on the list.
 - **`auto_apply` is also consent to a change of executable paths.** A VS Code setting such as

@@ -2415,3 +2415,197 @@ def test_a_file_published_but_never_applied_is_overwritten_from_the_ledger_commi
     assert report.restore_points == (RestorePoint(ZSH, accounted),)
     assert _object_at(b, accounted, _only_file_id(b, accounted)) == b"one\ntwo\nthree\n"
     assert _read_live(b) == b"ONE\ntwo\nthree\n"
+
+
+# --------------------------------------------------------------------------- restore ref (issue #52)
+
+RESTORE_REF_NAME = "refs/syncintosh/restore"
+
+
+def _first_sight_pair(tmp_path: Path, make_store, *, b_content: bytes = b"from B\n") -> tuple[Machine, Machine, str]:
+    """A published `from A`; B holds its own different file, so syncing B meets the record for the first time."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a)
+    _write_live(a, b"from A\n")
+    _run(a)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    _write_live(b, b_content)
+    return a, b, remote
+
+
+def test_adopting_remote_saves_the_overwritten_bytes_in_an_encrypted_restore_commit(tmp_path, memory_key_store) -> None:
+    # given
+    _, b, _ = _first_sight_pair(tmp_path, memory_key_store)
+
+    # when
+    report = _run(b, adopt="remote")
+
+    # then — the live file took the repo's content, and the restore commit's object opens to what it replaced
+    restore = _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip()
+    assert _read_live(b) == b"from A\n"
+    assert report.restore_points == (RestorePoint(ZSH, restore),)
+    assert _object_at(b, restore, _only_file_id(b)) == b"from B\n"
+    assert b"from B" not in _git_bytes(b.repo, "cat-file", "blob", f"{restore}:{object_path(_only_file_id(b))}")
+
+
+def test_the_restore_ref_never_reaches_the_remote_or_the_branch(tmp_path, memory_key_store) -> None:
+    # given
+    _, b, remote = _first_sight_pair(tmp_path, memory_key_store)
+
+    # when
+    _run(b, adopt="remote")
+
+    # then — nothing under refs/syncintosh is on the remote, and the restore commit is not on the branch
+    restore = _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip()
+    assert "refs/syncintosh" not in _git(Path(remote), "for-each-ref")
+    assert restore not in _git(b.repo, "rev-list", "HEAD").split()
+
+
+def test_each_restore_commit_chains_to_the_cycle_commit_and_the_previous_tip(tmp_path, memory_key_store) -> None:
+    # given — two first-sight files on B, so one cycle makes two restore commits
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, paths=TRACKED)
+    _write_file(a, ZSH, b"zsh from A\n")
+    _write_file(a, PROFILE, b"profile from A\n")
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery, paths=TRACKED)
+    _write_file(b, ZSH, b"zsh from B\n")
+    _write_file(b, PROFILE, b"profile from B\n")
+
+    # when
+    report = _run(b, adopt="remote")
+
+    # then — the newest restore commit's parents are the cycle commit and the earlier restore commit
+    tip = _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip()
+    cycle = _git(b.repo, "rev-parse", "HEAD").strip()
+    first = next(point.commit for point in report.restore_points if point.commit != tip)
+    assert _git(b.repo, "rev-list", "--parents", "-n1", tip).split()[1:] == [cycle, first]
+    assert {point.path for point in report.restore_points} == {ZSH, PROFILE}
+
+
+def test_a_file_the_scan_refuses_is_not_overwritten_by_an_adopt_remote(tmp_path, memory_key_store) -> None:
+    # given — B's own file carries a secret, so it cannot be sealed anywhere
+    secret = b"AWS_ACCESS_KEY_ID=" + b"AKIA" + b"ABCDEFGHIJKLMNOP" + b"\n"
+    _, b, _ = _first_sight_pair(tmp_path, memory_key_store, b_content=secret)
+
+    # when
+    report = _run(b, adopt="remote")
+
+    # then — refused with the scan guidance, the live file is untouched, and no restore ref exists
+    assert _read_live(b) == secret
+    assert [refusal.path for refusal in report.refused] == [ZSH]
+    assert "scan allow" in report.refused[0].reason
+    assert _git(b.repo, "for-each-ref", "refs/syncintosh").strip() == ""
+
+
+def test_prune_refuses_a_generation_only_the_restore_ref_uses(tmp_path, memory_key_store) -> None:
+    # given — a generation no branch object uses, but a restore commit holds bytes sealed under it
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    a.store.put(2, bytes(range(32, 64)))
+    sealed = EnvelopeCipher(a.store).seal(b"replaced\n", domain="object", file_id="f" * 32, key_id=2)
+    GitCLITransport(a.repo).commit_restore(None, {object_path("f" * 32): sealed}, "restore")
+
+    # when & then
+    with pytest.raises(PruneRefused):
+        _prune(a, 2)
+    assert a.store.get(2) is not None
+
+
+def test_a_rotation_that_rewinds_leaves_the_restore_commit_readable(tmp_path, memory_key_store) -> None:
+    # given — B saved a restore commit, then a rotation of unknown outcome was stranded on it
+    _, b, _ = _first_sight_pair(tmp_path, memory_key_store)
+    _run(b, adopt="remote")
+    restore = _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip()
+    with pytest.raises(GitError, match="outcome could not be determined"):
+        _rotate(b, transport=_UnlandedRotationTransport(b.repo))
+    b.marker.clear()
+
+    # when — B rotates again, rewinding the stranded one
+    generation = _rotate(b)
+
+    # then — the restore ref did not move, and its object still opens (generation 1 is retained)
+    assert generation == 2
+    assert _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip() == restore
+    assert _object_at(b, restore, _only_file_id(b)) == b"from B\n"
+
+
+def _stale_pair(tmp_path: Path, make_store, *, b_edit: bytes) -> tuple[Machine, Machine]:
+    """B's apply of A's change aborted, so B's ledger is stale, and B then edited its live file to `b_edit`."""
+    a, b, _ = _pair(tmp_path, make_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_live(b, b_edit)
+    return a, b
+
+
+def _restored(machine: Machine, report: SyncReport) -> bytes:
+    (point,) = [point for point in report.restore_points if point.path == ZSH]
+    return _object_at(machine, point.commit, _only_file_id(machine))
+
+
+def test_a_clean_stale_merge_reports_a_restore_commit_holding_the_users_edit(tmp_path, memory_key_store) -> None:
+    # given — B edited a line A did not touch
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=b"one\nFROM A\nthree\nFROM B\n".replace(b"FROM A", b"two"))
+
+    # when
+    report = _run(b)
+
+    # then — the merge carries both edits, and the user's exact bytes are recoverable
+    assert (report.refused, report.has_conflicts) == ((), False)
+    assert _read_live(b) == b"one\nFROM A\nthree\nFROM B\n"
+    assert _restored(b, report) == b"one\ntwo\nthree\nFROM B\n"
+
+
+@pytest.mark.parametrize(
+    ("decider", "settled"),
+    [
+        (decision(take_chooser("remote")), b"one\nFROM A\nthree\n"),
+        (
+            decision(lambda view: Proposal("one\nMERGED\nthree\n") if view.kind == "file" else None),
+            b"one\nMERGED\nthree\n",
+        ),
+    ],
+    ids=["remote-pick", "proposal"],
+)
+def test_a_stale_conflict_settled_by_a_pick_keeps_the_users_edit_in_a_restore_commit(
+    tmp_path, memory_key_store, decider, settled: bytes
+) -> None:
+    # given — B edited the region A changed, so the stale merge conflicts
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=b"one\nFROM B\nthree\n")
+    assert _run(b).has_conflicts is True
+
+    # when
+    report = _run(b, resolving=True, decide=decider)
+
+    # then — the settled content replaced the file, and the edit it replaced is recoverable verbatim
+    assert (report.refused, report.has_conflicts) == ((), False)
+    assert _read_live(b) == settled
+    assert _restored(b, report) == b"one\nFROM B\nthree\n"
+
+
+def test_a_stale_edit_the_scan_refuses_is_not_overwritten_and_keeps_its_old_baseline(
+    tmp_path, memory_key_store
+) -> None:
+    # given — B's edit over the stale baseline carries a secret and conflicts with A's; the pick takes A's side
+    secret_edit = b"one\nAWS_ACCESS_KEY_ID=" + b"AKIA" + b"ABCDEFGHIJKLMNOP" + b"\nthree\n"
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=secret_edit)
+    ledger_before = b.ledger.read_text(encoding="utf-8")
+    assert _run(b).has_conflicts is True
+
+    # when
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote")))
+    later = _run(b)
+
+    # then — the overwrite is refused with the scan guidance, nothing is saved, and the ledger keeps the old entry
+    assert [refusal.path for refusal in report.refused] == [ZSH]
+    assert "scan allow" in report.refused[0].reason
+    assert _read_live(b) == secret_edit
+    assert b.ledger.read_text(encoding="utf-8") == ledger_before
+    assert _git(b.repo, "for-each-ref", "refs/syncintosh").strip() == ""
+    # and the next sync does not overwrite it either
+    assert later.applied == ()

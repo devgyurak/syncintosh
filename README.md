@@ -31,8 +31,8 @@ opt-in (`resolve --llm`, see [06-llm-assist](docs/design/06-llm-assist.md)).
   it when it is not on your network. Nothing is applied without your acceptance, except a preset you
   list in `llm.auto_apply` when the suggestion adds no new URL. The daemon never calls a model. The
   API key comes from `SYNCINTOSH_LLM_API_KEY` or the keyring, never the config. Every sync refuses
-  an overwrite whose current content is in no commit. `--adopt remote` over a first-sight file is not yet
-  guarded; see the design note.
+  an overwrite whose current content is in no commit, and `--adopt remote` first saves the file it
+  replaces, encrypted, in a local-only ref that is never pushed.
 - **A tracked file that is a symlink is reported, not synced.** If `~/.zshrc` is a link into a
   dotfiles checkout, syncintosh will not follow it (collection copies regular files, never
   links) — it lists the path and leaves it alone. Point the tracked path at the real file, or
