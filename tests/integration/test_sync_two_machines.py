@@ -57,7 +57,7 @@ from syncintosh.services.keys import (
     rotate_repo,
 )
 from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import RestorePoint, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -2051,57 +2051,31 @@ def test_a_text_proposal_cannot_settle_a_conflict_whose_bytes_do_not_decode(tmp_
     assert _read_live(b) == b"\xff\xfe FROM B\n"
 
 
-def test_a_run_that_applies_a_proposal_refuses_a_file_whose_content_is_not_in_the_restore_point(
+def test_a_run_that_applies_a_proposal_overwrites_a_pending_apply_file_from_the_ledger_commit(
     tmp_path, memory_key_store
 ) -> None:
     # given — ZSH is pending-apply on B: A changed it, but B's apply was aborted, so B's live file still holds the
-    # old bytes, which no commit's record matches. PROFILE then diverges, and a model's proposal settles it.
+    # old bytes, which only the ledger's commit holds. PROFILE then diverges, and a model's proposal settles it.
     a, b = _two_file_pair(tmp_path, memory_key_store)
+    accounted = _git(b.repo, "rev-parse", "HEAD").strip()
     _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
     _run(a)
     _run(b, live=MidSyncEditLive(b.zshrc))
     _write_file(a, PROFILE, b"alpha\nFROM A\n")
     _run(a)
     _write_file(b, PROFILE, b"alpha\nFROM B\n")
-    stopped = _run(b)
-    assert stopped.has_conflicts is True
+    assert _run(b).has_conflicts is True
 
-    # when — the proposal is applied in this run, so every overwrite must keep its current content in the restore point
+    # when
     report = _run(
         b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
     )
 
-    # then — PROFILE is published with the proposal; ZSH is refused and its live bytes are left as they were
-    assert report.has_conflicts is False
+    # then — both files land, and ZSH is restorable from the commit its old bytes are in
+    assert (report.has_conflicts, report.refused) == (False, ())
     assert (b.home / PROFILE).read_bytes() == b"alpha\nMERGED\n"
-    assert _read_live(b) == b"one\ntwo\nthree\n"
-    refused = [refusal for refusal in report.refused if refusal.path == ZSH]
-    assert len(refused) == 1
-    assert "restore point" in refused[0].reason
-
-
-def test_a_file_refused_by_a_proposal_run_is_applied_by_the_next_plain_sync(tmp_path, memory_key_store) -> None:
-    # given — the same refusal as above: ZSH was pending-apply and the proposal run left its live file alone
-    a, b = _two_file_pair(tmp_path, memory_key_store)
-    _write_file(a, ZSH, b"ONE\ntwo\nthree\n")
-    _run(a)
-    _run(b, live=MidSyncEditLive(b.zshrc))
-    _write_file(a, PROFILE, b"alpha\nFROM A\n")
-    _run(a)
-    _write_file(b, PROFILE, b"alpha\nFROM B\n")
-    _run(b)
-    refused = _run(
-        b, resolving=True, decide=decision(lambda view: Proposal("alpha\nMERGED\n") if view.kind == "file" else None)
-    )
-    assert [refusal.path for refusal in refused.refused] == [ZSH]
-
-    # when — a plain sync has no proposal, so the guard does not apply and the stale record is written
-    report = _run(b)
-
-    # then — the file is not stuck: the next plain sync applies the published content. Whether that overwrite
-    # keeps a restore point is the open gap tracked in the design note, and is not decided here.
-    assert ZSH in report.applied
     assert _read_live(b) == b"ONE\ntwo\nthree\n"
+    assert RestorePoint(ZSH, accounted) in report.restore_points
 
 
 # ------------------------------------------------------------------ policy stamp (issue #24)
@@ -2422,3 +2396,22 @@ def test_a_remote_that_forgets_a_published_rotation_cannot_make_sync_drop_its_ke
     with pytest.raises(CommitmentsCorrupt, match="generation 2"):
         _run(a)
     assert a.store.get(2) is not None
+
+
+def test_a_file_published_but_never_applied_is_overwritten_from_the_ledger_commit(tmp_path, memory_key_store) -> None:
+    # given — A publishes a change and B's apply aborts, so B's live file is still what its ledger accounts for
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    accounted = _git(b.repo, "rev-parse", "HEAD").strip()
+    _write_live(a, b"ONE\ntwo\nthree\n")
+    _run(a)
+    aborted = _run(b, live=MidSyncEditLive(b.zshrc))
+
+    # when — a plain sync follows: nothing is collected, so the cycle's commit is A's, which never held B's bytes
+    report = _run(b)
+
+    # then — the file is overwritten, and the ledger's commit is reported as its restore point
+    assert aborted.aborted == (ZSH,)
+    assert (report.refused, report.applied) == ((), (ZSH,))
+    assert report.restore_points == (RestorePoint(ZSH, accounted),)
+    assert _object_at(b, accounted, _only_file_id(b, accounted)) == b"one\ntwo\nthree\n"
+    assert _read_live(b) == b"ONE\ntwo\nthree\n"
