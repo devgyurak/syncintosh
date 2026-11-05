@@ -18,8 +18,14 @@ import time
 import pytest
 
 from syncintosh.core.errors import SecretScanError
+from syncintosh.system import secret_scan
 from syncintosh.system.scan_allow import ALLOWABLE_LABELS, AUTHORIZATION_LABEL, ScanAllow, ScanAllowEntry
-from syncintosh.system.secret_scan import SHELL_PATTERNS, STRUCTURED_PATTERNS, PatternSecretScanner
+from syncintosh.system.secret_scan import (
+    SHELL_PATTERNS,
+    STRUCTURED_PATTERNS,
+    PatternSecretScanner,
+    yaml_block_authorizations,
+)
 
 # Built from pieces so the source file does not itself contain a token-shaped literal.
 PEM = b"-----BEGIN " + b"RSA PRIVATE KEY-----"
@@ -979,3 +985,17 @@ def test_a_pathological_yaml_block_is_scanned_in_linear_time(payload: bytes) -> 
 
     # then — a backtracking or unbounded gather would take seconds
     assert elapsed < 2.0
+
+
+def test_a_capped_plain_value_does_not_walk_its_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    # given — a plain value past the line cap; only a capped block scalar may be reported to its region end
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(secret_scan, "_region_end", lambda *args: calls.append(args) or 0)
+    payload = b"Authorization:\n" + b"  x\n" * 100
+
+    # when
+    yaml_block_authorizations(payload)
+
+    # then — walking a plain value's whole region makes a staircase of keys quadratic, and a timing bound on
+    # an input small enough to be fast on CI cannot see that
+    assert calls == []
