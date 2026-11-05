@@ -39,8 +39,9 @@ platforms, and `profiles.<name>.settings` (the profile name is the user's, hence
   extension MCP server's arbitrary JSON, where a token such as a GitHub PAT goes. `command.env` is the legacy shape
   (`m_2025_06_27`).
 - `agent_servers.<name>.env`, `lsp.<name>.binary.env`, `dap.<name>.env`, `terminal.env`.
-- `language_models.<provider>.custom_headers`, and `language_models.lmstudio.api_key`, a plaintext slot that the
-  schema has and the reader does not use.
+- `language_models.<provider>.custom_headers`; for `openai_compatible` and `anthropic_compatible`, which are maps
+  keyed by a name the user chose, it is `language_models.<kind>.<name>.custom_headers`. Also
+  `language_models.lmstudio.api_key`, a plaintext slot that the schema has and the reader does not use.
 - `dev_container_connections`: an array whose elements carry `remote_env`, so the whole key goes.
 
 Synced on purpose, with the secret scan as the backstop: `lsp.*.initialization_options`, `lsp.*.settings`, `proxy`
@@ -61,6 +62,14 @@ Each entry carries its reason where it is listed. Font size is **not** noise: `I
 - `~/.config/zed/development_credentials` is denied by construction (`system/deny_list.py`).
 - `XDG_CONFIG_HOME` does not move the directory on macOS (`config_dir()`), and `--user-data-dir` is out of scope.
   `docs/src/remote-development.md` says `~/.zed`; the code and the other docs say `~/.config/zed`, and the code wins.
+
+## Consequences worth knowing
+
+- An extension MCP server that has only `settings` is stripped whole, so **the server's existence** is not carried to
+  another Mac. That follows from excluding `settings`.
+- When another Mac deletes a server or a profile, this Mac's apply also removes that item's local values (its `env`,
+  say): `core/projection.py` drops the local values of an item the merge deleted. Stripped values are never in a
+  commit, so a restore point does not hold them.
 
 ## Known risk, recorded not fixed
 
@@ -107,6 +116,11 @@ EXCLUDED_RULES: tuple[KeyPattern, ...] = (
     ("lsp", ANY_KEY, "binary", "env"),
     ("dap", ANY_KEY, "env"),
     ("language_models", ANY_KEY, "custom_headers"),
+    # `openai_compatible` and `anthropic_compatible` are maps from a name the user chose to a provider
+    # (`HashMap<Arc<str>, ...>` in `language_model.rs`), so their `custom_headers` sit one level deeper than the
+    # built-in providers' and the rule above does not reach them.
+    ("language_models", "openai_compatible", ANY_KEY, "custom_headers"),
+    ("language_models", "anthropic_compatible", ANY_KEY, "custom_headers"),
     # In the schema but not read: a plaintext slot nothing should ever fill.
     ("language_models", "lmstudio", "api_key"),
     ("terminal", "env"),
@@ -122,21 +136,27 @@ NOISE_RULES: tuple[KeyPattern, ...] = (
     # A language server binary and its arguments are where this machine installed it.
     ("lsp", ANY_KEY, "binary", "path"),
     ("lsp", ANY_KEY, "binary", "arguments"),
+    # A debug adapter's binary and arguments are absolute paths to where this machine installed it.
     ("dap", ANY_KEY, "binary"),
     ("dap", ANY_KEY, "args"),
+    # An absolute path to the journal directory, and to where worktrees are created.
     ("journal", "path"),
     ("git", "worktree_directory"),
     # Homebrew lives in `/usr/local` on Intel and `/opt/homebrew` on Apple silicon.
     ("terminal", "shell"),
+    # `always` carries an absolute directory.
     ("terminal", "working_directory", "always"),
     # "Allow always" makes Zed record an absolute path.
     ("agent", "sandbox_permissions"),
     # Trusting every worktree on one Mac must not spread to the others.
     ("session", "trust_all_worktrees"),
+    # The answer to a prompt this machine showed ("open in a new window or add to this one?").
     ("cli_default_open_behavior",),
+    # Experiment flags are chosen per machine.
     ("feature_flags",),
     # Opening a remote project makes Zed add `projects` by itself, so syncing it conflicts on every sync.
     ("ssh_connections",),
+    # A list of WSL remotes, which a Mac does not use; another machine's list must not appear here.
     ("wsl_connections",),
 )
 
