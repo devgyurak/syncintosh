@@ -132,6 +132,12 @@ That is one full-rewrite commit, and it is accepted — it is a rare, deliberate
   there is worse than untidy: the abandoned `KG_n` would answer `get(n)` for the *other*
   machine's genuine generation `n`, and every one of its objects would fail authentication as
   if it had been tampered with.
+- When the local branch is ahead of the remote, `key rotate` adopts the remote tip only if the
+  local branch is exactly **one unpushed rotation** on top of it (`HEAD^` is the remote tip). A
+  rotation is attempted at most once at a time, because rotating again first discards the previous
+  one, so a single commit is the only legitimate shape. Anything stacked on that rotation (a collect
+  commit) is unpublished work and is **refused**, not rewound, so the backup HEAD
+  ([01-sync-model.md](01-sync-model.md)) is never discarded silently.
 - Two different keys for one generation id is a **hard error**, not something to reconcile:
   the machines disagree about a key that published objects are already bound to.
 

@@ -972,6 +972,81 @@ def test_rotate_refuses_to_rewind_an_unpushed_collect_commit(tmp_path, memory_ke
     assert _git(a.repo, "rev-parse", "HEAD").strip() == before
 
 
+class _UnpublishedRotationTransport(GitCLITransport):
+    """A transport whose push never reaches the remote and whose later fetches fail.
+
+    Rotation then cannot prove the push absent, so it keeps the new generation: the local branch is
+    left one unpushed rotation ahead of the remote (``docs/design/05-key-generations.md``).
+    """
+
+    def __init__(self, workdir: Path) -> None:
+        super().__init__(workdir)
+        self._fetches = 0
+
+    def fetch(self, remote: str, branch: str) -> None:
+        self._fetches += 1
+        if self._fetches > 1:
+            raise GitError("remote unreachable")
+        super().fetch(remote, branch)
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        raise GitError("connection lost before the server answered")
+
+
+def _leave_an_unpushed_rotation(machine: Machine) -> str:
+    """Rotate `machine` so the rotation stays local; return the remote tip it sits on."""
+    remote_tip = _git(Path(machine.remote), "rev-parse", BRANCH).strip()
+    with pytest.raises(GitError, match="outcome could not be determined"):
+        _rotate(machine, transport=_UnpublishedRotationTransport(machine.repo))
+    return remote_tip
+
+
+def _stack_a_collect_commit(machine: Machine) -> None:
+    """Commit on top of the local tip and move the branch, as an unpushed collect commit would.
+
+    Built directly rather than through `sync`: `sync` refuses to run while the ring holds a generation the
+    remote does not publish yet, so it cannot be the way this state is reached in a test.
+    """
+    transport = GitCLITransport(machine.repo)
+    head = transport.head()
+    assert head is not None
+    transport.update_ref(BRANCH, transport.commit((head,), "collect", ALL_PATHS))
+
+
+def test_rotate_over_a_lone_unpushed_rotation_adopts_the_remote_and_rotates_again(tmp_path, memory_key_store) -> None:
+    # given — A's rotation to generation 2 never reached the remote
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    remote_tip = _leave_an_unpushed_rotation(a)
+    abandoned = a.store.get(2)
+
+    # when — A rotates again
+    generation = _rotate(a)
+
+    # then — the abandoned rotation was discarded: a fresh generation 2 sits directly on the remote tip
+    assert generation == 2
+    assert a.store.get(2) != abandoned
+    assert _git(a.repo, "rev-parse", "HEAD^").strip() == remote_tip
+
+
+def test_rotate_refuses_a_collect_commit_stacked_on_an_unpushed_rotation(tmp_path, memory_key_store) -> None:
+    # given — A holds an unpushed rotation with a collect commit on top of it
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    remote_tip = _leave_an_unpushed_rotation(a)
+    _stack_a_collect_commit(a)
+    head_before = _git(a.repo, "rev-parse", "HEAD").strip()
+    ring_before = a.store.generations()
+    tree_before = _git(a.repo, "ls-tree", "-r", "HEAD")
+    assert _git(a.repo, "rev-parse", "HEAD^^").strip() == remote_tip
+
+    # when & then — rotate refuses rather than rewinding the collect commit and the rotation under it
+    with pytest.raises(GitError, match="run `syncintosh sync` first"):
+        _rotate(a)
+    assert _git(a.repo, "rev-parse", "HEAD").strip() == head_before
+    assert a.store.generations() == ring_before
+    assert _git(a.repo, "ls-tree", "-r", "HEAD") == tree_before
+    assert _git(a.repo, "status", "--porcelain").strip() == ""
+
+
 # --------------------------------------------------------------------------- key prune
 
 

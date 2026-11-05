@@ -24,7 +24,14 @@ from syncintosh.core.ports import GitTransport, KeyStore, SyncLock
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
-from syncintosh.services.keys import export_ring, import_ring, init_new_repo, prune_generation, published_commitments
+from syncintosh.services.keys import (
+    _is_lone_rotation,
+    export_ring,
+    import_ring,
+    init_new_repo,
+    prune_generation,
+    published_commitments,
+)
 
 
 class _StubTransport:
@@ -642,3 +649,33 @@ def test_prune_refuses_when_no_reachable_tip_can_be_read(memory_key_store) -> No
     with pytest.raises(PruneRefused):
         _prune(store, transport, 2)
     assert store.get(2) == KEY_TWO
+
+
+class _ParentTransport:
+    """The one `GitTransport` call `_is_lone_rotation` makes: resolving `<commit>^`."""
+
+    def __init__(self, parents: dict[str, str]) -> None:
+        self._parents = parents
+
+    def resolve(self, rev: str) -> str | None:
+        return self._parents.get(rev)
+
+
+@pytest.mark.parametrize(
+    ("parents", "expected"),
+    [
+        ({"rotation^": "remote"}, True),
+        ({"rotation^": "collect"}, False),
+        ({}, False),
+    ],
+    ids=["rotation_on_the_remote_tip", "collect_stacked_on_it", "root_commit"],
+)
+def test_only_a_commit_directly_on_the_remote_tip_is_a_lone_rotation(parents, expected) -> None:
+    # given
+    transport = cast(GitTransport, _ParentTransport(parents))
+
+    # when
+    lone = _is_lone_rotation(transport, "rotation", "remote")
+
+    # then
+    assert lone is expected

@@ -368,6 +368,16 @@ def rotate_repo(
         lock.release()
 
 
+def _is_lone_rotation(transport: GitTransport, local: str, remote_commit: str) -> bool:
+    """True when `local` is a single commit whose parent is the remote tip.
+
+    Called only when the local branch is ahead at a higher generation, so that commit is the unpushed
+    rotation itself. A collect commit stacked on it makes the parent something else, and that work
+    must be published by `sync` rather than rewound.
+    """
+    return transport.resolve(f"{local}^") == remote_commit
+
+
 def _rotate(
     *,
     transport: GitTransport,
@@ -411,18 +421,24 @@ def _rotate(
             local_manifest = _read_manifest(transport, cipher, local)
             ahead = transport.is_ancestor(remote_commit, local)
             behind = transport.is_ancestor(local, remote_commit)
-            if ahead and local_manifest.key_generation <= remote_manifest.key_generation:
-                # An unpushed collect commit: `sync` publishes it, a rotation would rewind it.
+            if ahead and (
+                local_manifest.key_generation <= remote_manifest.key_generation
+                or not _is_lone_rotation(transport, local, remote_commit)
+            ):
+                # Unpushed work `sync` can publish as a fast-forward: a collect commit at the remote's
+                # generation, or a collect commit stacked on an unpushed rotation. A rotation would
+                # rewind it, and with it the §3.5 backup HEAD.
                 raise GitError(
                     "the local branch is ahead of the remote with unpushed changes; run `syncintosh sync` first"
                 )
             if not ahead and not behind and local_manifest.key_generation == remote_manifest.key_generation:
                 # A content divergence at one generation: `sync` merges it, a rotation cannot.
                 raise GitError("the local branch and the remote have diverged; run `syncintosh sync` first")
-            # Otherwise the local branch is behind, or ahead only by a generation the remote does
-            # not have — a rotation that never landed. Either way, adopt the published tip.
-        # Move to the published tip: a fast-forward when behind, a discard of a stale collect or an
-        # unlanded rotation when ahead (the stray-generation sweep below removes its generation).
+            # Otherwise the local branch is behind, or it is exactly one unpushed rotation on top of the
+            # remote tip (a rotation that never landed; at most one can exist, because rotating again
+            # first discards the previous one). Either way, adopt the published tip.
+        # Move to the published tip: a fast-forward when behind, a discard of the lone unlanded rotation
+        # when ahead (the stray-generation sweep below removes its generation).
         transport.update_ref(branch, remote_commit)
         transport.materialize(remote_commit)
     head = transport.head()
