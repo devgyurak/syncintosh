@@ -7,6 +7,7 @@ afterwards (``AGENTS.md`` §2.7).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -145,6 +146,32 @@ class PendingConflict:
 
 def _length(blob: bytes | None) -> int:
     return 0 if blob is None else len(blob)
+
+
+_COMMIT_ID_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class PendingPush:
+    """A rotation this machine pushed whose outcome it never learned.
+
+    Recorded just before the push and cleared once the outcome is known, so its presence is the
+    evidence that the machine holds a generation it may have published and cannot prove it did
+    (``docs/design/05-key-generations.md``). It names a generation and a commit id, never a key.
+    """
+
+    generation: int
+    commit: str
+
+    @classmethod
+    def create(cls, *, generation: int, commit: str) -> PendingPush:
+        """Validate the two facts the marker exists to carry."""
+        if generation < 2:
+            raise ValueError("a rotation creates generation 2 or later")
+        if _COMMIT_ID_RE.fullmatch(commit) is None:
+            # A commit id is handed to git as an argument; only a full hex object id may reach it.
+            raise ValueError("a pending push must name the rotation commit by its full hex object id")
+        return cls(generation=generation, commit=commit)
 
 
 @dataclass(frozen=True)

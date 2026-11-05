@@ -219,6 +219,7 @@ def key_rotate(
             remote=config.remote,
             branch=ports["branch"],
             mode=mode,
+            marker=ports["rotation_marker"],
         )
     except DomainError as exc:
         _fail(exc)
@@ -876,6 +877,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.system.repo_files import FileRepo
+    from syncintosh.system.rotation_marker import FileRotationMarker
     from syncintosh.system.scan_allow import load_scan_allow, when_tag_for
     from syncintosh.system.secret_scan import PatternSecretScanner
     from syncintosh.vcs.git import GitCLITransport
@@ -905,6 +907,8 @@ def _sync_ports(config, paths) -> dict:
         "live": SystemLiveFiles(),
         "ledger_store": JsonLedgerStore(paths.ledger_file),
         "pending_store": DirectoryPendingStore(paths.pending_dir),
+        # A rotation whose push outcome is unknown: the evidence `sync` needs to settle it (never holds a key).
+        "rotation_marker": FileRotationMarker(paths.rotation_marker_file),
         "lock": FileLock(paths.lock_file),
         "deny": SystemDenyList(),
         "apps": MdfindAppDetector(),

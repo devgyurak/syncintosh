@@ -71,6 +71,11 @@ class MachinePaths:
         return self.state_dir / "pending"
 
     @property
+    def rotation_marker_file(self) -> Path:
+        """`pending-push.json` — a rotation whose push outcome is unknown: a generation and a commit id."""
+        return self.state_dir / "pending-push.json"
+
+    @property
     def lock_file(self) -> Path:
         """The advisory lock the CLI and the daemon share."""
         return self.state_dir / "sync.lock"

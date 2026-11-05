@@ -24,6 +24,7 @@ from syncintosh.core.errors import (
     CommitmentsCorrupt,
     ConflictsNotCovered,
     ContentDigestMismatch,
+    GenerationDivergence,
     GitError,
     KeyGenerationMismatch,
     PendingConflict,
@@ -35,6 +36,7 @@ from syncintosh.core.errors import (
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest
 from syncintosh.core.manifest_codec import dumps_manifest, loads_manifest
+from syncintosh.core.models import PendingPush
 from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import ContentAdapter, LiveFiles, PresetCatalog, PushOutcome, SyntaxValidator
 from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
@@ -63,6 +65,7 @@ from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.lock import FileLock
 from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
+from syncintosh.system.rotation_marker import FileRotationMarker
 from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.system.zsh_check import ZshSyntaxValidator
 from syncintosh.vcs.git import GitCLITransport
@@ -95,6 +98,10 @@ class Machine:
     @property
     def zshrc(self) -> Path:
         return self.home / ZSH
+
+    @property
+    def marker(self) -> FileRotationMarker:
+        return FileRotationMarker(self.lock.with_name("pending-push.json"))
 
 
 class StaleFirstFetchTransport(GitCLITransport):
@@ -227,6 +234,7 @@ def _run(
         live=live or SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
+        rotation_marker=machine.marker,
         lock=FileLock(machine.lock, timeout_seconds=5),
         deny=SystemDenyList(),
         source=SecureFileIdSource(),
@@ -692,6 +700,7 @@ def _rotate(
         remote=machine.remote,
         branch=active.branch() or BRANCH,
         mode="out-of-band" if out_of_band else "hygiene",
+        marker=machine.marker,
     )
 
 
@@ -999,6 +1008,9 @@ def test_rewinding_a_collect_commit_stacked_on_an_unlanded_rotation_loses_no_edi
     remote_tip = _git(Path(remote), "rev-parse", BRANCH).strip()
     with pytest.raises(GitError, match="outcome could not be determined"):
         _rotate(a, transport=_UnlandedRotationTransport(a.repo))
+    # With its pending-push marker `sync` would settle this itself; without one (a crash before the marker was
+    # written) it stops and leaves the collect commit, which is the state `key rotate` then has to rewind.
+    a.marker.clear()
     _write_live(a, b"one\ntwo\nthree\nFROM A\n")
     with pytest.raises(CommitmentsCorrupt):
         _run(a)
@@ -2208,3 +2220,205 @@ def test_a_schema_1_repo_is_rewritten_once_and_its_objects_are_left_alone(tmp_pa
     assert _git(a.repo, "rev-list", "--count", f"{before}..HEAD").strip() == "1"
     assert _published_manifest(a).schema == MANIFEST_SCHEMA
     assert _git(a.repo, "ls-tree", "-r", "HEAD", "--", "objects") == objects_before
+
+
+# ------------------------------------------------------------ an unpublished local rotation vs. the remote
+
+
+class _StrandedRotationTransport(GitCLITransport):
+    """A transport whose rotation push never reaches the remote and whose later fetches fail.
+
+    Rotation cannot prove the push absent, so it keeps the new generation and its pending-push marker: the
+    machine is left holding a rotation the remote has never seen (``docs/design/05-key-generations.md``).
+    """
+
+    def __init__(self, workdir: Path) -> None:
+        super().__init__(workdir)
+        self._fetches = 0
+
+    def fetch(self, remote: str, branch: str) -> None:
+        self._fetches += 1
+        if self._fetches > 1:
+            raise GitError("remote unreachable")
+        super().fetch(remote, branch)
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        raise GitError("connection lost before the server answered")
+
+
+def _strand_a_rotation(machine: Machine, *, out_of_band: bool) -> None:
+    with pytest.raises(GitError, match="outcome could not be determined"):
+        _rotate(machine, out_of_band=out_of_band, transport=_StrandedRotationTransport(machine.repo))
+
+
+def test_a_rotation_of_unknown_outcome_leaves_a_marker_naming_it(tmp_path, memory_key_store) -> None:
+    # given
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    _strand_a_rotation(a, out_of_band=False)
+
+    # then — the marker names the generation and the rotation commit that may or may not have landed
+    marker = a.marker.load()
+    assert marker is not None
+    assert (marker.generation, marker.commit) == (2, _git(a.repo, "rev-parse", "HEAD").strip())
+
+
+class _MarkerWitnessTransport(GitCLITransport):
+    """A transport that records whether the marker existed at the moment the push was made."""
+
+    def __init__(self, workdir: Path, marker: FileRotationMarker) -> None:
+        super().__init__(workdir)
+        self._marker = marker
+        self.marker_at_push: PendingPush | None = None
+
+    def push(self, remote: str, branch: str, commit: str) -> PushOutcome:
+        self.marker_at_push = self._marker.load()
+        return super().push(remote, branch, commit)
+
+
+def test_the_marker_is_recorded_before_the_push_and_cleared_once_it_lands(tmp_path, memory_key_store) -> None:
+    # given
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    transport = _MarkerWitnessTransport(a.repo, a.marker)
+
+    # when
+    _rotate(a, transport=transport)
+
+    # then
+    assert transport.marker_at_push is not None
+    assert transport.marker_at_push.generation == 2
+    assert a.marker.load() is None
+
+
+def test_the_marker_is_cleared_when_a_push_that_reported_failure_turns_out_to_have_landed(
+    tmp_path, memory_key_store
+) -> None:
+    # given
+    a, _, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    _rotate(a, transport=_LyingPushTransport(a.repo))
+
+    # then
+    assert a.marker.load() is None
+
+
+def test_the_marker_is_cleared_when_the_rotation_is_proven_absent_and_discarded(tmp_path, memory_key_store) -> None:
+    # given — the server refuses the push, and the remote can be asked, so the absence is proven
+    a, _, remote = _pair(tmp_path, memory_key_store)
+    hook = Path(remote) / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    # when
+    with pytest.raises(GitError, match="did not land"):
+        _rotate(a)
+
+    # then
+    assert a.marker.load() is None
+    assert a.store.get(2) is None
+
+
+def test_rotating_again_replaces_the_marker_of_the_rotation_it_discards(tmp_path, memory_key_store) -> None:
+    # given — an earlier rotation of unknown outcome
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=False)
+
+    # when
+    _rotate(a)
+
+    # then — the new rotation landed and the old marker is gone
+    assert a.marker.load() is None
+    assert a.store.generations() == (1, 2)
+
+
+def _publish_on_generation_one(machine: Machine, data: bytes) -> None:
+    _write_live(machine, data)
+    _run(machine)
+
+
+def test_sync_drops_an_unpublished_hygiene_rotation_the_remote_diverged_from(tmp_path, memory_key_store) -> None:
+    # given — A's rotation never reached the remote, B published an edit, and A has its own unsynced edit
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=False)
+    _publish_on_generation_one(b, b"one\ntwo\nthree\nFROM B\n")
+    _write_live(a, b"FROM A\none\ntwo\nthree\n")
+
+    # when
+    report = _run(a)
+
+    # then — the rotation is discarded and the cycle says so
+    assert any("generation 2" in note and "key rotate --hygiene" in note for note in report.notes)
+    assert a.store.generations() == (1,)
+    assert a.marker.load() is None
+    assert wrap_path(2) not in _git(a.repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    # and nothing was lost: the remote carries both edits, and B receives A's
+    _run(b)
+    assert _read_live(a) == _read_live(b)
+    assert (_read_live(a) or b"").startswith(b"FROM A\n")
+    assert b"FROM B" in (_read_live(a) or b"")
+    assert loads_commitments(GitCLITransport(a.repo).read_blob("HEAD", COMMITMENTS_PATH) or b"").keys() == {1}
+
+
+def test_sync_recovers_when_the_remote_never_moved_and_still_publishes_the_edit(tmp_path, memory_key_store) -> None:
+    # given — the rotation push was cut and nothing else happened, so the local branch is merely ahead of the
+    # remote; A edits a file and the daemon's sync collects it on top of the unpublished rotation
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=False)
+    _write_live(a, b"one\ntwo\nthree\nFROM A\n")
+
+    # when
+    report = _run(a)
+    _run(b)
+
+    # then — the edit reached the remote and the other machine, the rotation is gone, and so is the marker
+    assert any("key rotate --hygiene" in note for note in report.notes)
+    assert a.store.generations() == (1,)
+    assert a.marker.load() is None
+    assert _git(Path(remote), "rev-parse", BRANCH).strip() == _git(a.repo, "rev-parse", "HEAD").strip()
+    assert (_read_live(b) or b"").endswith(b"FROM A\n")
+
+
+def test_sync_stops_on_an_unpublished_out_of_band_rotation_without_discarding_it(tmp_path, memory_key_store) -> None:
+    # given — A's out-of-band rotation never reached the remote, and B published an edit
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=True)
+    _publish_on_generation_one(b, b"one\ntwo\nthree\nFROM B\n")
+    head_before = _git(a.repo, "rev-parse", "HEAD").strip()
+
+    # when & then — sync will not silently undo a removal or key replacement
+    with pytest.raises(GenerationDivergence, match="--out-of-band"):
+        _run(a)
+    assert a.store.get(2) is not None
+    assert a.marker.load() is not None
+    assert _git(a.repo, "rev-parse", "HEAD").strip() == head_before
+
+
+def test_sync_clears_a_marker_whose_rotation_turned_out_to_have_landed(tmp_path, memory_key_store) -> None:
+    # given — a rotation that landed, with a marker a lost response left behind
+    a, _, _ = _pair(tmp_path, memory_key_store)
+    _rotate(a)
+    a.marker.record(PendingPush.create(generation=2, commit=_git(a.repo, "rev-parse", "HEAD").strip()))
+
+    # when
+    _run(a)
+
+    # then — the remote publishes generation 2 under this machine's key, so the marker has served
+    assert a.marker.load() is None
+    assert a.store.get(2) is not None
+
+
+def test_a_remote_that_forgets_a_published_rotation_cannot_make_sync_drop_its_key(tmp_path, memory_key_store) -> None:
+    # given — A rotated and the push landed (so there is no marker); the remote is then rewound to before it
+    a, b, remote = _pair(tmp_path, memory_key_store)
+    _publish_on_generation_one(b, b"one\ntwo\nthree\nFROM B\n")
+    before_rotation = _git(Path(remote), "rev-parse", BRANCH).strip()
+    _rotate(a)
+    assert a.marker.load() is None
+    _git(Path(remote), "update-ref", f"refs/heads/{BRANCH}", before_rotation)
+
+    # when & then — no marker, so the held generation the remote no longer publishes stays a hard stop
+    with pytest.raises(CommitmentsCorrupt, match="generation 2"):
+        _run(a)
+    assert a.store.get(2) is not None
