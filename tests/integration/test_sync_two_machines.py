@@ -2586,3 +2586,27 @@ def test_a_stale_conflict_settled_by_a_pick_keeps_the_users_edit_in_a_restore_co
     assert (report.refused, report.has_conflicts) == ((), False)
     assert _read_live(b) == settled
     assert _restored(b, report) == b"one\nFROM B\nthree\n"
+
+
+def test_a_stale_edit_the_scan_refuses_is_not_overwritten_and_keeps_its_old_baseline(
+    tmp_path, memory_key_store
+) -> None:
+    # given — B's edit over the stale baseline carries a secret and conflicts with A's; the pick takes A's side
+    secret_edit = b"one\nAWS_ACCESS_KEY_ID=" + b"AKIA" + b"ABCDEFGHIJKLMNOP" + b"\nthree\n"
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=secret_edit)
+    ledger_before = b.ledger.read_text(encoding="utf-8")
+    assert _run(b).has_conflicts is True
+
+    # when
+    report = _run(b, resolving=True, decide=decision(take_chooser("remote")))
+    later = _run(b)
+
+    # then — the overwrite is refused with the scan guidance, nothing is saved, and the ledger keeps the old entry
+    assert [refusal.path for refusal in report.refused] == [ZSH]
+    assert "scan allow" in report.refused[0].reason
+    assert _read_live(b) == secret_edit
+    assert b.ledger.read_text(encoding="utf-8") == ledger_before
+    assert _git(b.repo, "for-each-ref", "refs/syncintosh").strip() == ""
+    # and the next sync does not overwrite it either
+    assert _read_live(b) == secret_edit
+    assert later.applied == ()
