@@ -201,7 +201,7 @@ def test_the_vscode_preset_keeps_noise_and_the_proxy_credential_apart() -> None:
     assert ("git.path",) in noise
     # a machine-local key is never also a credential, and the terminal keys are synced upstream
     assert noise & excluded == frozenset()
-    assert [key for key in noise if key[0].startswith("terminal.")] == []
+    assert [key for key in noise if str(key[0]).startswith("terminal.")] == []
 
 
 def test_the_keybindings_file_has_no_strip_list() -> None:

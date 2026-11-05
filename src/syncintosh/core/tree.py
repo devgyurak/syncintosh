@@ -37,6 +37,35 @@ if TYPE_CHECKING:
 # whole. The empty tuple is the document root.
 KeyPath = tuple[str, ...]
 
+
+@dataclass(frozen=True)
+class AnyKey:
+    """The pattern segment that matches exactly one object key, whatever its name.
+
+    A sentinel type and not the string ``"*"``: ``*`` is a legal JSON key, and a pattern that read it as a
+    wildcard would silently also strip a real key of that name.
+    """
+
+    def __repr__(self) -> str:
+        return "ANY_KEY"
+
+
+ANY_KEY: Final = AnyKey()
+
+# A key path in which a segment may be `ANY_KEY`. Only a preset's `noise` and `excluded` are patterns; every
+# other path (a carried key, an ignore-list entry, a tree entry) is an exact `KeyPath`.
+KeyPattern = tuple[str | AnyKey, ...]
+
+
+def pattern_sort_key(pattern: KeyPattern) -> list[tuple[bool, str]]:
+    """A total order over patterns: a name sorts before a wildcard at the same position.
+
+    `AnyKey` has no ordering of its own, so sorting patterns directly raises as soon as a name and a wildcard
+    meet at one position. For a pattern with no wildcard this is the plain string order.
+    """
+    return [(isinstance(segment, AnyKey), segment if isinstance(segment, str) else "") for segment in pattern]
+
+
 # An element of an array that is merged by its declared fields (`core/keyed_array.py`): the
 # (field, value) pairs of its identity, where an absent optional field is `None`. `None` and `""`
 # stay distinct, so a missing `when` and `"when": ""` name different elements.
@@ -286,11 +315,14 @@ def _object_to_value(entries: Mapping[KeyPath, Node], parent: KeyPath) -> dict[s
 
 __all__ = [
     "ABSENT",
+    "ANY_KEY",
     "Absent",
+    "AnyKey",
     "Array",
     "ElementId",
     "EmptyObject",
     "KeyPath",
+    "KeyPattern",
     "Leaf",
     "Node",
     "Object",
@@ -299,6 +331,7 @@ __all__ = [
     "Tree",
     "element_label",
     "path_label",
+    "pattern_sort_key",
     "scalar",
     "tree_from_value",
 ]
