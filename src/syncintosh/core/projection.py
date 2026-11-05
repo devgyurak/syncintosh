@@ -53,7 +53,7 @@ from difflib import SequenceMatcher
 from syncintosh.core.errors import ContentParseError, ProjectionError
 from syncintosh.core.ports import ContentAdapter, TextEdit, Verbatim
 from syncintosh.core.presets import PresetFile
-from syncintosh.core.tree import EmptyObject, KeyPath, Node, Tree
+from syncintosh.core.tree import AnyKey, EmptyObject, KeyPath, KeyPattern, Node, Tree
 
 
 @dataclass(frozen=True)
@@ -84,6 +84,18 @@ def _root_of(path: KeyPath, roots: Iterable[KeyPath]) -> KeyPath | None:
 def _under(path: KeyPath, roots: Iterable[KeyPath]) -> bool:
     """True when `path` is one of `roots` or lies strictly beneath it."""
     return _root_of(path, roots) is not None
+
+
+def _matches(path: KeyPath, pattern: KeyPattern) -> bool:
+    """True when `path` is what `pattern` names, or lies beneath it: `ANY_KEY` stands for exactly one key."""
+    return len(path) >= len(pattern) and all(
+        isinstance(wanted, AnyKey) or wanted == key for wanted, key in zip(pattern, path, strict=False)
+    )
+
+
+def _under_pattern(path: KeyPath, patterns: Iterable[KeyPattern]) -> bool:
+    """True when `path` matches one of `patterns` or lies beneath a match."""
+    return any(_matches(path, pattern) for pattern in patterns)
 
 
 def _consistent(entries: dict[KeyPath, Node]) -> dict[KeyPath, Node]:
@@ -149,20 +161,23 @@ def carry(tree: Tree, paths: frozenset[KeyPath], source: Tree | None) -> Tree:
     return _document(entries)
 
 
-def strip(tree: Tree, paths: frozenset[KeyPath]) -> Tree:
-    """Return `tree` without the entries at or under `paths`.
+def strip(tree: Tree, paths: frozenset[KeyPattern]) -> Tree:
+    """Return `tree` without the entries at or under a key matching `paths`.
 
     A parent object that loses every child simply has no path left, so it disappears — and
     :func:`graft` re-creates it when the local values come back.
     """
     if not paths:
         return tree
-    kept = {path: node for path, node in tree.entries.items() if not _under(path, paths)}
+    kept = {path: node for path, node in tree.entries.items() if not _under_pattern(path, paths)}
     return _document(kept)
 
 
-def graft(repo: Tree, live: Tree, paths: frozenset[KeyPath]) -> Tree:
-    """`repo` with `live`'s values at `paths` re-attached, ordered by `live`.
+def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozenset[KeyPath] = frozenset()) -> Tree:
+    """`repo` with `live`'s values at `paths` and `carried` re-attached, ordered by `live`.
+
+    `paths` are the preset's patterns and `carried` the user's exact keys. They stay two sets because a carried key
+    is a name the user typed: a key called ``*`` there is that key, and must not be read as a wildcard.
 
     The ordering matters. The repo text was rendered **without** the stripped keys, so the
     renderer re-inserts each one relative to the sibling it already knows; taking the order from
@@ -172,17 +187,21 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPath]) -> Tree:
     A key that `live` has and `repo` does not — outside `paths` — was deleted by the merge, so
     it is dropped; a key `repo` has and `live` does not is carried over.
     """
-    if not paths:
+    if not paths and not carried:
         return repo
+
+    def held(path: KeyPath) -> bool:
+        return _under_pattern(path, paths) or _under(path, carried)
+
     entries: dict[KeyPath, Node] = {}
     repo_entries = repo.entries
     for path, node in live.entries.items():
-        if _under(path, paths):
+        if held(path):
             entries[path] = node
         elif path in repo_entries:
             entries[path] = repo_entries[path]
     for path, node in repo_entries.items():
-        if not _under(path, paths):
+        if not held(path):
             entries.setdefault(path, node)
     return _document(entries)
 
@@ -241,11 +260,10 @@ def restore_text(
     are re-attached through the renderer, which places a key by its sibling, writes a value on one line as
     the format's default, and has no place for a trailing comment.
     """
-    paths = policy.stripped | carried.paths
-    if not paths:
+    if not policy.stripped and not carried.paths:
         return repo_text
     live = _parse(adapter, live_text, policy)
-    restored = graft(_parse(adapter, repo_text, policy), live, paths)
+    restored = graft(_parse(adapter, repo_text, policy), live, policy.stripped, carried.paths)
     rebased = _rebased(adapter, repo_text, live_text, restored, policy, carried)
     if rebased is not None:
         return rebased
