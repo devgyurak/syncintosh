@@ -16,6 +16,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `zsh` | `.zshenv` · `.zprofile` · `.zshrc` · `.zlogin` · `.zlogout` | `text` | — (a shell file has no key paths) | — (the secret scan is the backstop) | — | — | — (ships with macOS) |
 | `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` · `…/snippets/*.json` · `…/snippets/*.code-snippets` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
+| `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` (and `language_models.openai_compatible`/`anthropic_compatible`.`*.custom_headers`) · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
 
 ### `docker` notes
 
@@ -159,6 +160,60 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   need their own exclusion pass before it can be collected safely), `extensions.json`, `prompts/`, Insiders,
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not
   under the `$HOME` user directory).
+
+### `zed` notes
+
+- **Verified against the source, not an installed app** (a source-verified exception, approved as for `vscode`).
+  `zed-industries/zed` `main` @ `dcf3f98c9a3213b533f6d9e5b1790482659964f4` and the Homebrew cask `zed`. Files:
+  `crates/paths/src/paths.rs` (`config_dir()`), `crates/settings_content/src/{settings_content,project,agent,
+  terminal,language_model,workspace}.rs`, `assets/settings/initial_user_settings.json`,
+  `docs/src/reference/all-settings.md`, `docs/src/macos.md`, `crates/zed/Cargo.toml` (bundle id),
+  `crates/zed_credentials_provider/src/zed_credentials_provider.rs` (`development_credentials`).
+- **Paths.** On macOS the config directory is `~/.config/zed` and `XDG_CONFIG_HOME` does not move it;
+  `--user-data-dir` is out of scope. `docs/src/remote-development.md` says `~/.zed`; the code and the other docs
+  disagree with it, and the code wins.
+- **Overrides.** `UserSettingsContent` flattens `ReleaseChannelOverrides` (`dev`, `nightly`, `preview`, `stable`),
+  `PlatformOverrides` (`macos`, `linux`, `windows`) and `profiles: {name: {base, settings}}` over the base, and an
+  override does not nest another. Every rule is therefore generated under nine prefixes (the root and these eight);
+  the profile name is the user's, which is why `ANY_KEY` exists (`02-base-and-merge.md`, "Projection").
+- **Excluded**: any object a credential can sit in. `context_servers.<name>` `env`, `headers`, `oauth` (a
+  `client_secret`), `settings` (an extension MCP server's free-form JSON, where a token goes) and the legacy
+  `command.env`; `agent_servers.*.env`, `lsp.*.binary.env`, `dap.*.env`, `terminal.env`;
+  `language_models.*.custom_headers` (four levels for `openai_compatible` and `anthropic_compatible`:
+  `language_models.<kind>.<name>.custom_headers`, because those two are maps keyed by a name the user chose, so
+  both get their own rule) and the unread plaintext slot `language_models.lmstudio.api_key`;
+  `dev_container_connections` whole (an array whose elements carry `remote_env`).
+- **Two consequences of excluding whole objects.** An extension MCP server that has only `settings` is stripped
+  whole, so *the server's existence* is not carried to another Mac. And when another Mac deletes a server or a
+  profile, this Mac's apply removes that item's local values (its `env`, say) with it: a user-named item the merge
+  deleted is not left behind as a server with no `command` (`02-base-and-merge.md`, "Projection"). Stripped values
+  are never in a commit, so a restore point does not hold them.
+- **Synced, left to the secret scan**: `lsp.*.initialization_options`, `lsp.*.settings`, `proxy` (the scan knows
+  `scheme://user:pass@`), `context_servers.*.command` and `.args`. Also synced, and not yet reviewed against the pinned schema (a follow-up):
+  `context_servers.*.url`, `agent_servers.*.command`/`args`, and the `api_url` of `language_models` and
+  `edit_predictions` providers, which can embed `user:pass@` or a query-string token; the scan is their only backstop.
+- **Noise**, each with its reason in `presets/zed.py`: `node.path`/`npm_path`, `lsp.*.binary.path`/`arguments`,
+  `dap.*.binary`/`args`, `journal.path`, `git.worktree_directory`, `terminal.shell` (Intel `/usr/local` vs. Apple
+  silicon `/opt/homebrew`), `terminal.working_directory.always`, `agent.sandbox_permissions` ("Allow always"
+  records an absolute path), `session.trust_all_worktrees`, `cli_default_open_behavior`, `feature_flags`,
+  `ssh_connections` (opening a remote project makes Zed add `projects` itself, so syncing it would conflict every
+  time) and `wsl_connections`. Font size is **not** noise: `Increase/Decrease*FontSize` has `persist` false by
+  default (`zed.rs`, the default keymap).
+- **Keymap.** `keymap.json` is compared as one array. `context` is optional and defaults to `""`, which does not
+  fit the rule that an absent field is not `""`; duplicate contexts are allowed and the later entry wins. A
+  per-block merge is a follow-up. `snippets/*.json` and `themes/*.json` are globs with no strip list.
+- **No ignore list**: Zed has no Settings Sync.
+- **Deny list.** `.config/zed/development_credentials` is the Dev build's plaintext sign-in file; it is denied by
+  construction (`system/deny_list.py`).
+- **Writes.** Settings are edited by tree-sitter minimal edits plus an atomic write; the keymap editor edits minimally
+  but writes with a plain `fs.write`, so a copy-based collect can in principle read a keymap mid-write.
+- **Migrator (UNVERIFIED).** `zed/src/zed/migrate.rs` converts in memory and rewrites the file only on the banner's
+  "Backup and Update"; a write at startup was not seen. Known risk, recorded and not fixed: with different Zed
+  versions on two Macs, a key format migrated on one reaches the older one.
+- **Out of scope**: `tasks.json` and `debug.json` (the root is an array and `env` sits in its elements, so no key
+  path can cut it), `prompts/` (LMDB), `embeddings/`, `prompt_overrides/`, `*_backup.json`, `global_settings.json`,
+  `git/config`, `AGENTS.md` (a follow-up candidate), a project's `.zed/`, extensions, and a bundle check for Preview
+  or Nightly alone.
 
 ## Changing a policy
 
