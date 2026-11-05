@@ -268,8 +268,8 @@ tell another what not to scan (``AGENTS.md`` §3.3).
   through a scratch index, so the working tree, the index, and the branch are not touched. A scan refusal
   refuses that file's overwrite (it is left as it is) and points at `syncintosh scan allow`. `key prune`
   counts this ref's tip as reachable history, so it will not drop a generation the ref still uses.
-  One case remains outside the guard: a local edit over a stale baseline, which the cycle merges into the
-  published result instead of storing, so no commit holds its bytes verbatim.
+  A local edit over a stale baseline is saved the same way: the cycle merges it into the published result (or a
+  pick settles it), so the edit itself is in no commit, and the file's restore commit holds it verbatim.
 - **An object whose plaintext did not change is not rewritten.** A random nonce (§3.1) means
   rewriting an object always changes its bytes, so an unconditional write would rewrite
   every ciphertext on every sync and keep git history permanently dirty. Changed-ness is

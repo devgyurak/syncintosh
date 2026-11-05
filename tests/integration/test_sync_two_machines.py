@@ -2531,3 +2531,58 @@ def test_a_rotation_that_rewinds_leaves_the_restore_commit_readable(tmp_path, me
     assert generation == 2
     assert _git(b.repo, "rev-parse", RESTORE_REF_NAME).strip() == restore
     assert _object_at(b, restore, _only_file_id(b)) == b"from B\n"
+
+
+def _stale_pair(tmp_path: Path, make_store, *, b_edit: bytes) -> tuple[Machine, Machine]:
+    """B's apply of A's change aborted, so B's ledger is stale, and B then edited its live file to `b_edit`."""
+    a, b, _ = _pair(tmp_path, make_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_live(b, b_edit)
+    return a, b
+
+
+def _restored(machine: Machine, report: SyncReport) -> bytes:
+    (point,) = [point for point in report.restore_points if point.path == ZSH]
+    return _object_at(machine, point.commit, _only_file_id(machine))
+
+
+def test_a_clean_stale_merge_reports_a_restore_commit_holding_the_users_edit(tmp_path, memory_key_store) -> None:
+    # given — B edited a line A did not touch
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=b"one\nFROM A\nthree\nFROM B\n".replace(b"FROM A", b"two"))
+
+    # when
+    report = _run(b)
+
+    # then — the merge carries both edits, and the user's exact bytes are recoverable
+    assert (report.refused, report.has_conflicts) == ((), False)
+    assert _read_live(b) == b"one\nFROM A\nthree\nFROM B\n"
+    assert _restored(b, report) == b"one\ntwo\nthree\nFROM B\n"
+
+
+@pytest.mark.parametrize(
+    ("decider", "settled"),
+    [
+        (decision(take_chooser("remote")), b"one\nFROM A\nthree\n"),
+        (
+            decision(lambda view: Proposal("one\nMERGED\nthree\n") if view.kind == "file" else None),
+            b"one\nMERGED\nthree\n",
+        ),
+    ],
+    ids=["remote-pick", "proposal"],
+)
+def test_a_stale_conflict_settled_by_a_pick_keeps_the_users_edit_in_a_restore_commit(
+    tmp_path, memory_key_store, decider, settled: bytes
+) -> None:
+    # given — B edited the region A changed, so the stale merge conflicts
+    _, b = _stale_pair(tmp_path, memory_key_store, b_edit=b"one\nFROM B\nthree\n")
+    assert _run(b).has_conflicts is True
+
+    # when
+    report = _run(b, resolving=True, decide=decider)
+
+    # then — the settled content replaced the file, and the edit it replaced is recoverable verbatim
+    assert (report.refused, report.has_conflicts) == ((), False)
+    assert _read_live(b) == settled
+    assert _restored(b, report) == b"one\nFROM B\nthree\n"

@@ -713,7 +713,7 @@ _RESTORE_SCAN_REFUSED = (
     "the file's current content failed the secret scan, so it could not be saved for restore; "
     "review it, or accept it with `syncintosh scan allow`"
 )
-_RESTORE_MESSAGE = "syncintosh: restore point before --adopt remote"
+_RESTORE_MESSAGE = "syncintosh: restore point before an overwrite"
 
 # Why a new file under a glob was not published: the glob already covers the maximum this machine
 # publishes, so a file that is not already a record under it is held back. A file that *is* already
@@ -2223,7 +2223,7 @@ def _apply(
     adopt: AdoptChoice | None,
     backup: Backup,
     scanner: SecretScanner,
-    folded: frozenset[str] = frozenset(),
+    unstored: frozenset[str] = frozenset(),
     paths: LivePaths | None = None,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
@@ -2243,11 +2243,11 @@ def _apply(
     already tracks, and is one the local catalog lets that preset name
     (``docs/design/03-manifest.md``). A refusal is reported, never silent.
 
-    An overwrite must replace only bytes some commit holds (`_restore_point`), or the write is refused. `folded`
-    names the files whose live bytes this cycle merged into the published result — a local edit over a stale
-    baseline — which no commit holds verbatim but whose content the result carries. A first-sight or suppressed
-    record applied with `--adopt remote` has no commit either, so its bytes are scanned, sealed, and committed to
-    the local-only restore ref first (`_save_restore_point`); a scan refusal leaves the file as it is.
+    An overwrite must replace only bytes some commit holds (`_restore_point`), or the write is refused. Bytes
+    that no commit holds are scanned, sealed, and committed to the local-only restore ref first
+    (`_save_restore_point`); a scan refusal leaves the file as it is. That covers a first-sight or suppressed
+    record applied with `--adopt remote`, and `unstored`: the files whose live edit over a stale baseline this
+    cycle merged into the published result (or settled by a pick), so the edit itself is in no commit.
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     applied: list[str] = []
@@ -2404,9 +2404,9 @@ def _apply(
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
-        if live_bytes is not None and live_bytes != data and file_id not in folded:
-            if entry is None or entry.suppressed:
-                # Written here only on `--adopt remote`, and its bytes are in no commit: save them first.
+        if live_bytes is not None and live_bytes != data:
+            if entry is None or entry.suppressed or file_id in unstored:
+                # Its bytes are in no commit (an `--adopt remote` overwrite, or a stale-baseline edit): save them first.
                 held_in = _save_restore_point(
                     transport=transport,
                     cipher=cipher,
@@ -2414,7 +2414,7 @@ def _apply(
                     backup=backup,
                     key_generation=target_manifest.key_generation,
                     record=record,
-                    view=live_view,
+                    view=ledger_view,
                 )
             else:
                 held_in = _restore_point(backup, file_id, ledger_view, entry.commit)
@@ -2938,7 +2938,7 @@ def _cycle(
         adopt=adopt,
         backup=Backup.create(local_commit, records_at=records_at),
         scanner=scanner,
-        folded=frozenset(change.record.file_id for change in collected.stale),
+        unstored=frozenset(change.record.file_id for change in collected.stale),
         paths=paths,
     )
     ledger_store.save(
