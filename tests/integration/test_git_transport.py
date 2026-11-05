@@ -449,3 +449,16 @@ def test_a_failing_cat_file_is_a_redacted_git_error(tmp_path, monkeypatch) -> No
     # then
     assert "`git cat-file` failed (exit 3)" in str(raised.value)
     assert "s3cr3t" not in str(raised.value)
+
+
+def test_a_stream_error_with_a_live_git_is_re_raised_without_a_self_referential_cause(tmp_path) -> None:
+    # given — git is alive (`cat-file --batch` waits for input), so there is no exit detail to add
+    transport = GitCLITransport(tmp_path / "work")
+    transport.init()
+
+    # when
+    with pytest.raises(GitError, match="malformed") as raised, transport._spawn(["cat-file", "--batch"], feed=True):
+        raise GitError("malformed")
+
+    # then
+    assert raised.value.__cause__ is None

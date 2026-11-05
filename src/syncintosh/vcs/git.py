@@ -279,7 +279,10 @@ class GitCLITransport:
                 except GitError as exc:
                     # The block gave up on git's output (cut off, malformed, or its input closed). If git
                     # itself failed, its exit code and stderr are the real cause, so surface them.
-                    raise self._with_exit_detail(exc, proc, errors, args[0]) from exc
+                    detailed = self._with_exit_detail(exc, proc, errors, args[0])
+                    if detailed is exc:
+                        raise  # nothing more to say; chaining an error to itself would make a self-referential cause
+                    raise detailed from exc
                 if proc.stdin is not None:
                     proc.stdin.close()
                 assert proc.stdout is not None
