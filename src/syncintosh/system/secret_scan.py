@@ -333,6 +333,8 @@ def yaml_block_authorizations(plaintext: bytes) -> list[tuple[int, int, int]]:
     line ending, an escaped line break inside a double-quoted value, a key with a word glued to its
     front (`my_authorization`), which the same-line rules cannot see either, and a `-` line indented deeper
     than its list item (`- Bearer` / `    - abc`), which YAML reads as the item's text but is split here.
+    A list item that is itself a block scalar (`- |` then `Token abc`) is not read either: the `|` in
+    front keeps the item from looking like a credential.
     """
     found: list[tuple[int, int, int]] = []
     reported_until = 0

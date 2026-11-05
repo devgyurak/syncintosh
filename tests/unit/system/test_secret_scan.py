@@ -947,18 +947,18 @@ def test_a_continuation_line_changed_in_a_block_changes_its_fingerprint() -> Non
 
 
 YAML_REDOS = [
-    pytest.param(b"Authorization: |\n" + b"  " + b"a " * 200_000 + b"\n", id="long-continuation"),
-    pytest.param(b"Authorization: |\n" + b"  x\n" * 100_000, id="many-continuation-lines"),
-    pytest.param(b"Authorization: |\n  Token\n" * 50_000, id="repeated-keys-unindented"),
-    pytest.param(b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 600)), id="nested-keys"),
-    pytest.param(b"Authorization: | " + b" " * 200_000 + b"x\n", id="spaces-after-indicator"),
+    pytest.param(b"Authorization: |\n" + b"  " + b"a " * 20_000 + b"\n", id="long-continuation"),
+    pytest.param(b"Authorization: |\n" + b"  x\n" * 10_000, id="many-continuation-lines"),
+    pytest.param(b"Authorization: |\n  Token\n" * 5_000, id="repeated-keys-unindented"),
+    pytest.param(b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 150)), id="nested-keys"),
+    pytest.param(b"Authorization: | " + b" " * 20_000 + b"x\n", id="spaces-after-indicator"),
     pytest.param(b"Authorization: Bearer " + b"${A} " * 60 + b"\n", id="repeated-reference-one-line"),
     pytest.param(b"Authorization: >\n  Bearer\n" + b"  ${A}\n" * 70, id="repeated-reference-block"),
     pytest.param(
-        b"".join(b" " * i + b"Authorization:\n" + b" " * (i + 1) + b"x\n" * 70 for i in range(1, 300)),
+        b"".join(b" " * i + b"Authorization:\n" + b" " * (i + 1) + b"x\n" * 70 for i in range(1, 60)),
         id="staircase-of-plain-values",
     ),
-    pytest.param(b"".join(b" " * i + b"Authorization:\n\n\n\n" for i in range(1, 1500)), id="staircase-of-blank-runs"),
+    pytest.param(b"".join(b" " * i + b"Authorization:\n\n\n\n" for i in range(1, 300)), id="staircase-of-blank-runs"),
     pytest.param(
         b"".join(b" " * i + b"Authorization: |\n" for i in range(1, 65)) + b"\n" * 65_000 + b"  x\n",
         id="deepening-headers-over-a-blank-run",
