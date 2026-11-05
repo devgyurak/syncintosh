@@ -19,7 +19,7 @@ from syncintosh.core.errors import ConfigError
 from syncintosh.core.ignore import IgnoreSpec
 from syncintosh.core.policy import policy_digest
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.projection import NO_CARRY, Carry, graft, project_text, restore_text, strip
+from syncintosh.core.projection import NO_CARRY, Carry, _rebased, graft, project_text, restore_text, strip
 from syncintosh.core.tree import ANY_KEY, AnyKey, tree_from_value
 
 ADAPTER = JsoncAdapter()
@@ -316,3 +316,159 @@ def test_a_pattern_restore_projects_back_to_the_repo_text(names, command, local,
 
     # then
     assert _project(restored, _POLICY) == repo_text
+
+
+# --------------------------------------------------------------------------- an item the merge deleted
+
+
+CS_ENV = ("context_servers", ANY_KEY, "env")
+CS_SETTINGS = ("context_servers", ANY_KEY, "settings")
+PROFILE_NODE = ("profiles", ANY_KEY, "settings", "node", "path")
+PROFILE_CS_ENV = ("profiles", ANY_KEY, "settings", "context_servers", ANY_KEY, "env")
+ITEMS = _policy(excluded={CS_ENV, CS_SETTINGS, PROFILE_CS_ENV}, noise={PROFILE_NODE})
+
+
+def _item(*, shared: bool = True, env: str = "T") -> dict:
+    return {**({"command": "x"} if shared else {}), "env": {"K": env}}
+
+
+def _restored(live: dict, repo: dict, policy: PresetFile = ITEMS) -> str:
+    return restore_text(ADAPTER, json.dumps(repo), json.dumps(live), policy)
+
+
+@pytest.mark.parametrize(
+    ("live", "repo", "expected"),
+    [
+        pytest.param(
+            {"context_servers": {"gh": _item(), "fs": _item(env="FS")}},
+            {"context_servers": {"fs": {"command": "x"}}},
+            {"context_servers": {"fs": _item(env="FS")}},
+            id="a deleted server leaves no object without a command",
+        ),
+        pytest.param(
+            {"a": 1, "profiles": {"work": {"settings": {"theme": 1, "node": {"path": "/x"}}}}},
+            {"a": 1},
+            {"a": 1},
+            id="a deleted profile goes entirely",
+        ),
+        pytest.param(
+            {"profiles": {"w": {"settings": {"context_servers": {"gh": _item(), "fs": _item(env="FS")}}}}},
+            {"profiles": {"w": {"settings": {"context_servers": {"fs": {"command": "x"}}}}}},
+            {"profiles": {"w": {"settings": {"context_servers": {"fs": _item(env="FS")}}}}},
+            id="one server deleted inside a profile that stays",
+        ),
+        pytest.param(
+            {"profiles": {"w": {"settings": {"node": {"path": "/x"}, "context_servers": {"gh": _item()}}}}},
+            {},
+            {},
+            id="a deleted profile takes the server inside it",
+        ),
+        pytest.param(
+            {"context_servers": {"mine": _item(shared=False), "fs": _item(env="FS")}},
+            {"context_servers": {"fs": {"command": "x"}}},
+            {"context_servers": {"fs": _item(env="FS"), "mine": _item(shared=False)}},
+            id="a server with only local values is kept",
+        ),
+        pytest.param(
+            {"context_servers": {"mine": {"settings": {"t": 1}}}, "a": 1},
+            {"a": 1},
+            {"a": 1, "context_servers": {"mine": {"settings": {"t": 1}}}},
+            id="an extension server with only settings is kept",
+        ),
+        pytest.param(
+            {"profiles": {"p": {"settings": {"node": {"path": "/x"}}}}},
+            {},
+            {"profiles": {"p": {"settings": {"node": {"path": "/x"}}}}},
+            id="a profile holding only noise is kept",
+        ),
+    ],
+)
+def test_restore_drops_the_local_values_of_an_item_the_merge_deleted_and_keeps_the_rest(live, repo, expected) -> None:
+    # when
+    restored = _restored(live, repo)
+
+    # then — and the result is still a projection of exactly the repo text
+    assert json.loads(restored) == expected
+    assert project_text(ADAPTER, restored, ITEMS) == project_text(ADAPTER, json.dumps(repo), ITEMS)
+
+
+def test_graft_re_attaches_the_values_of_an_item_the_repo_still_holds_as_an_empty_object() -> None:
+    # given
+    repo = tree_from_value({"context_servers": {"gh": {}}})
+    live = tree_from_value({"context_servers": {"gh": {"command": "x", "env": {"K": "1"}}}})
+
+    # when
+    result = graft(repo, live, frozenset({CS_ENV}))
+
+    # then — the repo has the item, so its local env returns
+    assert list(result) == [("context_servers", "gh", "env", "K")]
+
+
+def test_the_pattern_with_the_deepest_wildcard_decides_which_item_a_value_belongs_to() -> None:
+    # given — `a.x.c.y` matches both patterns; the second has the deeper wildcard, so the item is `a.x.c.y`
+    policy = _policy(noise={("a", ANY_KEY, "b"), ("a", ANY_KEY, "c", ANY_KEY)})
+    live = tree_from_value({"a": {"x": {"c": {"y": 1}, "shared": 1}}})
+
+    # when
+    result = graft(tree_from_value({}), live, policy.stripped)
+
+    # then — `a.x.c.y` has no shared content of its own, so it is a local-only item and stays
+    assert list(result) == [("a", "x", "c", "y")]
+
+
+def test_an_exact_path_policy_still_keeps_a_nested_credential_the_repo_lacks() -> None:
+    # given — vscode-style: `http.proxyAuthorization` is a fixed key, not a user-named item
+    policy = _policy(excluded={("http", "proxyAuthorization")})
+
+    # when
+    restored = _restored({"a": 1, "http": {"proxyAuthorization": "FAKE"}}, {"a": 1}, policy)
+
+    # then
+    assert json.loads(restored) == {"a": 1, "http": {"proxyAuthorization": "FAKE"}}
+
+
+def test_a_rebase_that_would_revive_a_deleted_item_is_refused_and_the_render_gives_the_same_result() -> None:
+    # given — the live text's projection edit, undone onto the repo text, would bring the server back
+    repo_text = '{\n  "context_servers": {\n    "fs": { "command": "x" }\n  }\n}\n'
+    live_text = (
+        '{\n  "context_servers": {\n    "gh": { "command": "x", "env": { "K": "1" } },\n'
+        '    "fs": { "command": "x" }\n  }\n}\n'
+    )
+    live_tree = ADAPTER.parse(live_text)
+    restored = graft(ADAPTER.parse(repo_text), live_tree, ITEMS.stripped)
+
+    # when
+    rebased = _rebased(ADAPTER, repo_text, live_text, restored, ITEMS, NO_CARRY)
+    rendered = restore_text(ADAPTER, repo_text, live_text, ITEMS)
+
+    # then
+    assert rebased is None
+    assert json.loads(rendered) == {"context_servers": {"fs": {"command": "x"}}}
+
+
+_KINDS = st.sampled_from(["shared", "local"])
+_SERVER_NAMES = ["a", "b", "c", "*"]
+
+
+@st.composite
+def _deletions(draw):
+    kinds = draw(st.dictionaries(st.sampled_from(_SERVER_NAMES), _KINDS, min_size=1))
+    shared = sorted(name for name, kind in kinds.items() if kind == "shared")
+    kept = draw(st.lists(st.sampled_from(shared), unique=True)) if shared else []
+    return kinds, kept
+
+
+@given(case=_deletions())
+def test_restore_after_a_deletion_projects_back_and_keeps_only_repo_or_local_items(case) -> None:
+    # given — the repo holds some of the shared servers; the other Mac deleted the rest
+    kinds, kept = case
+    live = {"context_servers": {name: _item(shared=kind == "shared") for name, kind in kinds.items()}}
+    repo = {"context_servers": {name: {"command": "x"} for name in kept}} if kept else {}
+
+    # when
+    restored = json.loads(_restored(live, repo))
+
+    # then — (a) a projection of the repo, (b) every surviving item is in the repo or was local-only
+    survivors = set(restored.get("context_servers", {}))
+    assert project_text(ADAPTER, json.dumps(restored), ITEMS) == project_text(ADAPTER, json.dumps(repo), ITEMS)
+    assert survivors - set(kept) <= {name for name, kind in kinds.items() if kind == "local"}

@@ -139,15 +139,28 @@ Two consequences follow, and they are the point of the whole mechanism:
   record, and the write plan all see "unchanged": no diff, no conflict, and no commit.
 - **An excluded key is in no object.** It was not in the bytes that were sealed, so no later
   step can resurrect it. A comment **inside** the excluded value (`"env": { // token`) goes with it, so it is not sealed and
-  does not stop the projection. A comment that sits beside the member (before it, after its comma, between the
-  key and the colon) is outside the value and still makes the projection refuse the file, as it does for an
-  exact path; that fails closed.
+  does not stop the projection. A comment outside the value is not uniform, for an exact path as much as for a
+  pattern: one on the same line before the member is refused; one after the comma stays on the previous member's
+  line; one between the key and the colon is removed; one on the line above the member stays in the sealed text,
+  where the secret scan is the only defence (#83).
 
 `restore_text` re-attaches *this machine's* values from the live file, ordered by the live file
 so a stripped key returns to the position it had. Its result is projected again and required to
 reproduce the repo text **byte for byte**: the apply ledger stores the projection's digest, so a
 restore that did not round-trip would make the next cycle read the file as changed again — the
 one failure that would loop forever.
+
+**A user-named item the merge deleted.** A pattern with `ANY_KEY` names items the user created
+(`context_servers.<name>`, `profiles.<name>`). When another machine deletes one, the local values left here
+(an `env`, a noise path) would come back as an object with no `command`, or a profile holding only noise, and
+Zed would be left with an invalid server. So `graft` drops them with the item. It decides from the two trees
+alone, with no base: the item **entity** is the live path cut after the last `ANY_KEY` of the deepest matching
+pattern, and its local values are dropped when `live` has content under it that is neither stripped nor carried
+(it was shared) **and** `repo` has nothing at or under it (the merge deleted it). An item that held only local
+values (a server with just `env`, an extension server with just `settings`, a profile with just noise) was never
+shared, so it stays; an item `repo` still has stays even as `{}`. An exact path has no entity, so a fixed key such
+as `http.proxyAuthorization` is unchanged. This runs on apply only: the sealed bytes, the policy digest and
+`policy_epoch` do not change, and the result is still required to project back to `repo_text`.
 
 The cut is verified rather than trusted. `project_text` re-parses its own output and compares it
 with the projected tree, so a renderer that half-applied an edit cannot seal a file that is

@@ -98,6 +98,27 @@ def _under_pattern(path: KeyPath, patterns: Iterable[KeyPattern]) -> bool:
     return any(_matches(path, pattern) for pattern in patterns)
 
 
+def _last_wildcard(pattern: KeyPattern) -> int:
+    """The index of the pattern's last `ANY_KEY`, or -1 when it has none."""
+    return max((index for index, segment in enumerate(pattern) if isinstance(segment, AnyKey)), default=-1)
+
+
+def _entity(path: KeyPath, patterns: Iterable[KeyPattern]) -> KeyPath | None:
+    """The user-named item `path` belongs to: `path` cut after the deepest last `ANY_KEY` of a matching pattern.
+
+    `context_servers.gh.env` under `context_servers.<any>.env` belongs to `context_servers.gh`. When several patterns
+    match, the one whose last wildcard sits deepest decides. A pattern with no wildcard names a fixed key, which is no
+    item the user created, so a path that only such patterns (or a carried key) hold has no entity.
+    """
+    deepest = max((_last_wildcard(pattern) for pattern in patterns if _matches(path, pattern)), default=-1)
+    return None if deepest < 0 else path[: deepest + 1]
+
+
+def _prefixes(paths: Iterable[KeyPath]) -> set[KeyPath]:
+    """Every non-empty prefix of every path, the path itself included."""
+    return {path[:length] for path in paths for length in range(1, len(path) + 1)}
+
+
 def _consistent(entries: dict[KeyPath, Node]) -> dict[KeyPath, Node]:
     """Drop an `EmptyObject` that gained a child, so the tree is a well-formed document.
 
@@ -186,6 +207,12 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozens
 
     A key that `live` has and `repo` does not — outside `paths` — was deleted by the merge, so
     it is dropped; a key `repo` has and `live` does not is carried over.
+
+    The same holds for a user-named item (:func:`_entity`) that the merge deleted. Its local values would come back
+    as an object with no `command` (a server) or a profile holding only noise, so they are dropped with it. That is
+    decided from the two trees alone: the item was shared if `live` has content under it that is neither stripped nor
+    carried, and it was deleted if `repo` has nothing at or under it. An item with only local values, or one `repo`
+    still has (even as `{}`), keeps them.
     """
     if not paths and not carried:
         return repo
@@ -193,11 +220,19 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozens
     def held(path: KeyPath) -> bool:
         return _under_pattern(path, paths) or _under(path, carried)
 
-    entries: dict[KeyPath, Node] = {}
     repo_entries = repo.entries
+    held_paths = {path for path in live.entries if held(path)}
+    # An item is deleted when live has content under it that is not stripped (it was shared) and repo has nothing at
+    # or under it. Both sides are indexed once, so asking about an item is a lookup.
+    shared = _prefixes(path for path in live.entries if path not in held_paths)
+    present = _prefixes(repo_entries)
+
+    entries: dict[KeyPath, Node] = {}
     for path, node in live.entries.items():
-        if held(path):
-            entries[path] = node
+        if path in held_paths:
+            entity = _entity(path, paths)
+            if entity is None or entity not in shared or entity in present:
+                entries[path] = node
         elif path in repo_entries:
             entries[path] = repo_entries[path]
     for path, node in repo_entries.items():
