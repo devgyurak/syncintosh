@@ -84,7 +84,7 @@ def _file_description(file: PresetFile) -> dict[str, Any]:
     # `arrays`, `validator`: not here. They shape how a merge reads a file and what is checked before
     # a write, not which keys are stripped, so a build that differs in them still agrees on the bytes
     # an object holds.
-    return {
+    description: dict[str, Any] = {
         "path": file.path,
         "glob": file.is_glob,
         "format": file.format,
@@ -92,6 +92,11 @@ def _file_description(file: PresetFile) -> dict[str, Any]:
         "excluded": _key_paths(file.excluded),
         "ignore_list": file.ignore_list,
     }
+    if file.synced is not None:
+        # Only when set: a file with no allowlist keeps the description it always had, so the digest of every
+        # preset shipped before the allowlist existed is unchanged.
+        description["synced"] = _key_paths(file.synced)
+    return description
 
 
 def _profiles_description(profiles: ProfileSpec | None) -> dict[str, Any] | None:

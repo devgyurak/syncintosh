@@ -66,6 +66,13 @@ def pattern_sort_key(pattern: KeyPattern) -> list[tuple[bool, str]]:
     return [(isinstance(segment, AnyKey), segment if isinstance(segment, str) else "") for segment in pattern]
 
 
+def matches_pattern(path: KeyPath, pattern: KeyPattern) -> bool:
+    """True when `path` is what `pattern` names, or lies beneath it: `ANY_KEY` stands for exactly one key."""
+    return len(path) >= len(pattern) and all(
+        isinstance(wanted, AnyKey) or wanted == key for wanted, key in zip(pattern, path, strict=False)
+    )
+
+
 # An element of an array that is merged by its declared fields (`core/keyed_array.py`): the
 # (field, value) pairs of its identity, where an absent optional field is `None`. `None` and `""`
 # stay distinct, so a missing `when` and `"when": ""` name different elements.
@@ -330,6 +337,7 @@ __all__ = [
     "ScalarKind",
     "Tree",
     "element_label",
+    "matches_pattern",
     "path_label",
     "pattern_sort_key",
     "scalar",

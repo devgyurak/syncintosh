@@ -79,9 +79,17 @@ class IgnoreSpec:
         )
 
     def paths_for(self, policy: PresetFile) -> frozenset[KeyPath]:
-        """The key paths to carry for `policy`'s file: the user's keys minus whatever the preset strips."""
+        """The key paths to carry for `policy`'s file: the user's keys minus whatever the preset strips.
+
+        A key outside the preset's allowlist is already local, so carrying it would add nothing.
+        """
         stripped = policy.stripped
-        return frozenset(path for path in ((key,) for key in self.keys) if path not in stripped)
+        synced = policy.synced
+        return frozenset(
+            path
+            for path in ((key,) for key in self.keys)
+            if path not in stripped and (synced is None or any(path[: len(root)] == root for root in synced))
+        )
 
 
 NO_IGNORES: Final = IgnoreSpec()
