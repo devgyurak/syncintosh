@@ -54,7 +54,7 @@ class ProductInfoConfigDir:
         results = [self._name_of(spec, each) for each in found]
         names = [name for name, _ in results if name is not None]
         # An install whose metadata cannot be used is said so, never silently left out of the candidates.
-        notes = tuple(f"{each}: {why}" for each, (name, why) in zip(found, results, strict=True) if name is None)
+        notes = tuple(f"{each!r}: {why}" for each, (name, why) in zip(found, results, strict=True) if name is None)
         if not names:
             return ConfigDirMap.unresolved(_UNTRUSTED, notes)
         # The newest release wins: it is the one a person launching the app today runs. The others are noted so

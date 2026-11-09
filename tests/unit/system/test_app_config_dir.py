@@ -214,7 +214,7 @@ def test_an_install_that_cannot_be_read_is_reported_beside_the_one_that_can(tmp_
 
     # then — resolved by the readable install, and the other is told, not silently dropped
     assert found.directory == "Widget2026.3"
-    assert [problem for problem in found.problems if broken in problem and "cannot be read" in problem] != []
+    assert [problem for problem in found.problems if repr(broken) in problem and "cannot be read" in problem] != []
 
 
 def test_when_no_install_can_be_read_each_reason_is_listed(tmp_path) -> None:
