@@ -668,6 +668,95 @@ def test_a_malformed_side_is_a_conflict_and_never_a_partial_file() -> None:
     assert result.conflicted is True
 
 
+FIND_BASE = """<application>
+  <component name="Find">
+    <option name="FONT_SIZE" value="14" />
+    <mask>*.py</mask>
+    <mask>*.js</mask>
+  </component>
+</application>"""
+
+
+def test_a_new_element_is_not_placed_against_a_repeated_element_the_same_merge_removes() -> None:
+    # given
+    local = FIND_BASE.replace('value="14"', 'value="15"')
+    remote = FIND_BASE.replace("<mask>*.js</mask>", '<option name="TAB" value="2" />')
+
+    # when
+    result = _merge(FIND_BASE, local, remote)
+
+    # then
+    assert (result.conflicted, result.data.decode()) == (
+        False,
+        '<application>\n  <component name="Find">\n    <option name="FONT_SIZE" value="15" />\n'
+        '    <option name="TAB" value="2" />\n    <mask>*.py</mask>\n  </component>\n</application>',
+    )
+
+
+def test_every_sibling_replaced_still_lets_a_new_element_in() -> None:
+    # given
+    template = "<application>\n  <mask>a</mask>\n  <mask>b</mask>\n</application>"
+    wanted = '<application>\n  <mask>c</mask>\n  <mask>d</mask>\n  <option name="N" value="1" />\n</application>'
+
+    # when
+    rendered = _render(wanted, template)
+
+    # then
+    assert ADAPTER.parse(rendered) == ADAPTER.parse(wanted)
+
+
+@pytest.mark.parametrize(
+    ("template", "wanted", "expected"),
+    [
+        pytest.param(
+            '<application>\n  <component name="E">\n    <!-- keep me -->\n  </component>\n</application>',
+            '<application><component name="E"><option name="A" value="1" /></component></application>',
+            '<application>\n  <component name="E">\n    <!-- keep me -->\n    <option name="A" value="1" />\n'
+            "  </component>\n</application>",
+            id="multiline-comment-only",
+        ),
+        pytest.param(
+            '<application><component name="E"><!-- keep me --></component></application>',
+            '<application><component name="E"><option name="A" value="1" /></component></application>',
+            '<application><component name="E"><!-- keep me --><option name="A" value="1" /></component></application>',
+            id="inline-comment-only",
+        ),
+    ],
+)
+def test_children_added_to_a_comment_only_element_keep_the_comment(template, wanted, expected) -> None:
+    # when
+    rendered = _render(wanted, template)
+
+    # then
+    assert rendered == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "wanted"),
+    [
+        pytest.param(
+            '<application><component name="E"><option name="A" value="1" /><!-- c --></component></application>',
+            '<application><component name="E">text</component></application>',
+            id="children-swapped-for-text",
+        ),
+        pytest.param(
+            '<application><component name="E">old<!-- c --></component></application>',
+            '<application><component name="E"><option name="A" value="1" /></component></application>',
+            id="text-swapped-for-children",
+        ),
+        pytest.param(
+            "<application><mask>a<!-- c --></mask><mask>b</mask></application>",
+            "<application><mask>z</mask><mask>b</mask></application>",
+            id="repeated-element-with-a-comment-replaced",
+        ),
+    ],
+)
+def test_content_replaced_over_a_comment_is_refused(template, wanted) -> None:
+    # when & then
+    with pytest.raises(RenderRefused, match=COMMENT_IN_VALUE_REFUSED):
+        _render(wanted, template)
+
+
 # --------------------------------------------------------------------------- properties
 
 _NAMES = st.sampled_from(["a", "b", "c"])
@@ -716,13 +805,6 @@ _documents = st.tuples(st.dictionaries(_ATTRIBUTE_NAMES, _NAMES, max_size=2), st
 )
 
 
-def _rendered_or_none(wanted: str, template: str) -> str | None:
-    try:
-        return ADAPTER.render(ADAPTER.parse(wanted), template)
-    except RenderRefused:
-        return None
-
-
 @settings(max_examples=200, deadline=None)
 @given(text=_documents)
 def test_property_a_document_renders_back_to_itself(text) -> None:
@@ -733,14 +815,14 @@ def test_property_a_document_renders_back_to_itself(text) -> None:
     assert rendered == text
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=1000, deadline=None)
 @given(wanted=_documents, template=_documents)
 def test_property_a_render_parses_back_to_the_wanted_tree(wanted, template) -> None:
-    # when
-    rendered = _rendered_or_none(wanted, template)
+    # when — the generated documents hold no comment, so nothing here may be refused
+    rendered = ADAPTER.render(ADAPTER.parse(wanted), template)
 
-    # then — a render either refuses or lands exactly on the wanted tree
-    assert rendered is None or ADAPTER.parse(rendered) == ADAPTER.parse(wanted)
+    # then
+    assert ADAPTER.parse(rendered) == ADAPTER.parse(wanted)
 
 
 @settings(max_examples=200, deadline=None)
