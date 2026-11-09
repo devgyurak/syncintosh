@@ -345,8 +345,9 @@ copied.
 - **The write follows Orca's own protocol** (`system/sqlite_documents.py`): one transaction that re-checks the profile
   revision the row was read at, updates the row (`revision + 1`, `updated_at`, `content_hash = sha256(payload)`) and
   the meta `revision`, and nothing else; it never creates the database. A `user_version`, `profile_id`,
-  `domain_version` or hash it does not recognise is refused with a fixed message, and the cycle stops (a refusal is
-  not a deferral).
+  `domain_version` or hash it does not recognise is refused with a fixed message as **one refused file**: the report names the Orca
+  document, every other file still syncs, and the record and the apply ledger are left as they were, so nothing is read
+  as a deletion. A row that moved between the read and the write is a non-blocking report and the next cycle retries.
 - **An allowlist.** 208 top-level keys were seen on the inspected machine. `SYNCED` names the ones that travel
   (appearance, editor, terminal, diff, notification and default-agent preferences); `LOCAL` records the reason for each
   other key seen (paths, migration markers, dismissed prompts, feature flags, command lines, permissions, machine

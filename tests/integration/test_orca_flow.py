@@ -24,7 +24,6 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
-from syncintosh.core.errors import DocumentRefused
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -39,6 +38,7 @@ from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.document_files import open_live_files
+from syncintosh.system.json_check import JsonSyntaxValidator
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.lock import FileLock
@@ -60,6 +60,7 @@ SYNCED_NAMES = {key for (key,) in SYNCED}
 EXCLUDED_NAMES = sorted(key for (key,) in EXCLUDED if isinstance(key, str))
 A_COOKIE = "invented-cookie-of-machine-a"
 B_COOKIE = "invented-cookie-of-machine-b"
+DAEMON_JSON = ".docker/daemon.json"
 INSIDE = "/Applications/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Orca Helper"
 
 
@@ -128,7 +129,7 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     machine.home.mkdir(parents=True, exist_ok=True)
     save_config(
         new_machine_config(
-            remote=machine.remote, machine_id=machine.machine_id, preset_names=("orca",), catalog=CATALOG
+            remote=machine.remote, machine_id=machine.machine_id, preset_names=("orca", "docker"), catalog=CATALOG
         ),
         machine.config_file,
     )
@@ -170,6 +171,7 @@ def _run(machine: Machine, *, running: Any = None, apps: Any = NO_APP_INFO) -> S
         wrapper=cipher,
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()},
+        validators={"json": JsonSyntaxValidator()},
         catalog=CATALOG,
         live=open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents()),
         ledger_store=JsonLedgerStore(machine.ledger),
@@ -409,17 +411,72 @@ def test_a_mac_without_orca_defers_with_the_download_page_and_creates_nothing(
     assert (b.home / "Library").exists() is False
 
 
-@pytest.mark.parametrize(
-    "options", [{"user_version": 2}, {"user_version": 4}, {"profile_id": "someone-else"}, {"domain_version": 2}]
-)
-def test_an_unsupported_orca_database_is_refused_and_left_alone(
-    tmp_path, memory_key_store, profile_state_db, options: dict
-) -> None:
-    # given
-    _, b = _pair(tmp_path, memory_key_store, profile_state_db, **options)
-    before = _query(b, "SELECT * FROM profile_state_documents ORDER BY domain")
+def _manifest_paths(machine: Machine) -> list[str]:
+    transport = GitCLITransport(machine.repo)
+    sealed = transport.read_blob(transport.head() or "", MANIFEST_PATH) or b""
+    manifest = loads_manifest(EnvelopeCipher(machine.store).open(sealed, domain="manifest", file_id=""))
+    return sorted(record.path for record in manifest.records.values())
 
-    # when & then
-    with pytest.raises(DocumentRefused):
-        _run(b)
-    assert _query(b, "SELECT * FROM profile_state_documents ORDER BY domain") == before
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "PRAGMA user_version = 2",
+        "PRAGMA user_version = 4",
+        "UPDATE profile_state_meta SET value = 'someone-else' WHERE key = 'profile_id'",
+        "UPDATE profile_state_documents SET domain_version = 2 WHERE domain = 'settings'",
+    ],
+)
+def test_an_unsupported_orca_database_is_one_refused_file_and_deletes_nothing(
+    tmp_path, memory_key_store, profile_state_db, statement: str
+) -> None:
+    # given — in sync; then B's Orca updates to a schema this build does not know while A changes both files
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    published = _manifest_paths(b)
+    _edit_like_the_app(a, {**_row(a), "theme": "light"})
+    (a.home / DAEMON_JSON).parent.mkdir(parents=True, exist_ok=True)
+    (a.home / DAEMON_JSON).write_text('{"debug": true}\n', encoding="utf-8")
+    (b.home / DAEMON_JSON).parent.mkdir(parents=True, exist_ok=True)
+    _run(a)
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute(statement)
+        connection.commit()
+    unchanged = _query(b, "SELECT * FROM profile_state_documents ORDER BY domain")
+    unchanged_meta = _query(b, "SELECT * FROM profile_state_meta ORDER BY key")
+
+    # when — the cycle does not stop: the Docker file still moves, and the Orca document is reported by name
+    report = _run(b)
+
+    # then
+    entries = JsonLedgerStore(b.ledger).load()
+    assert [r.path for r in report.refused if r.blocking] == [VIEW]
+    assert tuple(report.applied) == (DAEMON_JSON,)
+    assert (b.home / DAEMON_JSON).read_text(encoding="utf-8") == '{"debug": true}\n'
+    # the database was left alone, the record is still in the repo, and nothing was read as a deletion
+    assert _query(b, "SELECT * FROM profile_state_documents ORDER BY domain") == unchanged
+    assert _query(b, "SELECT * FROM profile_state_meta ORDER BY key") == unchanged_meta
+    assert _manifest_paths(b) == _manifest_paths(a) == sorted([*published, DAEMON_JSON])
+    assert [entry for entry in entries.values() if entry.suppressed] == []
+
+
+def test_a_refused_orca_document_arrives_once_the_database_is_supported_again(
+    tmp_path, memory_key_store, profile_state_db
+) -> None:
+    # given — B was refused for a cycle while A moved on
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute("PRAGMA user_version = 4")
+    _edit_like_the_app(a, {**_row(a), "theme": "light"})
+    _run(a)
+    _run(b)
+
+    # when — the version is back
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute("PRAGMA user_version = 3")
+    report = _run(b)
+
+    # then — no conflict, and the row takes A's theme while keeping B's own values
+    assert report.has_conflicts is False
+    assert (_row(b)["theme"], _row(b)["machineName"]) == ("light", "machine-b")
