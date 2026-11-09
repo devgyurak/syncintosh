@@ -326,7 +326,9 @@ the filesystem.
   the first, a non-blocking one for the second, which the next sync retries) and carry on with every other file. A
   document the store would not open is **not** read as absent: its record stays in the manifest, its ledger baseline is
   kept and never marked suppressed, nothing is collected from it and nothing is written to it, so no deletion can follow
-  from it. An app update that bumps `user_version` therefore costs only that one file.
+  from it. An app update that bumps `user_version` therefore costs only that one file. The one exception is a write
+  that was **committed** but whose read-back did not confirm it (`DocumentWrittenUnverified`): the database did change,
+  so apply keeps that file's restore point and reports it in a blocking row; the next cycle's settle re-reads it.
 * **Fail closed.** The store refuses a `user_version` other than 3, a different table shape, a `profile_id` that is not
   the folder's, a `domain_version` other than 1, a missing row, a row newer than its profile, a content hash that is
   not the SHA-256 of the payload, and a database or folder that is a symlink. A database that does not exist is never

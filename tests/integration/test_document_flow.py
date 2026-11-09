@@ -25,7 +25,7 @@ from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource
-from syncintosh.core.errors import DocumentStale
+from syncintosh.core.errors import DocumentStale, DocumentWrittenUnverified
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.policy import policy_digest
 from syncintosh.core.ports import LiveFiles
@@ -389,6 +389,44 @@ def test_the_refused_document_arrives_once_the_database_is_supported_again(
     assert _query(b, "SELECT payload FROM profile_state_documents WHERE domain = 'settings'") == [
         ('{"theme":"light"}',)
     ]
+
+
+class _CommitsThenFailsToVerify(_StaleOnWrite):
+    """A `LiveFiles` whose document write really happens, then reports that the read-back did not confirm it."""
+
+    def write(self, path: str, data: bytes) -> None:
+        self._inner.write(path, data)
+        if path.endswith("@state/settings.json"):
+            raise DocumentWrittenUnverified("the document was written but reading it back did not confirm it")
+
+
+def test_a_document_written_but_not_confirmed_keeps_its_restore_point_and_is_reported(
+    tmp_path, memory_key_store, profile_state_db
+) -> None:
+    # given — A changed the document and a plain file; B's document differs from the repo's, so it has a restore point
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    _edit_like_the_app(a, '{"theme":"light"}')
+    _write_plain(a, "from a\n")
+    _run(a)
+
+    # when
+    report = _run(b, wrap=_CommitsThenFailsToVerify)
+
+    # then — the database did change, so the restore point stays and the file is named in a blocking row
+    assert [r.path for r in report.refused if r.blocking] == [VIEW]
+    assert sorted(point.path for point in report.restore_points) == sorted([VIEW, PLAIN])
+    assert tuple(report.applied) == (PLAIN,)
+    assert _query(b, "SELECT payload FROM profile_state_documents WHERE domain = 'settings'") == [
+        ('{"theme":"light"}',)
+    ]
+
+    # when — the next cycle re-reads the document: the ledger is consistent, nothing conflicts or is refused
+    again = _run(b)
+
+    # then
+    assert (again.has_conflicts, again.refused) == (False, ())
+    assert [e for e in JsonLedgerStore(b.ledger).load().values() if e.suppressed] == []
 
 
 def test_a_document_that_moved_between_the_read_and_the_write_is_a_non_blocking_per_file_report(

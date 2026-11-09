@@ -42,6 +42,7 @@ from syncintosh.core.errors import (
     ContentParseError,
     DocumentRefused,
     DocumentStale,
+    DocumentWrittenUnverified,
     GenerationDivergence,
     GitError,
     IgnoreListMalformed,
@@ -767,6 +768,9 @@ _APP_RUNNING = "the app is open (or cannot be told to be closed); quit it to app
 # is a fixed sentence (never the payload), so it is said as it is. The record and the ledger baseline are left as they
 # were: a document the store would not open is not a document that was deleted.
 _DOCUMENT_REFUSED = "the app's stored document was left as it is"
+_DOCUMENT_UNVERIFIED = (
+    "the app's stored document was written, but reading it back did not confirm it; check it before the next sync"
+)
 _DOCUMENT_MOVED = "the app saved this document while it was being written, so it was not changed; the next sync retries"
 
 
@@ -778,6 +782,8 @@ def _document_refusal(path: str, failure: DocumentRefused) -> Refusal:
     """
     if isinstance(failure, DocumentStale):
         return Refusal(path, _DOCUMENT_MOVED, blocking=False)
+    if isinstance(failure, DocumentWrittenUnverified):
+        return Refusal(path, _DOCUMENT_UNVERIFIED)
     return Refusal(path, f"{_DOCUMENT_REFUSED}: {failure}")
 
 
@@ -2551,8 +2557,10 @@ def _apply(
         try:
             live.write(live_path, data)
         except DocumentRefused as exc:
-            # Nothing was written, so the restore point saved above is not one anything was overwritten for.
-            restore_points[:] = [point for point in restore_points if point.path != record.path]
+            if not isinstance(exc, DocumentWrittenUnverified):
+                # Nothing was written, so the restore point saved above is not one anything was overwritten for.
+                # A write that was committed but not confirmed did change the database: its restore point stays.
+                restore_points[:] = [point for point in restore_points if point.path != record.path]
             refused.append(_document_refusal(record.path, exc))
             continue
         applied.append(record.path)

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentRead, DocumentSource
-from syncintosh.core.errors import DocumentRefused
+from syncintosh.core.errors import DocumentRefused, DocumentStale, DocumentWrittenUnverified
 from syncintosh.system.document_files import DocumentLiveFiles, open_live_files
 from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.sqlite_documents import SqliteDocumentStore
@@ -25,7 +25,15 @@ SOURCE = DocumentSource.create(
 class FakeStore:
     """A `DocumentStore` over one in-memory row; records every call."""
 
-    def __init__(self, payload: str | None = '{"a":1}', revision: int = 4, *, symlink: bool = False) -> None:
+    def __init__(
+        self,
+        payload: str | None = '{"a":1}',
+        revision: int = 4,
+        *,
+        symlink: bool = False,
+        write_error: Exception | None = None,
+    ) -> None:
+        self.write_error = write_error
         self.payload = payload
         self.revision = revision
         self.symlink = symlink
@@ -42,6 +50,8 @@ class FakeStore:
 
     def write(self, source: DocumentSource, payload: str, *, expected_revision: int) -> None:
         self.writes.append((payload, expected_revision))
+        if self.write_error is not None:
+            raise self.write_error
 
 
 def _router(tmp_path: Path, store: FakeStore) -> DocumentLiveFiles:
@@ -92,6 +102,21 @@ def test_a_write_with_no_read_before_it_is_refused(tmp_path) -> None:
     with pytest.raises(DocumentRefused, match="read first"):
         _router(tmp_path, store).write(_view(tmp_path), b'{"a":2}')
     assert store.writes == []
+
+
+@pytest.mark.parametrize("error", [DocumentRefused("no"), DocumentStale("moved"), DocumentWrittenUnverified("?")])
+def test_one_read_licenses_one_write_attempt_even_when_the_store_raises(tmp_path, error: Exception) -> None:
+    # given
+    store = FakeStore(write_error=error)
+    live = _router(tmp_path, store)
+    live.read(_view(tmp_path))
+    with pytest.raises(type(error)):
+        live.write(_view(tmp_path), b'{"a":2}')
+
+    # when & then — the second attempt has no revision to check, so it never reaches the store
+    with pytest.raises(DocumentRefused, match="read first"):
+        live.write(_view(tmp_path), b'{"a":3}')
+    assert len(store.writes) == 1
 
 
 def test_one_read_licenses_one_write(tmp_path) -> None:

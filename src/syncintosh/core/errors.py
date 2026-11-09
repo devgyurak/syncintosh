@@ -334,3 +334,12 @@ class DocumentStale(DocumentRefused):
     A running app (or another writer) bumped the revision after collect saw it. Writing anyway would
     stop the app's own saving, so the caller reports it and the next cycle starts from the new state.
     """
+
+
+class DocumentWrittenUnverified(DocumentRefused):
+    """The row was committed, but reading it back did not give what was written.
+
+    Unlike every other `DocumentRefused`, the database **has changed**: the app may have saved again between the
+    commit and the read-back, or the write did not land as meant. A caller must not assume the previous content is
+    still there, so it keeps whatever restore point it saved for it and reports the file for a person to look at.
+    """

@@ -44,7 +44,7 @@ from syncintosh.core.documents import (
     content_hash,
     same_value,
 )
-from syncintosh.core.errors import DocumentRefused, DocumentStale
+from syncintosh.core.errors import DocumentRefused, DocumentStale, DocumentWrittenUnverified
 
 _USER_VERSION = 3
 _DOMAIN_VERSION = 1
@@ -189,9 +189,14 @@ class SqliteDocumentStore:
 
     def _verify(self, source: DocumentSource, payload: str) -> None:
         """Read the row back: what the app will read is what was meant to be written."""
-        read = self.read(source)
+        try:
+            read = self.read(source)
+        except DocumentRefused:
+            read = None
         if read is None or read.payload != payload:
-            raise DocumentRefused("the document read back is not the one written")
+            # After the commit the database has changed, so this is not a refusal to write: it is a write nobody
+            # could confirm (`DocumentWrittenUnverified`).
+            raise DocumentWrittenUnverified("the document was written but reading it back did not confirm it")
 
 
 __all__ = ["SqliteDocumentStore"]
