@@ -70,10 +70,9 @@ Each entry carries its reason where it is listed. Font size is **not** noise: `I
 - When another Mac deletes a server or a profile, this Mac's apply also removes that item's local values (its `env`,
   say): `core/projection.py` drops the local values of an item the merge deleted. Stripped values are never in a
   commit, so a restore point does not hold them: **the loss cannot be recovered**. The sync result says so under
-  "removed with an item another Mac deleted (not recoverable)", naming the file, the item and the number of local
-  keys, never a value. The same notice appears when an `--adopt remote` overwrite that is written removes a server
-  the repo never had (the heading then says "another Mac deleted" although nobody did: with no base the two cases
-  read the same).
+  "removed with an item the synced settings do not have (not recoverable)", naming the file, the item and the number
+  of local keys, never a value. The same notice appears when an `--adopt remote` overwrite that is written removes a
+  server the repo never had.
 
 ## Known risk, recorded not fixed
 
