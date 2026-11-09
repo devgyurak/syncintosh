@@ -1,0 +1,7 @@
+<application>
+  <component name="DatabaseSettings">
+    <option name="queryTimeout" value="30" />
+    <parameter-pattern value="sample_:name" />
+    <parameter-pattern value="sample_\?" />
+  </component>
+</application>

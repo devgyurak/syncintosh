@@ -41,6 +41,7 @@ _NOT_A_PATH = "this is not a path the app's profile layout allows"
 _UNREADABLE = "the app's profile list could not be read, so profile files are left as they are"
 _CONFIG_NOT_TRACKED = "this machine does not track this app's settings folder"
 _CONFIG_BAD_NAME = "the app named a settings folder this layout does not allow"
+_OWN_SYNC_ON = "the app's own settings sync is on, so this tool leaves its settings folder alone"
 
 
 def profile_directory(spec: ProfileSpec, directory: str) -> str:
@@ -117,6 +118,10 @@ class LivePaths:
         if not spec.is_release_name(view.directory.directory):
             # The port promises a validated name, but this is the line a write is built from.
             return Unresolved(_CONFIG_BAD_NAME)
+        if view.directory.settings_sync_enabled:
+            # Two writers on one file: the app's own sync and this one. Collect and apply both resolve through here,
+            # so neither touches the folder; the records are kept (an unresolved path is never a deletion).
+            return Unresolved(spec.sync_conflict or _OWN_SYNC_ON)
         return spec.real_directory(view.directory.directory)
 
     def resolve_directory(self, preset: str, directory: str) -> str | Unresolved:
@@ -262,8 +267,14 @@ def config_dir_summary(config: SyncConfig, paths: LivePaths) -> Check | None:
             if found.directory is not None
             else f"{view.preset}: {found.reason}; its records are kept as they are"
         )
+        if found.directory is not None and found.settings_sync_enabled:
+            parts.append(f"{view.preset}: {view.spec.sync_conflict or _OWN_SYNC_ON}")
         parts.extend(f"{view.preset}: {problem}" for problem in found.problems)
-    return Check("config folders", True, "; ".join(parts))
+    # A sync that is held back is a problem to act on (turn one of the two off), not a note.
+    held = any(
+        view.directory.directory is not None and view.directory.settings_sync_enabled for view in paths.config_views
+    )
+    return Check("config folders", not held, "; ".join(parts))
 
 
 def profile_targets(config: SyncConfig, paths: LivePaths) -> ProfileTargets:

@@ -55,15 +55,19 @@ class ConfigDirSpec:
     * `vendor` — what the app's own metadata must say it is published by; a folder name taken from an app that
       says otherwise is not trusted.
     * `bundle_id` — the app whose metadata names the folder.
+    * `sync_conflict` — the sentence shown when the app's own settings sync is on
+      (`ConfigDirMap.settings_sync_enabled`), so two writers do not fight over one file. Empty means a generic
+      sentence. It is local behaviour, not part of the object bytes, so it is not in the policy digest.
     """
 
     home: str
     prefix: str
     vendor: str
     bundle_id: str
+    sync_conflict: str = ""
 
     @classmethod
-    def create(cls, *, home: str, prefix: str, vendor: str, bundle_id: str) -> ConfigDirSpec:
+    def create(cls, *, home: str, prefix: str, vendor: str, bundle_id: str, sync_conflict: str = "") -> ConfigDirSpec:
         """Validate and freeze the layout; never assign fields afterwards."""
         try:
             validated_home = validate_path(home)
@@ -75,7 +79,9 @@ class ConfigDirSpec:
             raise ConfigError("a config directory layout must name its vendor")
         if not isinstance(bundle_id, str) or _BUNDLE_ID.fullmatch(bundle_id) is None:
             raise ConfigError(f"a config directory layout needs a bundle id, got {bundle_id!r}")
-        return cls(home=validated_home, prefix=prefix, vendor=vendor, bundle_id=bundle_id)
+        if not isinstance(sync_conflict, str):
+            raise ConfigError("a config directory's sync conflict notice must be text")
+        return cls(home=validated_home, prefix=prefix, vendor=vendor, bundle_id=bundle_id, sync_conflict=sync_conflict)
 
     @property
     def root(self) -> str:

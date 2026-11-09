@@ -17,6 +17,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` · `…/snippets/*.json` · `…/snippets/*.code-snippets` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 | `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` (and `language_models.openai_compatible`/`anthropic_compatible`.`*.custom_headers`) · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
+| `datagrip` | `Library/Application Support/JetBrains/@DataGrip/` (logical; the real folder is `DataGrip<year>.<n>`): `options/{editor-font,console-font,terminal-font,colors.scheme,customization,ide.general,diff,editor,code.style.schemes,laf,databaseSettings,csvSettings}.xml` · `options/mac/keymap.xml` · `keymaps/*.xml` · `codestyles/*.xml` · `templates/*.xml` · `colors/*.icls` | `xml` | `metaInfo` `created`/`modified`/`ide`/`ideVersion` of a colour scheme · `ide.general.xml` Registry `trace.state.event.service.url` | none in a tracked file; `dataSources*.xml`, `*.key`, `c.kdbx`, `c.pwd`, `security.xml`, `ssl/` are never tracked and are denied in code | `com.jetbrains.datagrip` | <https://www.jetbrains.com/datagrip/download/> | `datagrip` |
 
 ### `docker` notes
 
@@ -217,6 +218,47 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   path can cut it), `prompts/` (LMDB), `embeddings/`, `prompt_overrides/`, `*_backup.json`, `global_settings.json`,
   `git/config`, `AGENTS.md` (a follow-up candidate), a project's `.zed/`, extensions, and a bundle check for Preview
   or Nightly alone.
+
+### `jetbrains` (common) and `datagrip` notes
+
+The shared rules live in `presets/jetbrains.py` (a builder, one product is a few lines) and the evidence in
+`presets/datagrip.py`. Issue #54.
+
+- **Evidence.** DataGrip 2026.2.6 (`DB-262.10968.148`) inspected 2026-11-09: bundle ID `com.jetbrains.datagrip`,
+  `product-info.json` `dataDirectoryName` `DataGrip2026.2`, `productVendor` `JetBrains`; the settings folder is
+  `~/Library/Application Support/JetBrains/DataGrip2026.2/`. `options/*.xml` have no XML declaration, a root
+  `<application>`, 2-space indent, no trailing newline and ` />` for an empty element (which `lxml` would rewrite,
+  hence the minimal-edit XML adapter). Cask `datagrip` verified.
+- **D3 What is tracked.** Exact `options/` files, never an `options/*.xml` glob: `editor-font`, `console-font`,
+  `terminal-font`, `colors.scheme`, `customization`, `ide.general`, `diff`, plus DataGrip's `databaseSettings` and
+  `csvSettings`; and four globs over the user's own schemes (`keymaps/*.xml`, `codestyles/*.xml`, `templates/*.xml`,
+  `colors/*.icls`). `editor.xml`, `code.style.schemes.xml`, `laf.xml` and `options/mac/keymap.xml` (`PER_OS`) are
+  **source-verified, not seen on the inspected Mac** (an uncustomized folder lacks them): their `@Storage` was read in
+  `EditorSettingsExternalizable.java`, `PersistableCodeStyleSchemes.java`, `LafManagerImpl.kt` and
+  `KeymapManagerImpl.kt` (intellij-community master, 2026-11-09). `find.xml` is left out: its `<mask>` elements are
+  the Find dialog's recent-mask history. Out of scope: `fileTemplates/`, `inspection/`.
+- **D4 Never tracked.** All `RoamingType.DISABLED` files (`window.state`, `recentProjects`, `usage.statistics`,
+  `features.usage.statistics`, `trusted-paths`, `path.macros`, `updates`, `ide.general.local`, `security`,
+  `proxy.settings`, `certificates`, `gitlab`, `remote-servers`, `settingsSyncLocal`), `other.xml`, `window.layouts.xml`,
+  `jdk.table.xml`, `databaseDrivers.xml`, `settingsSync*.xml`, `github.xml`, `sshConfigs.xml`, `webServers.xml`,
+  `dataSources*.xml`, `*.key`, `c.kdbx`, `c.pwd`, and the folders `consoles/`, `workspace/`, `ssl/`, `jdbc-drivers/`.
+  They are in no preset, and the sensitive ones are also denied in code in every release folder.
+- **D5 Noise.** In a `.icls`, `metaInfo` `property[created|modified|ide|ideVersion]` (the `META_INFO_*` names in
+  `AbstractColorsScheme.java`: when and by which product the scheme was saved). In `ide.general.xml` the Registry
+  holds `source="SYSTEM"` entries the IDE sets itself, but a key pattern matches a key, never an attribute value, so
+  "all SYSTEM entries" cannot be expressed: only `component[Registry]/entry[trace.state.event.service.url]`, the one
+  seen, is stripped, and any other IDE-set entry is a known gap that would show as a diff.
+- **D6 Settings Sync.** `options/settingsSync.xml` is read **in memory only** (`SettingsSyncSettings`,
+  `syncEnabled == "true"`; absent or unreadable means off). When on, neither collect nor apply touches that product's
+  files, the report says "JetBrains Settings Sync is on - turn off one of the two" (the preset's data), and `doctor`
+  fails its config-folders row. The file is never tracked, sealed or written.
+- **Defer while running.** There is no VFS tracker for application-level storages, so an outside edit is overwritten
+  when the component next saves (focus loss, exit; non-roamable state about every five minutes). `defer_while_running`
+  therefore holds an apply that would change a file until the IDE quits; collect still runs.
+- **Unverified.** The component names inside a few fixtures (`databaseSettings.xml`) follow the evidence's element
+  names, not a real file; `editor.xml`, `code.style.schemes.xml`, `laf.xml` and `options/mac/keymap.xml` were not
+  observed on a real folder; a macOS run with the IDE open, a real Settings Sync switch, and a second Mac were not
+  exercised.
 
 ## Versioned config directories
 

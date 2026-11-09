@@ -286,3 +286,47 @@ def test_the_doctor_row_says_when_the_app_cannot_be_resolved() -> None:
 def test_no_doctor_row_without_a_config_directory_preset() -> None:
     # when & then
     assert config_dir_summary(_config(), LivePaths(catalog=CATALOG)) is None
+
+
+# --------------------------------------------------------------------------- the app's own settings sync
+
+
+def test_a_folder_whose_own_sync_is_on_resolves_to_the_presets_sentence_not_a_path() -> None:
+    # given
+    spec = ConfigDirSpec.create(
+        home=HOME, prefix="Widget", vendor="JetBrains", bundle_id="com.example.widget", sync_conflict="turn one off"
+    )
+    preset = Preset.create(
+        name="widget",
+        files=(PresetFile.create(path=spec.logical_path("options/editor.xml"), format="text"),),
+        bundle_id=spec.bundle_id,
+        config_dir=spec,
+    )
+    found = ConfigDirMap.resolved("Widget2026.3", settings_sync_enabled=True)
+    paths = LivePaths(
+        catalog=BuiltinCatalog.create((preset,)),
+        config_views=(ConfigDirView(spec=spec, preset="widget", directory=found),),
+    )
+
+    # when
+    located = paths.resolve(LOGICAL)
+
+    # then
+    assert located == Unresolved("turn one off")
+
+
+def test_without_a_sentence_of_its_own_the_spec_falls_back_to_a_generic_one() -> None:
+    # when
+    located = _paths(ConfigDirMap.resolved("Widget2026.3", settings_sync_enabled=True)).resolve(LOGICAL)
+
+    # then
+    assert isinstance(located, Unresolved) and "settings sync is on" in located.reason
+
+
+def test_the_doctor_row_fails_when_the_apps_own_sync_is_on() -> None:
+    # when
+    row = config_dir_summary(_config(), _paths(ConfigDirMap.resolved("Widget2026.3", settings_sync_enabled=True)))
+
+    # then
+    assert row is not None and row.ok is False
+    assert "widget: Widget2026.3" in row.detail and "settings sync is on" in row.detail

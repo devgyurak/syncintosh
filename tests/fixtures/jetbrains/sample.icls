@@ -1,0 +1,11 @@
+<scheme name="Sample Scheme" version="142" parent_scheme="Darcula">
+  <metaInfo>
+    <property name="created">2026-01-01T10:00:00</property>
+    <property name="modified">2026-01-02T10:00:00</property>
+    <property name="ide">DataGrip</property>
+    <property name="ideVersion">2026.2.6.0</property>
+  </metaInfo>
+  <colors>
+    <option name="CARET_COLOR" value="ABCDEF" />
+  </colors>
+</scheme>

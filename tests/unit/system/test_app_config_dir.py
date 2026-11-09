@@ -8,6 +8,7 @@ layout here is a TEST-ONLY one.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -176,3 +177,89 @@ def test_the_locator_is_asked_for_the_layouts_bundle_id() -> None:
 
     # then
     assert asked == ["com.example.widget"]
+
+
+# --------------------------------------------------------------------------- the app's own settings sync (in memory)
+
+SYNC_FILE = "Library/Application Support/JetBrains/Widget2026.2/options/settingsSync.xml"
+_SYNC_ON = (
+    '<application><component name="SettingsSyncSettings">'
+    '<option name="syncEnabled" value="true" /></component></application>'
+)
+_SYNC_OFF = (
+    '<application><component name="SettingsSyncSettings">'
+    '<option name="migrationFromOldStorageChecked" value="true" /></component></application>'
+)
+
+
+def _with_sync(tmp_path: Path, content: bytes | None) -> bool:
+    app = _app(tmp_path, "Widget", _info())
+    if content is not None:
+        target = tmp_path / "home" / SYNC_FILE
+        target.parent.mkdir(parents=True)
+        target.write_bytes(content)
+    return ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC).settings_sync_enabled
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (_SYNC_ON.encode(), True),
+        (_SYNC_OFF.encode(), False),
+        (None, False),
+        (b"<application", False),
+        (b"", False),
+        (_SYNC_ON.replace("true", "false").encode(), False),
+        (b'<!DOCTYPE a [<!ENTITY x "y">]>' + _SYNC_ON.encode(), False),
+        (_SYNC_ON.encode() + b" " * (64 * 1024), False),
+        # UTF-16 hides a DOCTYPE from a byte scan, so a file that is not UTF-8 reads as off.
+        (('<?xml version="1.0" encoding="utf-16"?>' + _SYNC_ON).encode("utf-16"), False),
+    ],
+)
+def test_sync_is_on_only_when_the_file_says_syncenabled_true(tmp_path, content: bytes | None, expected: bool) -> None:
+    # when
+    enabled = _with_sync(tmp_path, content)
+
+    # then
+    assert enabled is expected
+
+
+def test_a_symlinked_sync_file_is_not_followed(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+    outside = tmp_path / "elsewhere.xml"
+    outside.write_text(_SYNC_ON, encoding="utf-8")
+    link = tmp_path / "home" / SYNC_FILE
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+
+    # when
+    found = ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC)
+
+    # then
+    assert found.settings_sync_enabled is False
+
+
+def test_without_a_home_the_sync_file_is_not_read(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+
+    # when
+    found = _reader(app).read(SPEC)
+
+    # then
+    assert found.settings_sync_enabled is False
+
+
+def test_a_fifo_in_place_of_the_sync_file_does_not_hang_and_reads_as_off(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+    fifo = tmp_path / "home" / SYNC_FILE
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    # when
+    found = ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC)
+
+    # then
+    assert found.settings_sync_enabled is False

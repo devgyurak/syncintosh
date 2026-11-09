@@ -14,12 +14,18 @@ resolved name, because the name is later joined onto a path the app does not own
 * the metadata is read with a size bound and parsed strictly, and a failure of any kind resolves nothing.
 
 With several installs of the one bundle ID the highest release wins and the rest is reported as a note. Nothing here
-reads the settings folder, a secret path, or anything under `$HOME`.
+reads a secret path or the settings folder's content, with one exception: when it is given a home, it reads the
+single small file `options/settingsSync.xml` **in memory** to learn whether the app's own settings sync is on
+(`settings_sync_enabled`). That file holds a switch and no credential; it is never tracked, sealed or written, a
+symlink is not followed, and a file that is absent, too large, unparseable or declares a DOCTYPE reads as "off".
 """
 
 from __future__ import annotations
 
 import json
+import os
+import stat
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 
@@ -30,6 +36,9 @@ from syncintosh.system.app_detector import find_app_paths
 MAX_PRODUCT_INFO_BYTES = 4 * 1024 * 1024
 
 _PRODUCT_INFO = "Contents/Resources/product-info.json"
+_SYNC_SETTINGS = "options/settingsSync.xml"
+# The real file is a few hundred bytes; a bound keeps a planted one from being read whole.
+MAX_SYNC_SETTINGS_BYTES = 64 * 1024
 
 _NOT_FOUND = "the app is not installed on this machine"
 _CANNOT_ASK = "the app could not be located (Spotlight did not answer)"
@@ -39,8 +48,11 @@ _UNTRUSTED = "the app's own metadata is missing, unreadable or does not match th
 class ProductInfoConfigDir:
     """Reads the release folder under `locate`'s answer; constructing it does no I/O."""
 
-    def __init__(self, locate: Callable[[str], tuple[str, ...] | None] = find_app_paths) -> None:
+    def __init__(
+        self, locate: Callable[[str], tuple[str, ...] | None] = find_app_paths, home: Path | None = None
+    ) -> None:
         self._locate = locate
+        self._home = home
 
     def read(self, spec: ConfigDirSpec) -> ConfigDirMap:
         """The release folder this machine's installed app uses, or an unresolved map saying why not."""
@@ -58,7 +70,38 @@ class ProductInfoConfigDir:
         problems = (
             () if len(ordered) == 1 else (f"several releases are installed ({', '.join(ordered)}); using {ordered[0]}",)
         )
-        return ConfigDirMap.resolved(ordered[0], problems)
+        return ConfigDirMap.resolved(ordered[0], problems, settings_sync_enabled=self._sync_enabled(spec, ordered[0]))
+
+    def _sync_enabled(self, spec: ConfigDirSpec, name: str) -> bool:
+        """True only when `settingsSync.xml` says `syncEnabled` is `true`; anything else reads as off.
+
+        `<component name="SettingsSyncSettings"><option name="syncEnabled" value="true"/></component>`; the IDE
+        default is off. The file is read in memory and dropped.
+        """
+        if self._home is None or not spec.is_release_name(name):
+            return False
+        path = self._home / spec.real_directory(name) / _SYNC_SETTINGS
+        try:
+            # No symlink at the file, `O_NONBLOCK` so a FIFO cannot hang the cycle, and the type is checked on the
+            # descriptor that is read, so a swap between check and open is not followed.
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    return False
+                raw = handle.read(MAX_SYNC_SETTINGS_BYTES + 1)
+            # Strict UTF-8 only: a UTF-16 file hides a DOCTYPE from a byte scan, so anything else reads as off.
+            text = raw.decode("utf-8")
+            if len(raw) > MAX_SYNC_SETTINGS_BYTES or "<!" in text.replace("<!--", "") or "\x00" in text:
+                return False
+            root = ET.fromstring(raw)
+        except (OSError, UnicodeDecodeError, ET.ParseError, ValueError, RecursionError):
+            return False
+        return any(
+            option.get("name") == "syncEnabled" and option.get("value") == "true"
+            for component in root.iter("component")
+            if component.get("name") == "SettingsSyncSettings"
+            for option in component.iter("option")
+        )
 
     @staticmethod
     def _name_of(spec: ConfigDirSpec, app_path: str) -> str | None:
@@ -79,4 +122,4 @@ class ProductInfoConfigDir:
         return name if isinstance(name, str) and spec.is_release_name(name) else None
 
 
-__all__ = ["MAX_PRODUCT_INFO_BYTES", "ProductInfoConfigDir"]
+__all__ = ["MAX_PRODUCT_INFO_BYTES", "MAX_SYNC_SETTINGS_BYTES", "ProductInfoConfigDir"]

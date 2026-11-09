@@ -301,6 +301,12 @@ and the ledger baseline is left as it was. A glob inside the directory is listed
 deny-list sees the real path before every read and write (`system/deny_list.py` carries the wildcard entries for the
 credential files of a release folder).
 
+A product's **own settings sync** (JetBrains Settings Sync) is a second writer of the same files. The system reader
+learns whether it is on from one small file of the release folder (`options/settingsSync.xml`, `syncEnabled`), read in
+memory and never tracked, sealed or written; absent or unreadable means off. While it is on the folder does not resolve
+(the sentence is the preset's data), so neither collect nor apply touches it, the records are kept, and `doctor` flags
+the row.
+
 ### Directory globs in the local allowlist
 
 The local allowlist is the config's `items` (exact paths) plus its `globs` (directory patterns). A
