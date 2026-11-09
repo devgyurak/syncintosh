@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
     # runtime import here would close the cycle (``AGENTS.md`` §4).
     from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
+    from syncintosh.core.documents import DocumentRead, DocumentSource
     from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
     from syncintosh.core.profiles import ProfileMap, ProfileSpec
@@ -620,6 +621,36 @@ class LiveFiles(Protocol):
 
     def remove(self, path: str) -> None:
         """Remove the file if present. Raises on any other failure."""
+        ...
+
+
+@runtime_checkable
+class DocumentStore(Protocol):
+    """A settings document kept in a database row, which `LiveFiles` shows `services` as one virtual file.
+
+    The implementation opens the database only when asked (never in its constructor, ``AGENTS.md`` §2.6),
+    and never creates it: a database that is not there is the app not having run, which is a deferral and
+    not a reason to invent one. It refuses what it was not written against rather than guess
+    (`DocumentRefused`), and a write is checked against the revision a read returned (`DocumentStale`).
+    """
+
+    def present(self, source: DocumentSource) -> bool:
+        """True when the database file exists here (a symlink counts as existing)."""
+        ...
+
+    def is_symlink(self, source: DocumentSource) -> bool:
+        """True when the database, or the folder it sits in, is a symbolic link."""
+        ...
+
+    def read(self, source: DocumentSource) -> DocumentRead | None:
+        """The row's payload and revision, or `None` when the database does not exist. Raises `DocumentRefused`."""
+        ...
+
+    def write(self, source: DocumentSource, payload: str, *, expected_revision: int) -> None:
+        """Replace the row's payload if it still holds `expected_revision`; a payload equal in value writes nothing.
+
+        Raises `DocumentStale` when the row moved and `DocumentRefused` for anything else it will not do.
+        """
         ...
 
 

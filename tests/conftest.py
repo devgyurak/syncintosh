@@ -68,3 +68,71 @@ def _isolated_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     (home / ".local" / "share").mkdir(parents=True, exist_ok=True)
+
+
+@pytest.fixture(scope="session")
+def profile_state_db():
+    """A factory for fixture databases shaped like an app's `profile-state.db` (the layout Step 0 recorded on #55).
+
+    Builds the schema in `tmp_path` only, never near a real user database. The keys in a payload are TEST-ONLY
+    stand-ins: the real preset's fixtures take their key names from the real app. Every knob a boundary test needs
+    (a wrong `user_version`, `profile_id`, `domain_version` or hash) is a parameter, and a second `ui` row with
+    `legacy_json_acceptance` stands for the rest of the database a write must leave alone.
+    """
+    import hashlib
+    import json
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+
+    def _make(
+        path: Path,
+        *,
+        settings: dict | str | None = None,
+        profile_id: str | None = None,
+        user_version: int = 3,
+        domain_version: int = 1,
+        revision: int = 7,
+        row_revision: int | None = None,
+        stored_hash: str | None = None,
+        with_settings_row: bool = True,
+    ) -> Path:
+        payload = (
+            settings
+            if isinstance(settings, str)
+            else json.dumps({"theme": "dark", "fontSize": 13} if settings is None else settings, separators=(",", ":"))
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(path, isolation_level=None)) as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("CREATE TABLE profile_state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute(
+                "CREATE TABLE profile_state_documents (domain TEXT PRIMARY KEY, payload TEXT NOT NULL, "
+                "domain_version INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+                "content_hash TEXT NOT NULL)"
+            )
+            meta = {
+                "profile_id": path.parent.name if profile_id is None else profile_id,
+                "revision": str(revision),
+                "legacy_json_acceptance": "unchanged-marker",
+            }
+            connection.executemany("INSERT INTO profile_state_meta VALUES (?, ?)", list(meta.items()))
+            ui = json.dumps({"window": {"x": 1}}, separators=(",", ":"))
+            connection.execute(
+                "INSERT INTO profile_state_documents VALUES ('ui', ?, 1, 3, 1000, ?)",
+                (ui, hashlib.sha256(ui.encode()).hexdigest()),
+            )
+            if with_settings_row:
+                connection.execute(
+                    "INSERT INTO profile_state_documents VALUES ('settings', ?, ?, ?, 1000, ?)",
+                    (
+                        payload,
+                        domain_version,
+                        revision if row_revision is None else row_revision,
+                        hashlib.sha256(payload.encode()).hexdigest() if stored_hash is None else stored_hash,
+                    ),
+                )
+            connection.execute(f"PRAGMA user_version = {int(user_version)}")
+        return path
+
+    return _make

@@ -11,6 +11,13 @@ the **sanctioned way** to learn the shape of such a file without exposing values
 
 Usage:
     uv run python scripts/inspect_config.py <path> [--max-depth N] [--show-types] [--shape-strings]
+    uv run python scripts/inspect_config.py --sqlite-document <db> <domain> [same flags]
+
+`--sqlite-document` reads one JSON document row (`profile_state_documents.payload` for `<domain>`) from an app's
+SQLite database, the way Orca keeps its settings, and prints it through the same masking as a file: strings and the
+values of secret-named keys are masked, while key names and non-string scalars (numbers, booleans) are shown, exactly
+as in file mode. The database is opened **read-only** (`mode=ro`, never `immutable`, so what is still in the WAL is
+seen), nothing is written, and an error names the problem but never a value.
 
 `--shape-strings` answers one question the masked length cannot: *is this string a machine-local
 absolute path, or a portable value?* It prints `<path>` / `<bool>` / `<str:N>` for the value
@@ -28,9 +35,12 @@ import argparse
 import json
 import plistlib
 import re
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 # Names whose value must never be echoed, even masked differently.
 SECRET_KEY_RE = re.compile(
@@ -89,9 +99,24 @@ def _load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _load_document(database: Path, domain: str) -> Any:
+    """The JSON value of one `profile_state_documents` row, from a database opened read-only."""
+    with closing(sqlite3.connect(f"file:{quote(str(database))}?mode=ro", uri=True)) as connection:
+        row = connection.execute("SELECT payload FROM profile_state_documents WHERE domain = ?", (domain,)).fetchone()
+    if row is None or not isinstance(row[0], str):
+        raise ValueError("no such document")
+    return json.loads(row[0])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Print a config file's structure with values masked.")
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", type=Path, nargs="?")
+    parser.add_argument(
+        "--sqlite-document",
+        nargs=2,
+        metavar=("DB", "DOMAIN"),
+        help="inspect one JSON document row of an app's SQLite database instead of a file",
+    )
     parser.add_argument("--max-depth", type=int, default=4)
     parser.add_argument("--show-types", action="store_true")
     parser.add_argument(
@@ -101,18 +126,34 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.path.is_file():
-        print(f"not a file: {args.path}", file=sys.stderr)
-        return 1
+    if (args.path is None) == (args.sqlite_document is None):
+        parser.error("give a path, or --sqlite-document DB DOMAIN, not both")
 
-    try:
-        data = _load(args.path)
-    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
-        print(f"could not parse {args.path}: {exc}", file=sys.stderr)
-        return 1
+    if args.sqlite_document is not None:
+        database, domain = Path(args.sqlite_document[0]), args.sqlite_document[1]
+        if not database.is_file():
+            print(f"not a file: {database}", file=sys.stderr)
+            return 1
+        try:
+            data = _load_document(database, domain)
+        except (sqlite3.Error, ValueError):
+            # The message of a JSON or SQLite error can quote the payload; only the class of failure is printed.
+            print(f"could not read document {domain!r} from {database}", file=sys.stderr)
+            return 1
+        label = f"{database} [{domain}]"
+    else:
+        if not args.path.is_file():
+            print(f"not a file: {args.path}", file=sys.stderr)
+            return 1
+        try:
+            data = _load(args.path)
+        except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+            print(f"could not parse {args.path}: {exc}", file=sys.stderr)
+            return 1
+        label = str(args.path)
 
     shape = _walk(data, 0, args.max_depth, args.show_types, args.shape_strings)
-    print(f"# {args.path} (values masked)")
+    print(f"# {label} (values masked)")
     print(json.dumps(shape, indent=2, ensure_ascii=False))
     return 0
 

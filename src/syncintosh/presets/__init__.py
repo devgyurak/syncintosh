@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from syncintosh.core.documents import DocumentSource
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
@@ -209,6 +210,10 @@ class BuiltinCatalog:
     def ignore_list_files(self) -> tuple[PresetFile, ...]:
         """The built-in files that hold and obey the user's ignore list, in catalog order."""
         return tuple(file for preset in self.presets for file in preset.files if file.ignore_list)
+
+    def documents(self) -> tuple[DocumentSource, ...]:
+        """Every database row a built-in preset presents as a virtual file, in catalog order."""
+        return tuple(source for preset in self.presets for source in preset.documents)
 
     def policy_history(self, name: str) -> tuple[str, ...] | None:
         """The digests built-in preset `name` has shipped, oldest first, or `None` for a name this catalog lacks."""

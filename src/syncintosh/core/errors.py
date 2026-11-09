@@ -315,3 +315,22 @@ class RotationMarkerCorrupt(DomainError):
 
 class PendingCorrupt(DomainError):
     """The pending state under `pending/` is not a valid pending record."""
+
+
+class DocumentRefused(DomainError):
+    """A document store row cannot be read or written safely, so it is left exactly as it is.
+
+    Raised for a database whose schema, version, profile id or content hash is not the one this build
+    was written against, for a database reached through a symlink, for a view that is not the JSON
+    object the row holds, and for a write that has no revision to check. Callers fail closed: it means
+    "an unsupported version of the app", never "empty". The message names the rule and never the
+    payload, which is the user's settings and can hold a secret (``AGENTS.md`` §4).
+    """
+
+
+class DocumentStale(DocumentRefused):
+    """The row moved between the read and the write, so the write was not made.
+
+    A running app (or another writer) bumped the revision after collect saw it. Writing anyway would
+    stop the app's own saving, so the caller reports it and the next cycle starts from the new state.
+    """

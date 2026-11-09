@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""A settings **document** that lives in a database row, seen as one virtual file.
+
+Some apps keep their settings as one JSON value in a database row instead of a file (Orca's
+`profile-state.db`). `services` only moves bytes between a live path and an object, so such a row is
+presented to it as a file at a **logical path** that no real folder holds:
+
+```
+Library/Application Support/orca/profiles/local-default/@profile-state/settings.json
+```
+
+* The ``@`` element marks the path as virtual, the same device as a profile or a versioned config
+  directory (`core/profiles.py`, `core/config_dirs.py`): a real folder is never called that, so a
+  virtual path cannot collide with a real one. The manifest schema is unchanged.
+* `DocumentSource` is **data** a preset carries: which database, which domain, which virtual path,
+  and which `kind` of store understands it. Infrastructure picks the implementation by `kind`;
+  `core` and `services` never name a database class (``AGENTS.md`` §2.2).
+* The bytes `services` sees are an **indented** rendering of the row's JSON, so a diff, a resolve and
+  an LLM prompt do not meet one nine-kilobyte line (`render_view`). A write goes back as the app's
+  own compact form (`compact_payload`), with key order kept.
+* Writing a value equal to the current one is a no-op (`same_value`): the app counts revisions, and a
+  needless bump is a change someone else has to read.
+
+Standard library only (``AGENTS.md`` §2.1).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Final
+
+from syncintosh.core.config_dirs import CONFIG_DIR_MARK
+from syncintosh.core.errors import ConfigError, DocumentRefused, ManifestCorrupt
+from syncintosh.core.manifest import validate_path
+
+# The one kind a store ships with. A `Final` string and not an `Enum`: it is serialized verbatim
+# (``AGENTS.md`` §4).
+ORCA_PROFILE_STATE: Final = "orca-profile-state"
+
+# JS prints a whole-number double without a fraction and switches to an exponent at 1e21.
+_JS_INTEGER_LIMIT: Final = 1e21
+
+
+@dataclass(frozen=True)
+class DocumentSource:
+    """One database row presented as a virtual live file.
+
+    `database` and `view` are `$HOME`-relative. `view` carries an ``@`` element, so it names no real
+    path, and it is the path a manifest record holds. `domain` is the row's key in the database.
+    """
+
+    kind: str
+    database: str
+    domain: str
+    view: str
+
+    @classmethod
+    def create(cls, *, kind: str, database: str, domain: str, view: str) -> DocumentSource:
+        """Validate and freeze one source; never assign fields afterwards."""
+        if not isinstance(kind, str) or kind == "":
+            raise ConfigError(f"a document source needs a kind, got {kind!r}")
+        if not isinstance(domain, str) or domain == "":
+            raise ConfigError(f"a document source needs a domain, got {domain!r}")
+        try:
+            validated_database = validate_path(database)
+            validated_view = validate_path(view)
+        except ManifestCorrupt as exc:
+            raise ConfigError(f"invalid document source: {exc}") from exc
+        if not any(part.startswith(CONFIG_DIR_MARK) for part in validated_view.split("/")[:-1]):
+            # A view without the marker could be a real file, and a write to it would land beside the database
+            # instead of in it.
+            raise ConfigError(f"a document's view path needs a logical {CONFIG_DIR_MARK!r} folder: {validated_view!r}")
+        if any(character in validated_view for character in ("*", "?")):
+            raise ConfigError(f"a document's view path cannot be a glob: {validated_view!r}")
+        if validated_view == validated_database:
+            raise ConfigError("a document's view path cannot be its database")
+        return cls(kind=kind, database=validated_database, domain=domain, view=validated_view)
+
+    @property
+    def view_directory(self) -> str:
+        """The `$HOME`-relative folder the view sits in: virtual too, and present exactly when the database is."""
+        return self.view.rpartition("/")[0]
+
+
+@dataclass(frozen=True)
+class DocumentRead:
+    """A row as read: its payload text and the revision it was read at.
+
+    `revision` is what a later write is checked against, so a write never lands on a row that moved.
+    """
+
+    payload: str
+    revision: int
+
+
+def content_hash(payload: str) -> str:
+    """The row's integrity hash: SHA-256 of the payload's UTF-8 bytes, in hex (the app verifies it on every read)."""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _js_number(text: str) -> float | int:
+    """A JSON fraction read the way the app's own JS prints it: a whole value is an integer.
+
+    `JSON.stringify(1)` is `1`, never `1.0`, so a payload the app wrote holds no whole-valued fraction.
+    Reading one as a Python float would write it back as `1.0` — a different byte string for the same
+    value, which the app would then rewrite.
+    """
+    value = float(text)
+    return int(value) if value.is_integer() and abs(value) < _JS_INTEGER_LIMIT else value
+
+
+def _refuse_constant(name: str) -> Any:
+    raise DocumentRefused("the document holds a value JSON does not allow")
+
+
+def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        # Last-wins would drop a value without a word; which duplicate the app meant is not knowable.
+        raise DocumentRefused("the document repeats a key")
+    return dict(pairs)
+
+
+def _parse(text: str) -> dict[str, Any]:
+    """The JSON object `text` holds, or `DocumentRefused` (fixed messages: the text is the user's settings)."""
+    try:
+        value = json.loads(
+            text, parse_float=_js_number, parse_constant=_refuse_constant, object_pairs_hook=_object_pairs
+        )
+    except (ValueError, RecursionError):
+        raise DocumentRefused("the document is not valid JSON") from None
+    if not isinstance(value, dict):
+        raise DocumentRefused("the document is not a JSON object")
+    return value
+
+
+def render_view(payload: str) -> bytes:
+    """The bytes `services` sees for a row: its JSON, indented two spaces, with a final newline."""
+    return (json.dumps(_parse(payload), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def compact_payload(view: bytes) -> str:
+    """The row text for a view: the app's own compact JSON (no spaces), keys in the view's order."""
+    try:
+        text = view.decode("utf-8")
+    except UnicodeDecodeError:
+        raise DocumentRefused("the document is not UTF-8") from None
+    return json.dumps(_parse(text), ensure_ascii=False, separators=(",", ":"))
+
+
+def same_value(current: str, proposed: str) -> bool:
+    """True when two payload texts hold the same JSON value, however they are spaced or ordered numerically.
+
+    Compared through a canonical rendering, not `==`: Python treats `True == 1` and `False == 0`, and a flag the user
+    flipped would then be read as no change and never written.
+    """
+    return _canonical(_parse(current)) == _canonical(_parse(proposed))
+
+
+def _canonical(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+__all__ = [
+    "ORCA_PROFILE_STATE",
+    "DocumentRead",
+    "DocumentSource",
+    "compact_payload",
+    "content_hash",
+    "render_view",
+    "same_value",
+]

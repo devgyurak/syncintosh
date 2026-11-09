@@ -307,6 +307,30 @@ memory and never tracked, sealed or written; absent or unreadable means off. Whi
 (the sentence is the preset's data), so neither collect nor apply touches it, the records are kept, and `doctor` flags
 the row.
 
+### Database documents (virtual paths)
+
+An app that keeps its settings as one JSON value in a database row (Orca's `profile-state.db`, the `settings` row of
+`profile_state_documents`) is recorded by a **virtual** path with an `@` folder no real directory has, such as
+`…/profiles/local-default/@profile-state/settings.json`. The schema is unchanged. `services` only moves bytes, so
+a router in front of `LiveFiles` (`system/document_files.py`, wired in the CLI from the catalog's `Preset.documents`)
+answers that one path from a `DocumentStore` (`core/ports.py`, `system/sqlite_documents.py`) and every other path from
+the filesystem.
+
+* **View.** A read returns the JSON indented two spaces (a diff and a resolve do not meet one long line); a write
+  compacts it back to the app's own form with key order kept (`core/documents.py`). Whole-valued numbers are integers,
+  as JavaScript prints them. A value equal to the current row writes nothing, so the app's revision is not bumped.
+* **Fail closed.** The store refuses a `user_version` other than 3, a different table shape, a `profile_id` that is not
+  the folder's, a `domain_version` other than 1, a missing row, a row newer than its profile, a content hash that is
+  not the SHA-256 of the payload, and a database or folder that is a symlink. A database that does not exist is never
+  created: `read` is "no file", the view's folder does not exist, and `apply` defers.
+* **Write protocol.** The app's own: one `BEGIN IMMEDIATE` transaction that re-checks the row, compares the profile
+  revision with the one the read returned (`DocumentStale` when it moved), updates only that row and the meta
+  `revision` (+1, new hash, `updated_at` in milliseconds) under `synchronous=FULL`, and reads the row back. Nothing
+  else in the database is written. Collect opens read-only, never `immutable=1`. An outside write while the app runs
+  stops its own saving, so such a preset also sets `defer_while_running`; the revision check is only the backstop.
+* **Inspecting.** `scripts/inspect_config.py --sqlite-document <db> <domain>` prints the row's key structure, opened
+  read-only. Strings and secret-named keys' values are masked; key names and non-string scalars are shown, as in file mode.
+
 ### Directory globs in the local allowlist
 
 The local allowlist is the config's `items` (exact paths) plus its `globs` (directory patterns). A

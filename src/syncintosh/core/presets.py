@@ -29,6 +29,7 @@ from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from syncintosh.core.config_dirs import ConfigDirSpec
+from syncintosh.core.documents import DocumentSource
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
@@ -262,6 +263,10 @@ class Preset:
     its settings on quit, so a file written under it would be overwritten). Both are local behaviour, not part of
     the object bytes, so neither is in the policy digest.
 
+    `documents` are database rows this preset's files are read from and written to (`core/documents.py`): each
+    source's virtual view path is one of the preset's exact files. Like `config_dir` it is local behaviour, not part
+    of the object bytes, so it is not in the policy digest.
+
     `download_url` is the vendor's official page. Only a URL hard-coded here is trusted
     (``AGENTS.md`` §3.6), so the field is restricted to `https`. A deferral report reads it
     directly (`services.sync`); a URL that arrived from anywhere else is screened through
@@ -277,6 +282,7 @@ class Preset:
     policy_epoch: int = 1
     config_dir: ConfigDirSpec | None = None
     defer_while_running: bool = False
+    documents: tuple[DocumentSource, ...] = ()
 
     @classmethod
     def create(
@@ -291,6 +297,7 @@ class Preset:
         policy_epoch: int = 1,
         config_dir: ConfigDirSpec | None = None,
         defer_while_running: bool = False,
+        documents: tuple[DocumentSource, ...] = (),
     ) -> Preset:
         """Validate and freeze a preset; never assign fields afterwards."""
         if not isinstance(policy_epoch, int) or isinstance(policy_epoch, bool) or policy_epoch < 1:
@@ -335,6 +342,20 @@ class Preset:
             if stray:
                 # A path outside the logical root would be written verbatim, never through the resolved folder.
                 raise ConfigError(f"preset {name!r}: files outside the config directory: {stray}")
+        if documents:
+            if profiles is not None or config_dir is not None:
+                # Each of the three owns a logical `@` element, and which resolver a path took would depend on order.
+                raise ConfigError(f"preset {name!r}: documents cannot be combined with profiles or a config directory")
+            exact = {file.path for file in files if not file.is_glob}
+            stray = [source.view for source in documents if source.view not in exact]
+            if stray:
+                # A view the preset does not own as an exact file would be routed to the database with no policy.
+                raise ConfigError(f"preset {name!r}: a document's view is not one of its files: {stray}")
+            if duplicate_paths(source.view for source in documents):
+                raise ConfigError(f"preset {name!r}: two documents share one view path")
+            if any(file.ignore_list and file.path in {source.view for source in documents} for file in files):
+                # The ignore list is read from the file's own path, which here is virtual.
+                raise ConfigError(f"preset {name!r}: a document cannot be an ignore-list file")
         if defer_while_running and bundle_id is None:
             raise ConfigError(f"preset {name!r}: deferring while running needs a bundle id to ask about")
         return cls(
@@ -347,6 +368,7 @@ class Preset:
             policy_epoch=policy_epoch,
             config_dir=config_dir,
             defer_while_running=defer_while_running,
+            documents=documents,
         )
 
 
