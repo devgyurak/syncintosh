@@ -8,6 +8,7 @@ layout here is a TEST-ONLY one.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -176,3 +177,52 @@ def test_the_locator_is_asked_for_the_layouts_bundle_id() -> None:
 
     # then
     assert asked == ["com.example.widget"]
+
+
+def test_a_huge_build_number_resolves_nothing_instead_of_raising(tmp_path) -> None:
+    # given — int() of thousands of digits raises, which would abort the whole sync
+    app = _app(tmp_path, "Widget", _info("Widget2026." + "9" * 5000))
+
+    # when
+    found = _reader(app).read(SPEC)
+
+    # then
+    assert (found.directory, found.reason != "") == (None, True)
+
+
+def test_a_fifo_as_the_metadata_file_does_not_hang_the_read(tmp_path) -> None:
+    # given — a named pipe with no writer: a plain open() would block forever
+    app = tmp_path / "Widget.app"
+    (app / "Contents" / "Resources").mkdir(parents=True)
+    os.mkfifo(app / "Contents" / "Resources" / "product-info.json")
+
+    # when
+    found = _reader(str(app)).read(SPEC)
+
+    # then
+    assert found.directory is None
+    assert [problem for problem in found.problems if "regular file" in problem] != []
+
+
+def test_an_install_that_cannot_be_read_is_reported_beside_the_one_that_can(tmp_path) -> None:
+    # given
+    good = _app(tmp_path / "a", "Widget", _info("Widget2026.3"))
+    broken = _app(tmp_path / "b", "Widget", b"{")
+
+    # when
+    found = _reader(good, broken).read(SPEC)
+
+    # then — resolved by the readable install, and the other is told, not silently dropped
+    assert found.directory == "Widget2026.3"
+    assert [problem for problem in found.problems if broken in problem and "cannot be read" in problem] != []
+
+
+def test_when_no_install_can_be_read_each_reason_is_listed(tmp_path) -> None:
+    # given
+    broken = _app(tmp_path, "Widget", _info("Widget2026.2", vendor="Other"))
+
+    # when
+    found = _reader(broken).read(SPEC)
+
+    # then
+    assert (found.directory, [problem for problem in found.problems if "vendor" in problem] != []) == (None, True)

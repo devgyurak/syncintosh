@@ -20,6 +20,8 @@ reads the settings folder, a secret path, or anything under `$HOME`.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -49,34 +51,57 @@ class ProductInfoConfigDir:
             return ConfigDirMap.unresolved(_CANNOT_ASK)
         if not found:
             return ConfigDirMap.unresolved(_NOT_FOUND)
-        names = [name for each in found if (name := self._name_of(spec, each)) is not None]
+        results = [self._name_of(spec, each) for each in found]
+        names = [name for name, _ in results if name is not None]
+        # An install whose metadata cannot be used is said so, never silently left out of the candidates.
+        notes = tuple(f"{each}: {why}" for each, (name, why) in zip(found, results, strict=True) if name is None)
         if not names:
-            return ConfigDirMap.unresolved(_UNTRUSTED)
+            return ConfigDirMap.unresolved(_UNTRUSTED, notes)
         # The newest release wins: it is the one a person launching the app today runs. The others are noted so
         # `doctor` can say there is more than one (an old copy left in a backup folder, a second channel).
         ordered = sorted(set(names), key=spec.release_key, reverse=True)
-        problems = (
+        several = (
             () if len(ordered) == 1 else (f"several releases are installed ({', '.join(ordered)}); using {ordered[0]}",)
         )
-        return ConfigDirMap.resolved(ordered[0], problems)
+        return ConfigDirMap.resolved(ordered[0], several + notes)
 
     @staticmethod
-    def _name_of(spec: ConfigDirSpec, app_path: str) -> str | None:
-        """The validated `dataDirectoryName` of one install, or `None` when it cannot be trusted."""
+    def _name_of(spec: ConfigDirSpec, app_path: str) -> tuple[str | None, str]:
+        """The validated `dataDirectoryName` of one install, or `None` and why it cannot be trusted. Never raises."""
         if not app_path.endswith(".app"):
-            return None
+            return None, "not an app bundle"
         try:
-            with (Path(app_path) / _PRODUCT_INFO).open("rb") as handle:
-                raw = handle.read(MAX_PRODUCT_INFO_BYTES + 1)
-            if len(raw) > MAX_PRODUCT_INFO_BYTES:
-                return None
+            raw = _read_bounded(Path(app_path) / _PRODUCT_INFO)
+            if raw is None:
+                return None, "the metadata is not a regular file or is too large"
             document = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
-            return None
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            return None, f"the metadata cannot be read ({type(exc).__name__})"
         if not isinstance(document, dict) or document.get("productVendor") != spec.vendor:
-            return None
+            return None, "the metadata does not name this layout's vendor"
         name = document.get("dataDirectoryName")
-        return name if isinstance(name, str) and spec.is_release_name(name) else None
+        if isinstance(name, str) and spec.is_release_name(name):
+            return name, ""
+        return None, "dataDirectoryName is not a release folder name of this layout"
+
+
+def _read_bounded(path: Path) -> bytes | None:
+    """The file's bytes, or `None` when it is not a regular file or exceeds the bound.
+
+    Opened with `O_NONBLOCK` so a FIFO planted at the path cannot hang the open, and checked on the **descriptor**
+    (`fstat`), not on the path, so nothing can be swapped in between the check and the read.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        handle = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        raw = handle.read(MAX_PRODUCT_INFO_BYTES + 1)
+    return None if len(raw) > MAX_PRODUCT_INFO_BYTES else raw
 
 
 __all__ = ["MAX_PRODUCT_INFO_BYTES", "ProductInfoConfigDir"]

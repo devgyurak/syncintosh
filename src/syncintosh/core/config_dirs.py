@@ -116,11 +116,12 @@ class ConfigDirSpec:
         """True when `name` is a release folder of this product: `<prefix><year>.<n>` and nothing else.
 
         One path element by construction (no `/`, no `..`), so a name taken from an app's metadata can only point
-        to a folder directly inside `home`.
+        to a folder directly inside `home`. The build number is bounded: `int()` of thousands of digits raises, and
+        a name from an app's metadata must never be able to abort a sync.
         """
         return (
             isinstance(name, str)
-            and re.fullmatch(re.escape(self.prefix) + r"\d{4}\.\d+", name, flags=re.ASCII) is not None
+            and re.fullmatch(re.escape(self.prefix) + r"\d{4}\.\d{1,6}", name, flags=re.ASCII) is not None
         )
 
     def release_key(self, name: str) -> tuple[int, int]:

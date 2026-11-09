@@ -2371,7 +2371,9 @@ def _apply(
             continue
         if located.config_directory is not None and not live.exists(_join(home, located.config_directory)):
             # The release folder is the app's own: its first run may import settings from an older release, and a
-            # folder created here would make it skip that. Never created, so the file waits.
+            # folder created here would make it skip that. Never created, so the file waits. Known limitation
+            # (TOCTOU): `LiveFiles.write` later runs `mkdir(parents=True)`, so a folder removed between this check
+            # and the write would be re-created; profiles share the pattern, and it is tracked as a follow-up.
             deferred.append(Deferral(record.path, _CONFIG_FOLDER_MISSING))
             continue
         policy = presets.policy_for(record.path)
@@ -2623,6 +2625,33 @@ def _decision(
     return _WRITE if live_bytes == baseline else _ABORT
 
 
+def _release_of(located: Located) -> str:
+    """The release folder name a located path lives in (`DataGrip2026.2`), or `""` for a path without one."""
+    return "" if located.config_directory is None else located.config_directory.rsplit("/", 1)[-1]
+
+
+def _drop_foreign_releases(
+    ledger: Mapping[str, LedgerEntry], manifest: Manifest | None, paths: LivePaths
+) -> dict[str, LedgerEntry]:
+    """The ledger without baselines that were taken in another release folder than this machine uses now.
+
+    After an IDE upgrade the new folder holds defaults or nothing, and a baseline from the old folder would read
+    those as a local edit (defaults overwrite the other Macs) or as a deletion (suppressed, never applied again).
+    A dropped entry is a file with no baseline here — the same path as a reinstalled app — and is never marked
+    suppressed because of the version change. An entry with no recorded release (a legacy ledger) is kept.
+    """
+    records = {} if manifest is None else manifest.records
+    kept: dict[str, LedgerEntry] = {}
+    for file_id, entry in ledger.items():
+        record = records.get(file_id)
+        located = None if record is None or entry.release == "" else paths.resolve(record.path)
+        current = "" if located is None or isinstance(located, Unresolved) else _release_of(located)
+        if current != "" and current != entry.release:
+            continue
+        kept[file_id] = entry
+    return kept
+
+
 def _settle_ledger(
     *,
     target_manifest: Manifest,
@@ -2667,6 +2696,8 @@ def _settle_ledger(
                 settled[file_id] = old
             continue
         live_path = _join(home, located.path)
+        # Known limitation (TOCTOU): the folder is checked here and `LiveFiles.write` later runs `mkdir(parents=True)`,
+        # so a folder removed in between would be re-created. Profiles share this pattern; tracked as a follow-up.
         if live.is_symlink(live_path) or (
             located.config_directory is not None and not live.exists(_join(home, located.config_directory))
         ):
@@ -2680,11 +2711,13 @@ def _settle_ledger(
         if live_bytes is None:
             old = ledger.get(file_id)
             if old is not None:
-                settled[file_id] = LedgerEntry(sha256=old.sha256, commit=old.commit, suppressed=True)
+                settled[file_id] = replace(old, suppressed=True)
             continue
         digest = _ledger_digest(presets, live_bytes, record.path, record.format, target(record))
         if digest is not None and digest == record.sha256:
-            settled[file_id] = LedgerEntry(sha256=digest, commit=target_commit, suppressed=False)
+            settled[file_id] = LedgerEntry(
+                sha256=digest, commit=target_commit, suppressed=False, release=_release_of(located)
+            )
         else:
             old = ledger.get(file_id)
             if old is not None:
@@ -2883,6 +2916,7 @@ def _cycle(
         # working tree, are the source of truth.
         transport.materialize(head_commit)
     head_manifest = _read_manifest(transport, cipher, head_commit)
+    ledger = _drop_foreign_releases(ledger, head_manifest, paths)
     # The write is planned against what is stored: against the view, a migrated object would look unchanged.
     stored_head = _read_manifest(transport.raw, cipher, head_commit)
     collected = _collect(
