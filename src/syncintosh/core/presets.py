@@ -33,7 +33,7 @@ from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.profiles import ProfileSpec
-from syncintosh.core.tree import KeyPath
+from syncintosh.core.tree import AnyKey, KeyPath, KeyPattern, pattern_sort_key
 
 # The syntax checkers a preset may name. A value is serialized verbatim, so it is a `Literal`
 # and never an `Enum` (``AGENTS.md`` §4); `services` looks the implementation up in a mapping
@@ -157,8 +157,8 @@ class PresetFile:
 
     path: str
     format: FileFormat
-    noise: frozenset[KeyPath]
-    excluded: frozenset[KeyPath]
+    noise: frozenset[KeyPattern]
+    excluded: frozenset[KeyPattern]
     validator: ValidatorName | None
     glob: PresetGlob | None
     arrays: tuple[tuple[KeyPath, ArrayRule], ...] = ()
@@ -175,8 +175,8 @@ class PresetFile:
         *,
         path: str,
         format: FileFormat,
-        noise: Iterable[KeyPath] = (),
-        excluded: Iterable[KeyPath] = (),
+        noise: Iterable[KeyPattern] = (),
+        excluded: Iterable[KeyPattern] = (),
         validator: ValidatorName | None = None,
         array_identity: Mapping[KeyPath, ArrayRule] | None = None,
         ignore_list: bool = False,
@@ -198,15 +198,27 @@ class PresetFile:
             # The empty path is the document root, so "strip" would remove the whole file and
             # the projection would be a constant. Refuse it instead of disabling the file silently.
             raise ConfigError(f"{validated_path}: a key path must name a key below the root")
+        if any(all(isinstance(segment, AnyKey) for segment in pattern) for pattern in noise_paths | excluded_paths):
+            # Every segment a wildcard names every key at that depth, which is the document's whole content
+            # one level down: stripping it would disable the file as surely as the empty path does.
+            raise ConfigError(f"{validated_path}: a key pattern must name at least one literal key")
         if (noise_paths or excluded_paths) and validated_format not in KEYED_FORMATS:
             raise ConfigError(f"{validated_path}: noise/excluded keys need a keyed format, not {validated_format!r}")
         if ignore_list and (glob is not None or validated_format not in KEYED_FORMATS):
             # The list is read from one file, as keys of a document: a pattern names no single file, and a
             # format without keys has no list to read.
             raise ConfigError(f"{validated_path}: an ignore list needs one exact path in a keyed format")
+        if ignore_list and any(
+            any(isinstance(segment, AnyKey) for segment in pattern) for pattern in noise_paths | excluded_paths
+        ):
+            # The ignore list carries exact top-level keys (`core/ignore.py`); a wildcard beside it would blur
+            # which keys are carried and which are stripped.
+            raise ConfigError(f"{validated_path}: an ignore-list file cannot use a wildcard key pattern")
         repeated = noise_paths & excluded_paths
         if repeated:
-            raise ConfigError(f"{validated_path}: a key cannot be both noise and excluded: {sorted(repeated)}")
+            raise ConfigError(
+                f"{validated_path}: a key cannot be both noise and excluded: {sorted(repeated, key=pattern_sort_key)}"
+            )
         return cls(
             path=validated_path,
             format=validated_format,
@@ -230,8 +242,8 @@ class PresetFile:
         return collision_key(self.path) == collision_key(path)
 
     @property
-    def stripped(self) -> frozenset[KeyPath]:
-        """Every key path this file removes before sealing, noise and excluded together."""
+    def stripped(self) -> frozenset[KeyPattern]:
+        """Every key pattern this file removes before sealing, noise and excluded together."""
         return self.noise | self.excluded
 
 

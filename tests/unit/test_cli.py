@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from syncintosh.cli import main as main_module
 from syncintosh.core.presets import ValidatorName
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.services import Deferral, Refusal, SyncReport
+from syncintosh.services import Deferral, DroppedLocal, Refusal, SyncReport
 
 runner = CliRunner()
 
@@ -300,6 +300,36 @@ def test_scan_allow_reports_a_corrupt_allowlist(tmp_path) -> None:
     # then
     assert result.exit_code == 1
     assert "error:" in _combined(result)
+
+
+def test_sync_names_the_local_values_an_apply_removed_without_printing_any_value(tmp_path, monkeypatch) -> None:
+    # given — an apply removed the local keys of a server the synced settings do not have
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(
+        main_module,
+        "sync_service",
+        lambda **_kwargs: SyncReport(
+            dropped=(DroppedLocal(".config/zed/settings.json", "context_servers.gi[red]thub\x1b", 2),),
+        ),
+    )
+
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then — a notice, not a failure: the file, the item and the count, in the fixed wording
+    assert result.exit_code == 0
+    assert "removed with an item the synced settings do not have (not recoverable):" in _combined(result)
+    assert ".config/zed/settings.json: context_servers.gi[red]thub\\u001b (2 local keys)" in _combined(result)
 
 
 def test_sync_prints_a_deferrals_reason_and_install_hint(tmp_path, monkeypatch) -> None:

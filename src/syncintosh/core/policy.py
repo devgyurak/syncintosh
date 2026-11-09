@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from syncintosh.core.canonical import canonical_json_bytes
 from syncintosh.core.errors import ManifestCorrupt
+from syncintosh.core.tree import AnyKey, KeyPattern, pattern_sort_key
 
 if TYPE_CHECKING:
     from syncintosh.core.manifest import ManifestRecord
@@ -66,9 +67,17 @@ class PolicyStamp:
         return cls(rev=rev, digest=digest)
 
 
-def _key_paths(paths: Iterable[tuple[str, ...]]) -> list[list[str]]:
-    """Key paths as sorted lists, so a frozenset's iteration order cannot reach the digest."""
-    return sorted(list(path) for path in paths)
+def _key_paths(paths: Iterable[KeyPattern]) -> list[list[str | None]]:
+    """Key patterns as sorted lists, so a frozenset's iteration order cannot reach the digest.
+
+    `ANY_KEY` is JSON `null`, which no key name can be, so a wildcard never reads as a key called `*`. The sort
+    key puts a name before a wildcard at the same position and orders names as plain strings, which is the order
+    a pattern-free policy always had.
+    """
+    return [
+        [None if isinstance(segment, AnyKey) else segment for segment in path]
+        for path in sorted(paths, key=pattern_sort_key)
+    ]
 
 
 def _file_description(file: PresetFile) -> dict[str, Any]:

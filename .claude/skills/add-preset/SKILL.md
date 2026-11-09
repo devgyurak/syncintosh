@@ -114,6 +114,10 @@ Only add a new adapter if no existing one fits; if you do, use the `add-adapter`
   an excluded key must be **in no object at all** (`AGENTS.md` §3.4).
 - Both lists are **key paths**, so they only exist for a keyed format (`jsonc`, `toml`, `yaml`,
   `xml`, `plist`). A `text`/`binary` preset names neither; `PresetFile.create` refuses it.
+- A key under a name the user chooses (`servers.<name>.env`) is written with `ANY_KEY` (`syncintosh.core.tree`)
+  for that segment: it matches exactly one object key. Use it in `noise`/`excluded` **only** — the ignore list and
+  `carry` are exact paths, and `PresetFile.create` refuses an all-wildcard pattern. Never write `"*"`: that is a
+  real key.
 - A value that differs per machine but lives **inside an otherwise-shared file** is `noise` — its
   own value stays on each machine and is never aligned. A whole file that belongs to one machine
   is a different thing: that is a `scope = "machine"` item, which every machine carries but only

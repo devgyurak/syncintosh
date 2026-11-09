@@ -117,6 +117,12 @@ A preset may name keys that must never travel:
 - **excluded** — a credential (`auths`, a proxy authorization header). This one must not reach
   the repo at all ([AGENTS.md](../../AGENTS.md) §3.4).
 
+Both are **key patterns**: a key path whose segments may be `ANY_KEY`, which matches exactly one object key
+of any name (`context_servers.<name>.env`). It is a sentinel and not the string `*`, which is a legal key.
+`ANY_KEY` is for `noise`/`excluded` only. The user's ignore list and a carried key stay exact paths, so a
+setting called `*` is that setting, and `PresetFile.create` refuses an all-wildcard pattern and a wildcard on
+an ignore-list file. The policy digest writes `ANY_KEY` as JSON `null`, so it cannot read as a key name.
+
 Both are removed **on the collect side**, before the object is sealed — not by the merge's
 `ignore` set. Ignoring a key in `merge_tree` keeps it out of the *conflict* but still writes its
 value into the object, which for `excluded` is exactly the leak. `services` projects every
@@ -132,13 +138,40 @@ Two consequences follow, and they are the point of the whole mechanism:
 - **A noise-only change is invisible.** The digest is the projection's, so the ledger, the
   record, and the write plan all see "unchanged": no diff, no conflict, and no commit.
 - **An excluded key is in no object.** It was not in the bytes that were sealed, so no later
-  step can resurrect it.
+  step can resurrect it. A comment **inside** the excluded value (`"env": { // token`) goes with it, so it is not sealed and
+  does not stop the projection. A comment outside the value is not uniform, for an exact path as much as for a
+  pattern: one on the same line before the member is refused; one after the comma stays on the previous member's
+  line; one between the key and the colon is removed; one on the line above the member stays in the sealed text,
+  where the secret scan is the only defence (#83).
 
 `restore_text` re-attaches *this machine's* values from the live file, ordered by the live file
 so a stripped key returns to the position it had. Its result is projected again and required to
 reproduce the repo text **byte for byte**: the apply ledger stores the projection's digest, so a
 restore that did not round-trip would make the next cycle read the file as changed again — the
 one failure that would loop forever.
+
+**A user-named item the merge deleted.** A pattern with `ANY_KEY` names items the user created
+(`context_servers.<name>`, `profiles.<name>`). When another machine deletes one, the local values left here
+(an `env`, a noise path) would come back as an object with no `command`, or a profile holding only noise, and
+Zed would be left with an invalid server. So `graft` drops them with the item. It decides from the two trees
+alone, with no base, in one function (`_drops`) that `dropped_items` shares. A path's **items** are its prefixes cut
+after each `ANY_KEY` of every pattern that matches it (`profiles.work`, and inside it
+`profiles.work.settings.context_servers.gh`). An item is *deleted* when `live` has content under it that is neither
+stripped nor carried (it was shared) **and** `repo` has nothing at or under it. A local value goes when **any**
+enclosing item is deleted, so a deleted profile takes an env-only server inside it. An item that held only local
+values (a server with just `env`, one with just `settings`, a profile with just noise) was never shared, so it
+stays, and so does one inside a profile `repo` still has; an item `repo` still has stays even as `{}`. An exact path
+has no item, so a fixed key such as `http.proxyAuthorization` is unchanged. This runs on apply only: the sealed
+bytes, the policy digest and `policy_epoch` do not change, and the result is still required to project back to
+`repo_text`.
+
+The loss is **not recoverable**. An excluded value is in no commit, and the restore point holds only the projected
+bytes (`01-sync-model.md`, "Commits and rewrites"), so it is not there either, whether the item vanished through a
+merge or through `--adopt remote`. A sync that writes such a file therefore reports it in `SyncReport.dropped`
+(the file, the item's label and the number of local keys it held, never a value), and the CLI prints it under
+"removed with an item the synced settings do not have (not recoverable)". It is a notice and does not change the
+exit code. The notice does not say which Mac deleted the item, because with no base a merge deletion and an item the repo never had (a first sync, `--adopt remote`)
+cannot be told apart.
 
 The cut is verified rather than trusted. `project_text` re-parses its own output and compares it
 with the projected tree, so a renderer that half-applied an edit cannot seal a file that is
