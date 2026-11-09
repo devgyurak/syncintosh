@@ -128,12 +128,10 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str, release: str) -
     )
 
 
-def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
+def _initialize(machine: Machine, *, import_from: Path | None = None, presets: tuple[str, ...] = ("datagrip",)) -> None:
     machine.home.mkdir(parents=True, exist_ok=True)
     save_config(
-        new_machine_config(
-            remote=machine.remote, machine_id=machine.machine_id, preset_names=("datagrip",), catalog=CATALOG
-        ),
+        new_machine_config(remote=machine.remote, machine_id=machine.machine_id, preset_names=presets, catalog=CATALOG),
         machine.config_file,
     )
     transport = GitCLITransport(machine.repo)

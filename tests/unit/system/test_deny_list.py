@@ -274,3 +274,96 @@ def test_the_jetbrains_folder_itself_being_a_symlink_does_not_hide_a_credential(
 
     # when & then
     assert is_denied(home / JB / "DataGrip2026.2" / "ssl" / "x", home) is True
+
+
+# ---------------------------------------------------------------- JetBrains options/ files that hold hosts and tokens
+
+SENSITIVE_OPTIONS = [
+    "dataSources.xml",
+    "dataSources.local.xml",
+    "dataSourcesExtra.xml",
+    "security.xml",
+    "remote-servers.xml",
+    "sshConfigs.xml",
+    "webServers.xml",
+    "webDeployTransportHostTargets.xml",
+    "databaseDrivers.xml",
+    "certificates.xml",
+    "proxy.settings.xml",
+    "github.xml",
+    "gitlab.xml",
+    "docker.xml",
+    "docker-registry.xml",
+    "kubernetes-settings.xml",
+    "http-client.xml",
+    "sshRecentConnections.xml",
+    "sshRecentConnections-2.xml",
+    "wslRecentConnections.xml",
+    "wslRecentConnections-2.xml",
+    "recentConnections.xml",
+    "trusted-paths.xml",
+]
+
+
+@pytest.mark.parametrize("name", SENSITIVE_OPTIONS)
+@pytest.mark.parametrize("folder", ["RustRover2026.3", "IntelliJIdea2026.2", "@PhpStorm"])
+def test_a_jetbrains_options_file_with_a_host_or_a_token_is_denied_in_any_product_folder(
+    tmp_path, folder: str, name: str
+) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / JB / folder / "options" / name, home) is True
+
+
+@pytest.mark.parametrize("name", SENSITIVE_OPTIONS)
+def test_the_case_and_normalization_of_a_sensitive_options_file_do_not_matter(tmp_path, name: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / JB.upper() / "RUSTROVER2026.3" / "OPTIONS" / name.upper(), home) is True
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{JB}/RustRover2026.3/options/editor-font.xml",
+        f"{JB}/RustRover2026.3/options/mac/keymap.xml",
+        f"{JB}/RustRover2026.3/options/dockerfile.xml",
+        f"{JB}/RustRover2026.3/options/githubish.xml",
+        f"{JB}/RustRover2026.3/keymaps/Mine.xml",
+        f"{JB}/Toolbox/apps/RustRover/github.xml",
+        f"{JB}/Toolbox/apps/RustRover/security.xml",
+        f"{JB}/RustRover2026.3/options/sub/github.xml",
+    ],
+)
+def test_a_neighbouring_settings_file_is_not_a_false_positive(tmp_path, relative: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / relative, home) is False
+
+
+def test_a_symlink_to_a_sensitive_options_file_is_denied(tmp_path) -> None:
+    # given
+    home = tmp_path / "home"
+    target = home / JB / "RustRover2026.3" / "options" / "sshConfigs.xml"
+    target.parent.mkdir(parents=True)
+    target.write_text("<application />", encoding="utf-8")
+    (home / "notes").mkdir()
+    (home / "notes" / "link").symlink_to(target)
+
+    # when & then
+    assert is_denied(home / "notes" / "link", home) is True
+
+
+@pytest.mark.parametrize("name", SENSITIVE_OPTIONS)
+def test_a_sensitive_options_file_is_also_denied_under_the_per_os_folder(tmp_path, name: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / JB / "RustRover2026.3" / "options" / "mac" / name, home) is True

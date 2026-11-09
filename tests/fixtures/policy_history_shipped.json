@@ -15,6 +15,30 @@
     ],
     "datagrip": [
       "bd0dea45d8efd447831bb76caf788d04bd47caf937b87c387bb704f58885318d"
+    ],
+    "clion": [
+      "4b5ce7ecd3013d6c5ed368575dcc124c1ee2628f48ecdebf15437c30b450dfdb"
+    ],
+    "goland": [
+      "03e3d269405186a00c0042a6400a1abfa3985c711cbbdba7c5bee4d838815d3e"
+    ],
+    "intellij-idea": [
+      "0caad46d32663e57ca7f1f25fce22518704531e4f591b37c1459028df96d546f"
+    ],
+    "phpstorm": [
+      "ee560ceed51fcbb1424a0bc4e6f909e75c6dff15e8c50d010e7e30644b2b3be1"
+    ],
+    "pycharm": [
+      "595236f7ae8b053c40f29de90fc8f99d56dc85f8ada8212aeb486d356bdc29d1"
+    ],
+    "rubymine": [
+      "38e518dd5ad1a43a0a304864b6ac9c68321118fb0e13ee5165e75d187f364c93"
+    ],
+    "rustrover": [
+      "172991e1cf8c02a9a0c7a75393ca2b21e71067770a71cc3d2d4cc7126805c8b7"
+    ],
+    "webstorm": [
+      "f4073ceec5c7017e437a01232fba22d3e08fe0e61aa0ea28421dde74cd945399"
     ]
   }
 }

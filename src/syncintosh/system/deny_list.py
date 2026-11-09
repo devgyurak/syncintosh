@@ -70,9 +70,50 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/*.key",
     "Library/Application Support/JetBrains/*/c.kdbx",
     "Library/Application Support/JetBrains/*/c.pwd",
-    "Library/Application Support/JetBrains/*/options/dataSources.xml",
-    "Library/Application Support/JetBrains/*/options/dataSources.local.xml",
+    # Product-specific and plugin files in `options/` that carry a host, a user name, a token or a trust decision:
+    # SSH and WSL connections, deployment servers, container registries, Kubernetes and HTTP-client settings, the
+    # proxy and certificate stores, and the GitHub/GitLab accounts. None is in a preset's file list; they are named
+    # here so a user-added item or a glob cannot pull one in. `*` inside a name covers `dataSources.local.xml` and the
+    # numbered `sshRecentConnections*.xml` variants.
+    "Library/Application Support/JetBrains/*/options/dataSources*.xml",
     "Library/Application Support/JetBrains/*/options/security.xml",
+    "Library/Application Support/JetBrains/*/options/remote-servers.xml",
+    "Library/Application Support/JetBrains/*/options/sshConfigs.xml",
+    "Library/Application Support/JetBrains/*/options/webServers.xml",
+    "Library/Application Support/JetBrains/*/options/webDeployTransportHostTargets.xml",
+    "Library/Application Support/JetBrains/*/options/databaseDrivers.xml",
+    "Library/Application Support/JetBrains/*/options/certificates.xml",
+    "Library/Application Support/JetBrains/*/options/proxy.settings.xml",
+    "Library/Application Support/JetBrains/*/options/github.xml",
+    "Library/Application Support/JetBrains/*/options/gitlab.xml",
+    "Library/Application Support/JetBrains/*/options/docker.xml",
+    "Library/Application Support/JetBrains/*/options/docker-registry.xml",
+    "Library/Application Support/JetBrains/*/options/kubernetes-settings.xml",
+    "Library/Application Support/JetBrains/*/options/http-client.xml",
+    "Library/Application Support/JetBrains/*/options/sshRecentConnections*.xml",
+    "Library/Application Support/JetBrains/*/options/wslRecentConnections*.xml",
+    "Library/Application Support/JetBrains/*/options/recentConnections.xml",
+    "Library/Application Support/JetBrains/*/options/trusted-paths.xml",
+    # The same files under `options/mac/` (`RoamingType.PER_OS` storages live there).
+    "Library/Application Support/JetBrains/*/options/mac/dataSources*.xml",
+    "Library/Application Support/JetBrains/*/options/mac/security.xml",
+    "Library/Application Support/JetBrains/*/options/mac/remote-servers.xml",
+    "Library/Application Support/JetBrains/*/options/mac/sshConfigs.xml",
+    "Library/Application Support/JetBrains/*/options/mac/webServers.xml",
+    "Library/Application Support/JetBrains/*/options/mac/webDeployTransportHostTargets.xml",
+    "Library/Application Support/JetBrains/*/options/mac/databaseDrivers.xml",
+    "Library/Application Support/JetBrains/*/options/mac/certificates.xml",
+    "Library/Application Support/JetBrains/*/options/mac/proxy.settings.xml",
+    "Library/Application Support/JetBrains/*/options/mac/github.xml",
+    "Library/Application Support/JetBrains/*/options/mac/gitlab.xml",
+    "Library/Application Support/JetBrains/*/options/mac/docker.xml",
+    "Library/Application Support/JetBrains/*/options/mac/docker-registry.xml",
+    "Library/Application Support/JetBrains/*/options/mac/kubernetes-settings.xml",
+    "Library/Application Support/JetBrains/*/options/mac/http-client.xml",
+    "Library/Application Support/JetBrains/*/options/mac/sshRecentConnections*.xml",
+    "Library/Application Support/JetBrains/*/options/mac/wslRecentConnections*.xml",
+    "Library/Application Support/JetBrains/*/options/mac/recentConnections.xml",
+    "Library/Application Support/JetBrains/*/options/mac/trusted-paths.xml",
 )
 
 
