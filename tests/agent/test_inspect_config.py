@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "inspect_config.py"
 
@@ -80,3 +82,92 @@ def test_shape_strings_labels_a_string_without_showing_it(tmp_path) -> None:
     # then — a setting is distinguishable by shape, and still never printed
     assert '"currentContext": "<str:13>"' in output
     assert '"SECRET-VALUE-THREE"' not in output
+
+
+# An app's settings kept as a database row (`--sqlite-document`): the same masking, a read-only open.
+DOCUMENT = {
+    "theme": "plain-theme-value",
+    "proxyToken": "SECRET-VALUE-FIVE",
+    "servers": [{"name": "internal.example", "password": "SECRET-VALUE-SIX"}, "SECRET-VALUE-SEVEN"],
+    "nested": {"label": "another-plain-value"},
+}
+
+
+def _inspect_document(database: Path, *flags: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--sqlite-document", str(database), "settings", *flags],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_a_database_document_is_printed_with_every_value_masked(tmp_path, profile_state_db) -> None:
+    # given
+    database = profile_state_db(tmp_path / "profiles" / "main" / "state.db", settings=DOCUMENT)
+
+    # when
+    outputs = [
+        _inspect_document(database).stdout,
+        _inspect_document(database, "--shape-strings").stdout,
+        _inspect_document(database, "--show-types").stdout,
+    ]
+
+    # then — structure is shown, no value is
+    leaked = [value for value in _value_strings(DOCUMENT) for output in outputs if value in output]
+    assert (leaked, '"proxyToken": "<redacted>"' in outputs[0], '"nested"' in outputs[0]) == ([], True, True)
+
+
+def test_a_database_document_is_opened_read_only(tmp_path, profile_state_db) -> None:
+    # given
+    database = profile_state_db(tmp_path / "profiles" / "main" / "state.db", settings=DOCUMENT)
+    before = database.read_bytes()
+
+    # when
+    subprocess.run(
+        [sys.executable, str(SCRIPT), "--sqlite-document", str(database), "settings"], capture_output=True, check=True
+    )
+
+    # then
+    assert database.read_bytes() == before
+
+
+def test_a_missing_document_or_database_fails_without_printing_a_value(tmp_path, profile_state_db) -> None:
+    # given
+    database = profile_state_db(tmp_path / "profiles" / "main" / "state.db", settings=DOCUMENT)
+
+    # when
+    missing_row = subprocess.run(
+        [sys.executable, str(SCRIPT), "--sqlite-document", str(database), "nope"], capture_output=True, text=True
+    )
+    missing_file = subprocess.run(
+        [sys.executable, str(SCRIPT), "--sqlite-document", str(tmp_path / "absent.db"), "settings"],
+        capture_output=True,
+        text=True,
+    )
+
+    # then
+    assert (missing_row.returncode, missing_file.returncode) == (1, 1)
+    assert [v for v in _value_strings(DOCUMENT) if v in missing_row.stdout + missing_row.stderr] == []
+
+
+def test_a_row_that_is_not_json_fails_without_quoting_it(tmp_path, profile_state_db) -> None:
+    # given
+    database = profile_state_db(tmp_path / "profiles" / "main" / "state.db", settings="SECRET-VALUE-EIGHT {")
+
+    # when
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--sqlite-document", str(database), "settings"], capture_output=True, text=True
+    )
+
+    # then
+    assert (result.returncode, "SECRET-VALUE-EIGHT" in result.stdout + result.stderr) == (1, False)
+
+
+@pytest.mark.parametrize("args", [[], ["some-file.json", "--sqlite-document", "a.db", "settings"]])
+def test_the_inspector_wants_a_path_or_a_document_but_not_both_or_neither(args: list[str]) -> None:
+    # when
+    result = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
+
+    # then
+    assert result.returncode == 2

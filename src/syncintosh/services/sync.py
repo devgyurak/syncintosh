@@ -40,6 +40,9 @@ from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
     ContentDigestMismatch,
     ContentParseError,
+    DocumentRefused,
+    DocumentStale,
+    DocumentWrittenUnverified,
     GenerationDivergence,
     GitError,
     IgnoreListMalformed,
@@ -761,6 +764,27 @@ _PROFILE_DIRECTORY_UNSAFE = "the profile's directory is a symbolic link or a dan
 _PROFILE_FOLDER_MISSING = "the profile has no folder on this machine yet; open the profile in the app once"
 _CONFIG_FOLDER_MISSING = "the app's settings folder is not on this machine yet; open the app once to create it"
 _APP_RUNNING = "the app is open (or cannot be told to be closed); quit it to apply this file"
+# A document kept in a database row (`core/documents.py`) whose store refused to read or write it. The store's message
+# is a fixed sentence (never the payload), so it is said as it is. The record and the ledger baseline are left as they
+# were: a document the store would not open is not a document that was deleted.
+_DOCUMENT_REFUSED = "the app's stored document was left as it is"
+_DOCUMENT_UNVERIFIED = (
+    "the app's stored document was written, but reading it back did not confirm it; check it before the next sync"
+)
+_DOCUMENT_MOVED = "the app saved this document while it was being written, so it was not changed; the next sync retries"
+
+
+def _document_refusal(path: str, failure: DocumentRefused) -> Refusal:
+    """The report row for a document the store would not read or write.
+
+    A refusal is blocking: an unsupported database is something to act on. A row that moved between the read and the
+    write is not — the next cycle starts from the app's new state — so it is reported without failing the run.
+    """
+    if isinstance(failure, DocumentStale):
+        return Refusal(path, _DOCUMENT_MOVED, blocking=False)
+    if isinstance(failure, DocumentWrittenUnverified):
+        return Refusal(path, _DOCUMENT_UNVERIFIED)
+    return Refusal(path, f"{_DOCUMENT_REFUSED}: {failure}")
 
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
@@ -1187,9 +1211,15 @@ def _collect(
             state.symlinks.append(item.path)
             continue
         record = _find_item_record(state.records, item)
+        try:
+            raw = live.read(live_path)
+        except DocumentRefused as exc:
+            # Neither "absent" nor "empty": the record stays in the manifest as it was, and nothing is collected.
+            state.refused.append(_document_refusal(item.path, exc))
+            continue
         projected = _project_file(
             presets,
-            live.read(live_path),
+            raw,
             item.path,
             item.format,
             source=_NO_SOURCE if record is None else baseline(record),
@@ -2394,7 +2424,11 @@ def _apply(
         if live.is_symlink(live_path):
             symlinks.append(record.path)
             continue
-        live_bytes = live.read(live_path)
+        try:
+            live_bytes = live.read(live_path)
+        except DocumentRefused as exc:
+            refused.append(_document_refusal(record.path, exc))
+            continue
         live_view = live_bytes
         # The compare-and-swap reference is the raw bytes collect read from this file — never the
         # projection, and never the content this cycle will publish, which for a merged record is
@@ -2520,7 +2554,15 @@ def _apply(
                 refused.append(held_in)
                 continue
             restore_points.append(RestorePoint(record.path, held_in))
-        live.write(live_path, data)
+        try:
+            live.write(live_path, data)
+        except DocumentRefused as exc:
+            if not isinstance(exc, DocumentWrittenUnverified):
+                # Nothing was written, so the restore point saved above is not one anything was overwritten for.
+                # A write that was committed but not confirmed did change the database: its restore point stays.
+                restore_points[:] = [point for point in restore_points if point.path != record.path]
+            refused.append(_document_refusal(record.path, exc))
+            continue
         applied.append(record.path)
         # Only a file that was written lost anything: a refusal, a deferral and a syntax failure left it as it was.
         dropped.extend(DroppedLocal(record.path, path_label(loss.item), loss.keys) for loss in losses)
@@ -2707,7 +2749,14 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = old
             continue
-        live_bytes = live.read(live_path)
+        try:
+            live_bytes = live.read(live_path)
+        except DocumentRefused:
+            # Not "removed": a document the store would not open keeps its baseline, so nothing is suppressed.
+            old = ledger.get(file_id)
+            if old is not None:
+                settled[file_id] = old
+            continue
         if live_bytes is None:
             old = ledger.get(file_id)
             if old is not None:

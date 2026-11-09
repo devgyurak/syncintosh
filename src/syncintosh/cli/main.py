@@ -426,6 +426,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.document_files import open_live_files
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.profile_index import SystemProfileIndex
@@ -440,7 +441,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
         report = diff_repo_service(
             transport=transport,
             cipher=EnvelopeCipher(_key_store(config.remote)),
-            live=SystemLiveFiles(),
+            live=open_live_files(SystemLiveFiles(), str(paths.home), BuiltinCatalog.default().documents()),
             config=config,
             home=str(paths.home),
             deny=SystemDenyList(),
@@ -890,6 +891,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.document_files import open_live_files
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
@@ -924,7 +926,8 @@ def _sync_ports(config, paths) -> dict:
         "adapters": _adapters(),
         "catalog": BuiltinCatalog.default(),
         "validators": validators(),
-        "live": SystemLiveFiles(),
+        # A settings document kept in a database row is shown to the sync as a virtual file (`core/documents.py`).
+        "live": open_live_files(SystemLiveFiles(), str(paths.home), BuiltinCatalog.default().documents()),
         "ledger_store": JsonLedgerStore(paths.ledger_file),
         "pending_store": DirectoryPendingStore(paths.pending_dir),
         # A rotation whose push outcome is unknown: the evidence `sync` needs to settle it (never holds a key).
