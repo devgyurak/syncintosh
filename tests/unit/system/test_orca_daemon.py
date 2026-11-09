@@ -166,8 +166,9 @@ def test_the_default_lookup_finds_this_process() -> None:
     # when
     path = executable_path(os.getpid())
 
-    # then — the same file the interpreter was started from, whatever uv or a venv calls it
-    assert Path(path).samefile(sys.executable)
+    # then — an existing absolute path to an interpreter binary. Not `sys.executable`: a venv shim or the macOS
+    # framework launcher execs a different file than the one the interpreter reports, and uv names its own.
+    assert (Path(path).is_absolute(), Path(path).is_file(), "python" in Path(path).name.lower()) == (True, True, True)
 
 
 def test_a_platform_without_libproc_cannot_be_told_and_does_not_raise(tmp_path, monkeypatch) -> None:
