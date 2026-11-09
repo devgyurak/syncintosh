@@ -405,3 +405,64 @@ def test_a_deferred_apply_lands_once_the_app_has_quit(tmp_path, memory_key_store
     # then
     assert KEYMAP in report.applied
     assert b"Later" in (_folder(b) / "options" / "mac" / "keymap.xml").read_bytes()
+
+
+# --------------------------------------------------------------------------- unreadable or missing Settings Sync
+
+UNREADABLE = "could not read settingsSync.xml; leaving files alone"
+
+
+def _make_symlink(machine: Machine) -> None:
+    target = machine.home / "elsewhere.xml"
+    target.write_bytes(_fixture("settingsSync-off.xml"))
+    (_folder(machine) / "options").mkdir(parents=True, exist_ok=True)
+    (_folder(machine) / "options" / "settingsSync.xml").symlink_to(target)
+
+
+def _make_oversize(machine: Machine) -> None:
+    padding = b"<!-- " + b"x" * (64 * 1024) + b" -->"
+    _write(_folder(machine) / "options" / "settingsSync.xml", _fixture("settingsSync-off.xml") + padding)
+
+
+@pytest.mark.parametrize("make_unreadable", [_make_symlink, _make_oversize], ids=["symlink", "oversize"])
+def test_an_unreadable_settings_sync_file_leaves_the_product_alone_and_says_why(
+    tmp_path, memory_key_store, make_unreadable
+) -> None:
+    # given — B's settingsSync.xml cannot be read safely; B edits a file and A publishes a different edit
+    a, b = _pair(tmp_path, memory_key_store)
+    _run(b)
+    make_unreadable(b)
+    local = _fixture("editor-font.xml").replace(b'"13"', b'"30"')
+    _write(_folder(b) / "options" / "editor-font.xml", local)
+    _write(_folder(a) / "options" / "mac" / "keymap.xml", _fixture("keymap.xml").replace(b"Sample Keymap", b"Remote"))
+    _run(a)
+    before = _records(a)
+    published = GitCLITransport(a.repo).head()
+
+    # when
+    report = _run(b)
+
+    # then — the product is unknown: not collected, not applied, reported, the live files untouched, nothing committed
+    assert {d.reason for d in report.deferred if d.path in (EDITOR_FONT, KEYMAP)} == {UNREADABLE}
+    assert (_folder(b) / "options" / "editor-font.xml").read_bytes() == local
+    assert b"Remote" not in (_folder(b) / "options" / "mac" / "keymap.xml").read_bytes()
+    assert _records(b) == before
+    assert [o for o in _objects(b) if b'"30"' in o] == []
+    assert GitCLITransport(b.repo).head() == published
+
+
+def test_a_missing_settings_sync_file_lets_the_flow_proceed(tmp_path, memory_key_store) -> None:
+    # given — B has no settingsSync.xml at all, and A publishes an edit
+    a, b = _pair(tmp_path, memory_key_store)
+    _run(b)
+    _write(_folder(a) / "options" / "mac" / "keymap.xml", _fixture("keymap.xml").replace(b"Sample Keymap", b"Remote"))
+    _run(a)
+
+    # when
+    report = _run(b)
+
+    # then
+    assert (_folder(b) / "options" / "settingsSync.xml").exists() is False
+    assert [d for d in report.deferred if d.reason in (UNREADABLE, SYNC_CONFLICT)] == []
+    assert KEYMAP in report.applied
+    assert b"Remote" in (_folder(b) / "options" / "mac" / "keymap.xml").read_bytes()

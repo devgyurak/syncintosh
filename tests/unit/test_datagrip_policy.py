@@ -154,7 +154,7 @@ def test_the_sensitive_ones_are_also_blocked_in_every_release_folder(tmp_path: P
     assert blocked is True
 
 
-def test_the_scheme_noise_is_the_four_meta_info_properties() -> None:
+def test_the_whole_scheme_meta_info_element_is_noise() -> None:
     # when
     noise = _policy("colors/sample.icls").noise
 
