@@ -54,9 +54,12 @@ class DocumentLiveFiles:
         revision = self._seen.get(source.view)
         if revision is None:
             raise DocumentRefused("the document was not read first, so there is no revision to check")
-        self._store.write(source, compact_payload(data), expected_revision=revision)
-        # The revision moved (or the write was a no-op); the next write must read again.
-        self._seen.pop(source.view, None)
+        try:
+            self._store.write(source, compact_payload(data), expected_revision=revision)
+        finally:
+            # One read licenses one write attempt, however it ended: the revision moved, the write was a no-op, or
+            # the store refused; the next attempt must read again.
+            self._seen.pop(source.view, None)
 
     def exists(self, path: str) -> bool:
         source = self._views.get(self._key(path))

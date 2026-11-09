@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource, compact_payload, render_view
-from syncintosh.core.errors import DocumentRefused, DocumentStale
+from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentRead, DocumentSource, compact_payload, render_view
+from syncintosh.core.errors import DocumentRefused, DocumentStale, DocumentWrittenUnverified
 from syncintosh.system.sqlite_documents import SqliteDocumentStore
 
 DATABASE = "app/profiles/main/state.db"
@@ -396,6 +396,50 @@ def test_a_payload_with_a_surrogate_escape_reads_writes_and_keeps_a_valid_hash(
         database, "SELECT payload, content_hash FROM profile_state_documents WHERE domain='settings'"
     )
     assert (stored, stored_hash) == (new, hashlib.sha256(new.encode("utf-8")).hexdigest())
+
+
+class _ReadsBackWrong(SqliteDocumentStore):
+    """A store whose read-back after the commit differs (the app saved again), fails, or finds no database."""
+
+    def __init__(self, home: str, answer: DocumentRead | DocumentRefused | None) -> None:
+        super().__init__(home)
+        self._answer = answer
+
+    def read(self, source: DocumentSource) -> DocumentRead | None:
+        if isinstance(self._answer, DocumentRefused):
+            raise self._answer
+        return self._answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [DocumentRead(payload='{"other":1}', revision=9), DocumentRefused("gone"), None],
+)
+def test_a_read_back_that_does_not_confirm_the_commit_is_a_distinct_written_unverified_signal(
+    tmp_path, profile_state_db, answer: DocumentRead | DocumentRefused | None
+) -> None:
+    # given
+    database = profile_state_db(_database(tmp_path), revision=7)
+    store = _ReadsBackWrong(str(tmp_path), answer)
+
+    # when & then — the signal is a refusal for callers that do not care, but the database really did change
+    with pytest.raises(DocumentWrittenUnverified) as raised:
+        store.write(SOURCE, '{"a":1}', expected_revision=7)
+    assert isinstance(raised.value, DocumentRefused)
+    assert _query(database, "SELECT payload, revision FROM profile_state_documents WHERE domain='settings'") == [
+        ('{"a":1}', 8)
+    ]
+
+
+@pytest.mark.parametrize("revision", [3, 99])
+def test_a_stale_write_is_not_the_unverified_signal(tmp_path, profile_state_db, revision: int) -> None:
+    # given
+    profile_state_db(_database(tmp_path), revision=7)
+
+    # when & then
+    with pytest.raises(DocumentStale) as raised:
+        _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision=revision)
+    assert isinstance(raised.value, DocumentWrittenUnverified) is False
 
 
 def test_the_constructor_does_no_io(tmp_path) -> None:
