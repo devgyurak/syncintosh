@@ -130,7 +130,6 @@ SYNCED: frozenset[KeyPath] = frozenset(
         "terminalDividerColorDark",
         "terminalUseSeparateLightTheme",
         "terminalThemeLight",
-        "terminalCustomThemes",
         "terminalDividerColorLight",
         "terminalInactivePaneOpacity",
         "terminalActivePaneOpacity",
@@ -312,6 +311,11 @@ LOCAL: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "a command line, which can carry a token or run something on another Mac": frozenset(
             {"agentDefaultArgs", "terminalQuickCommands", "openInApplications"}
+        ),
+        # `terminalCustomThemes` was `[]` on the inspected machine, so nobody has seen what one entry holds (a name and
+        # colours, or a path to a theme file on this Mac). It moves to `SYNCED` once a real custom theme is inspected.
+        "a value whose inner shape was never inspected: it was empty on the inspected machine": frozenset(
+            {"terminalCustomThemes"}
         ),
         "a permission: widening what a program may do is not synced as a side effect": frozenset(
             {"terminalAllowOsc52Clipboard", "agentWorkspaceTrustEnabled", "agentStatusHooksEnabled"}

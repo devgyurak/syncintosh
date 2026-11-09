@@ -445,17 +445,71 @@ def test_the_virtual_settings_path_is_not_denied(tmp_path) -> None:
 @pytest.mark.parametrize(
     "relative",
     [
-        f"{ORCA_ROOT}/profiles/local-default/@profile-state",
-        f"{ORCA_ROOT}/orca-profile-index.json",
-        f"{ORCA_ROOT}/Preferences",
+        "Partitions/orca-browser/Cookies",
+        "Partitions/orca-browser/Cookies-journal",
+        "Partitions/orca-browser/Local Storage/leveldb/000003.log",
+        "Partitions/orca-browser/IndexedDB/https_example.com_0.indexeddb.leveldb/CURRENT",
+        "codex-runtime-home/system-default-auth.json",
+        "codex-runtime-home/shared-runtime-auth-provenance.json",
+        "terminal-history/session-1.log",
+        "orchestration.db",
+        "orchestration.db-wal",
+        "a-folder-orca-adds-next-year/anything.json",
+        "orca-profile-index.json",
+        "Preferences",
+        "profiles/local-default/orca-data.json",
+        "profiles/local-default/@profile-state/other.json",
+        "profiles/local-default/@profile-state",
+        "profiles/another-id/@profile-state/settings.json",
     ],
 )
-def test_a_neighbouring_orca_path_is_not_a_false_positive(tmp_path, relative: str) -> None:
+def test_the_whole_orca_data_tree_is_denied_so_a_folder_orca_adds_later_is_too(tmp_path, relative: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / ORCA_ROOT / relative, home) is True
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "Library/Application Support/orca-notes/settings.json",
+        "Library/Application Support/Code/User/settings.json",
+        "Library/Application Support/orcas/profiles/local-default/@profile-state/settings.json",
+    ],
+)
+def test_a_neighbouring_folder_is_not_a_false_positive(tmp_path, relative: str) -> None:
     # given
     home = tmp_path / "home"
 
     # when & then
     assert is_denied(home / relative, home) is False
+
+
+def test_the_virtual_view_is_exempt_only_under_the_real_home_spelling(tmp_path) -> None:
+    # given — the data folder is a symlink, so the view's real path is somewhere else
+    home = tmp_path / "home"
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "profiles" / "local-default").mkdir(parents=True)
+    (home / "Library" / "Application Support").mkdir(parents=True)
+    (home / ORCA_ROOT).symlink_to(elsewhere)
+
+    # when & then — the written path is the view, the real path is not, so the exemption does not apply
+    assert is_denied(home / ORCA_VIEW, home) is True
+
+
+def test_a_real_file_behind_the_views_name_is_still_denied(tmp_path) -> None:
+    # given — someone made a real `@profile-state` folder whose settings.json is a link to the database
+    home = tmp_path / "home"
+    profile = home / ORCA_ROOT / "profiles" / "local-default"
+    (profile / "@profile-state").mkdir(parents=True)
+    database = profile / "profile-state.db"
+    database.write_bytes(b"")
+    (profile / "@profile-state" / "settings.json").symlink_to(database)
+
+    # when & then — it resolves into the denied tree, so the exemption does not apply
+    assert is_denied(home / ORCA_VIEW, home) is True
 
 
 def test_a_symlink_to_orcas_state_database_is_denied(tmp_path) -> None:

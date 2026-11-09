@@ -350,7 +350,8 @@ copied.
 - **An allowlist.** 208 top-level keys were seen on the inspected machine. `SYNCED` names the ones that travel
   (appearance, editor, terminal, diff, notification and default-agent preferences); `LOCAL` records the reason for each
   other key seen (paths, migration markers, dismissed prompts, feature flags, command lines, permissions, machine
-  identity); a test pins that every observed key is one of synced, local or excluded. A key Orca adds later is **local
+  identity, and `terminalCustomThemes`, which was empty on the inspected machine so the shape of an entry was never seen);
+  a test pins that every observed key is one of synced, local or excluded. A key Orca adds later is **local
   until the preset is updated**: that is why this is not a deny-list. The credential-shaped keys are named as
   `EXCLUDED` as well, and moving one into `SYNCED` is refused at construction.
 - **Not verified.** Which settings Orca seals at rest with the OS secret store (the bundle's secret-store modules cover
@@ -369,13 +370,14 @@ copied.
 - **No watch.** Orca writes `ui` and `workspaceSession` every few seconds, so watching the database would run a cycle
   without end. The virtual path is left out of the watch (`services/profile_paths.py`), and the row is collected by the
   periodic sync (`syncintosh daemon install` runs `watch --poll`) or a manual `sync`.
-- **Denied in code** (`system/deny_list.py`), in the data root and in every profile folder: the secret-protection
-  file, the E2EE key pair, the agent-session authority key, the browser `Cookies*`, `codex-pane-accounts.json`,
-  `orca-devices.json`, `browser-host-client-identity.json`, `orca-github-cache.json`, `profile-state.db*` (with
-  `-wal`/`-shm` and backups), `orca-data.json*` (the export is a full copy of the state, credentials included) and
-  `daemon/`, and the Electron stores `Network/`, `Local Storage/`, `Session Storage/` and `IndexedDB/` (denied
-  defensively: cookies live in `Network/Cookies` on a modern Electron). The virtual `@profile-state/settings.json` is
-  not matched.
+- **Denied in code** (`system/deny_list.py`): Orca's **whole data folder**, `Library/Application Support/orca/`, as a
+  tree. Besides the settings row it holds the secret-protection file, an E2EE key pair, a session-authority key, the
+  terminal host's token (`daemon/`), browser session stores (`Partitions/…`, `Network/`), `codex-runtime-home/` auth
+  files, `terminal-history/`, `orchestration.db`, the profile database (with `-wal`/`-shm`) and `orca-data.json` (with
+  backups and the `.sqlite-export.<revision>.json` copies, which hold the whole state, credentials included). Naming
+  them one by one would fail open for the next folder Orca adds. The one exception is the virtual
+  `profiles/local-default/@profile-state/settings.json`, exempt only when both its real and its written spelling are
+  that view, so a symlink dressed as the view still resolves into the denied tree.
 - **One profile.** `local-default` is a constant in Orca's code (the default "Personal" profile); any other profile has
   another id and is not supported (a follow-up).
 - **No cask.** Homebrew's `orca` is plotly's unrelated app. The download page is the GitHub release feed the bundle's
