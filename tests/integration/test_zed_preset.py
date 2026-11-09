@@ -436,6 +436,7 @@ def test_a_server_deleted_on_the_other_mac_leaves_no_half_server_here(tmp_path, 
     # given — both Macs in sync; B's own file holds the local values of every server
     a, b = _pair_with_local_values(tmp_path, memory_key_store)
     assert GITHUB_SERVER in _read(a, SETTINGS)
+    assert b"FAKE-MCP-ENV-MARKER" in _read(b, SETTINGS)
 
     # when — A deletes the `github` server and syncs, then B syncs
     _write(a, SETTINGS, _read(a, SETTINGS).replace(GITHUB_SERVER, b""))
@@ -445,6 +446,9 @@ def test_a_server_deleted_on_the_other_mac_leaves_no_half_server_here(tmp_path, 
     # then — the server is gone from B's file, env included, and the server that stayed keeps its local values
     merged = _read(b, SETTINGS)
     assert report.has_conflicts is False
+    assert [(lost.path, lost.item) for lost in report.dropped] == [(SETTINGS, "context_servers.github")]
+    assert report.dropped[0].keys == 1
+    assert b"FAKE-MCP-ENV-MARKER" not in repr(report).encode()
     assert b'"github"' not in merged
     assert b"FAKE-MCP-ENV-MARKER" not in merged
     assert b"FAKE-MCP-HEADER-MARKER" in merged
@@ -456,32 +460,85 @@ def test_a_profile_deleted_on_the_other_mac_is_gone_here_too(tmp_path, memory_ke
     a, b = _pair_with_local_values(tmp_path, memory_key_store)
     original = _read(a, SETTINGS)
     start = original.index(b'  "profiles": {')
+    assert b"FAKE-PROFILE-ENV-MARKER" in _read(b, SETTINGS)
 
     # when — A deletes the profile and syncs, then B syncs
     _write(a, SETTINGS, original[:start] + b"}\n")
     _run(a)
-    _run(b)
+    report = _run(b)
 
     # then — B's profile, with the credential and the font size it held, is removed whole
     merged = _read(b, SETTINGS)
     assert b'"profiles"' not in merged
     assert b"FAKE-PROFILE-ENV-MARKER" not in merged
     assert b'"work"' not in merged
+    assert [(lost.path, lost.item) for lost in report.dropped] == [(SETTINGS, "profiles.work")]
+    assert report.dropped[0].keys == 1
+    assert b"FAKE-PROFILE-ENV-MARKER" not in repr(report).encode()
+
+
+def test_a_deleted_profile_takes_an_env_only_server_inside_it(tmp_path, memory_key_store) -> None:
+    # given — B's profile also holds a server of its own with nothing but a local credential map
+    a, b = _pair_with_local_values(tmp_path, memory_key_store)
+    anchor = b'      "settings": {\n        "terminal": {'
+    server = b'"context_servers": { "local-only": { "env": { "K": "FAKE-PROFILE-SERVER-MARKER" } } },'
+    local = b'      "settings": {\n        ' + server + b'\n        "terminal": {'
+    _write(b, SETTINGS, _read(b, SETTINGS).replace(anchor, local, 1))
+    assert b"FAKE-PROFILE-SERVER-MARKER" in _read(b, SETTINGS)
+    original = _read(a, SETTINGS)
+
+    # when — A deletes the profile and syncs, then B syncs
+    _write(a, SETTINGS, original[: original.index(b'  "profiles": {')] + b"}\n")
+    _run(a)
+    report = _run(b)
+
+    # then — neither the profile nor the server's credential map is left behind
+    merged = _read(b, SETTINGS)
+    assert b'"work"' not in merged
+    assert b"FAKE-PROFILE-SERVER-MARKER" not in merged
+    assert [(lost.item, lost.keys) for lost in report.dropped] == [("profiles.work", 2)]
+    assert b"FAKE-PROFILE-SERVER-MARKER" not in repr(report).encode()
+
+
+def test_an_adopt_remote_overwrite_reports_the_local_server_it_removed(tmp_path, memory_key_store) -> None:
+    # given — the repo holds the fixture; B's own file is a different server with a local credential map
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write(a, SETTINGS, _fixture("settings.jsonc"))
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    own = (
+        b'{\n  "context_servers": {\n    "mine": { "command": "x", "env": { "K": "FAKE-ADOPT-ENV-MARKER" } }\n  }\n}\n'
+    )
+    _write(b, SETTINGS, own)
+
+    # when
+    report = _run(b, adopt="remote")
+
+    # then — the overwrite removed the server and its credential map, and says so
+    assert b"FAKE-ADOPT-ENV-MARKER" not in _read(b, SETTINGS)
+    assert [(lost.path, lost.item, lost.keys) for lost in report.dropped] == [(SETTINGS, "context_servers.mine", 1)]
+    assert b"FAKE-ADOPT-ENV-MARKER" not in repr(report).encode()
 
 
 def test_a_server_that_exists_only_here_with_only_settings_survives_a_sync(tmp_path, memory_key_store) -> None:
     # given — B adds an extension server that has only `settings`; it is stripped whole, so it is in no object
     a, b = _pair_with_local_values(tmp_path, memory_key_store)
+    assert b"FAKE-MCP-ENV-MARKER" in _read(b, SETTINGS)
+    assert b"FAKE-PROFILE-ENV-MARKER" in _read(b, SETTINGS)
     local = b'    "mine-ext": {\n      "settings": {\n        "token": "FAKE-LOCAL-EXT-MARKER",\n      },\n    },\n'
     _write(b, SETTINGS, _read(b, SETTINGS).replace(b'    "from-extension": {', local + b'    "from-extension": {'))
 
     # when — A changes a shared setting and B syncs
     _write(a, SETTINGS, _read(a, SETTINGS).replace(b'"buffer_font_size": 15', b'"buffer_font_size": 18'))
     _run(a)
-    _run(b)
+    report = _run(b)
 
-    # then — the shared change landed and the local-only server is untouched
+    # then — the shared change landed and the local-only server is untouched, with nothing reported as lost
     merged = _read(b, SETTINGS)
+    assert report.dropped == ()
     assert b'"buffer_font_size": 18' in merged
     assert b"FAKE-LOCAL-EXT-MARKER" in merged
     assert [blob for blob in _decrypted_objects(b) if b"FAKE-LOCAL-EXT-MARKER" in blob] == []

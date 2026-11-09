@@ -187,7 +187,10 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   whole, so *the server's existence* is not carried to another Mac. And when another Mac deletes a server or a
   profile, this Mac's apply removes that item's local values (its `env`, say) with it: a user-named item the merge
   deleted is not left behind as a server with no `command` (`02-base-and-merge.md`, "Projection"). Stripped values
-  are never in a commit, so a restore point does not hold them.
+  are never in a commit, so a restore point does not hold them and **the loss cannot be recovered**; the sync result
+  lists it under "removed with an item another Mac deleted (not recoverable)" (file, item, number of local keys, never
+  a value). It also appears when an `--adopt remote` overwrite that is written removes a server the repo never had;
+  the heading is then slightly off, since with no base the two cases read the same.
 - **Synced, left to the secret scan**: `lsp.*.initialization_options`, `lsp.*.settings`, `proxy` (the scan knows
   `scheme://user:pass@`), `context_servers.*.command` and `.args`. Also synced, and not yet reviewed against the pinned schema (a follow-up):
   `context_servers.*.url`, `agent_servers.*.command`/`args`, and the `api_url` of `language_models` and
