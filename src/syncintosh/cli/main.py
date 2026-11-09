@@ -1043,7 +1043,7 @@ def _render(report: SyncReport, config) -> None:
         from syncintosh.core.advice import visible
 
         # Not a failure, so stdout and no exit code. Names and counts only: the values are in no store.
-        _say("removed with an item another Mac deleted (not recoverable):")
+        _say("removed with an item the synced settings do not have (not recoverable):")
         for lost in report.dropped:
             _say(f"  {_shown(lost.path)}: {visible(lost.item)} ({lost.keys} local keys)")
     for note in report.notes:

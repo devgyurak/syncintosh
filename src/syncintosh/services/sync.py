@@ -279,7 +279,7 @@ class Backup:
 
 @dataclass(frozen=True)
 class DroppedLocal:
-    """Local values an apply removed because another Mac deleted the item they belonged to.
+    """Local values an apply removed because the synced settings do not have the item they belonged to.
 
     `item` is the item's label (`core.tree.path_label`), `keys` how many local entries went with it. No value is
     held: an excluded value is in no commit, so a restore point cannot bring it back, and this report is the only
@@ -309,7 +309,8 @@ class SyncReport:
     # Per overwritten file, the commit its previous bytes are in. Usually `backup_commit`; a file published
     # earlier but never applied is restored from the ledger's commit instead.
     restore_points: tuple[RestorePoint, ...] = ()
-    # Local values an apply removed with an item another Mac deleted; written files only (see `DroppedLocal`).
+    # Local values an apply removed with an item the synced settings do not have; written files only
+    # (see `DroppedLocal`).
     dropped: tuple[DroppedLocal, ...] = ()
     created: tuple[str, ...] = ()
     collected: tuple[str, ...] = ()
@@ -833,7 +834,7 @@ def _restore_file(
 ) -> tuple[bytes, tuple[DroppedItem, ...]] | None:
     """`repo_bytes` with the live file's local values re-attached, and what that left out, or `None` on failure.
 
-    The second element is the items another machine deleted, whose local values are not re-attached.
+    The second element is the items the synced settings do not have, whose local values are not re-attached.
 
     The live file's ignored keys come back along with the preset's noise: they are this machine's own, and
     the object being applied is the carry source of the round-trip check (`core.projection.restore_text`).
@@ -2485,7 +2486,7 @@ def _save_restore_point(
     seal uses the object domain and the record's file ID, the same AAD an object in the repo carries, so a
     restore commit's blob opens with `Cipher.open(domain="object", file_id=...)`. The projection is what is
     saved because it is what the overwrite replaces. An excluded value is in no commit, so it is not here: it stays
-    in the live file unless the item it belongs to was deleted on another machine, and then it is gone and
+    in the live file unless the synced settings do not have the item it belongs to, and then it is gone and
     `SyncReport.dropped` is the only account of it.
     """
     if view is None:

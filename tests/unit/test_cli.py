@@ -303,7 +303,7 @@ def test_scan_allow_reports_a_corrupt_allowlist(tmp_path) -> None:
 
 
 def test_sync_names_the_local_values_an_apply_removed_without_printing_any_value(tmp_path, monkeypatch) -> None:
-    # given — an apply removed the local keys of a server another Mac deleted
+    # given — an apply removed the local keys of a server the synced settings do not have
     from syncintosh.core.config import LocalItem, SyncConfig
     from syncintosh.system.config import save_config
     from syncintosh.system.paths import MachinePaths
@@ -328,7 +328,7 @@ def test_sync_names_the_local_values_an_apply_removed_without_printing_any_value
 
     # then — a notice, not a failure: the file, the item and the count, in the fixed wording
     assert result.exit_code == 0
-    assert "removed with an item another Mac deleted (not recoverable):" in _combined(result)
+    assert "removed with an item the synced settings do not have (not recoverable):" in _combined(result)
     assert ".config/zed/settings.json: context_servers.gi[red]thub\\u001b (2 local keys)" in _combined(result)
 
 

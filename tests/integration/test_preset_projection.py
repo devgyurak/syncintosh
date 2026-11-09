@@ -22,15 +22,15 @@ from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
-from syncintosh.core.errors import ContentParseError, PolicyMismatch
+from syncintosh.core.errors import ContentParseError, PolicyMismatch, SyntaxInvalid
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import Scope
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import policy_digest
-from syncintosh.core.ports import ContentAdapter, PresetCatalog, TextEdit
-from syncintosh.core.presets import Preset, PresetFile
+from syncintosh.core.ports import ContentAdapter, PresetCatalog, SyntaxValidator, TextEdit
+from syncintosh.core.presets import Preset, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.core.tree import ANY_KEY, Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -324,6 +324,7 @@ def _run(
     adopt: AdoptChoice | None = None,
     catalog: PresetCatalog | None = None,
     adapters: Mapping[FileFormat, ContentAdapter] | None = None,
+    validators: Mapping[ValidatorName, SyntaxValidator] | None = None,
 ) -> SyncReport:
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
@@ -338,7 +339,7 @@ def _run(
         driver=TextMergeDriver(),
         adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
         catalog=catalog if catalog is not None else KEYED_CATALOG,
-        validators={"zsh": ZshSyntaxValidator()},
+        validators={"zsh": ZshSyntaxValidator()} if validators is None else validators,
         live=SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
@@ -1366,3 +1367,50 @@ def test_a_file_that_is_deferred_reports_nothing_dropped(tmp_path, memory_key_st
 
     # then
     assert report.dropped == ()
+
+
+WILD_CHECKED_PRESET = Preset.create(
+    name="wild-checked",
+    files=(PresetFile.create(path=WILD, format="jsonc", excluded={("servers", ANY_KEY, "env")}, validator="json"),),
+)
+WILD_CHECKED_CATALOG = _Catalog(WILD_CHECKED_PRESET)
+
+
+class _Accepts:
+    def check(self, text: str, *, subject: str) -> None:
+        return None
+
+
+class _Rejects:
+    def check(self, text: str, *, subject: str) -> None:
+        raise SyntaxInvalid(f"{subject}: rejected by the test")
+
+
+def test_a_file_refused_by_its_syntax_check_after_the_reduce_reports_nothing_dropped(
+    tmp_path, memory_key_store
+) -> None:
+    # given — B's own file holds a local credential map under `gh`, and A deletes that server, so B's reduce loses it
+    remote = _bare_remote(tmp_path)
+    accepting: dict[ValidatorName, SyntaxValidator] = {"json": _Accepts()}
+    config = LocalItem.create(path=WILD, preset="wild-checked", scope="common", format="jsonc")
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _config(a, (config,)))
+    _write(a, WILD, _servers("gh", "fs"))
+    _run(a, catalog=WILD_CHECKED_CATALOG, validators=accepting)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _config(b, (config,)), import_from=a.recovery)
+    _run(b, catalog=WILD_CHECKED_CATALOG, validators=accepting)
+    _write(b, WILD, _servers("gh", "fs", env=True))
+    _run(b, catalog=WILD_CHECKED_CATALOG, validators=accepting)
+    _write(a, WILD, _servers("fs"))
+    _run(a, catalog=WILD_CHECKED_CATALOG, validators=accepting)
+    before = _read(b, WILD)
+
+    # when — B syncs with a syntax check that refuses what apply is about to write
+    report = _run(b, catalog=WILD_CHECKED_CATALOG, validators={"json": _Rejects()})
+
+    # then — nothing was written, so nothing was lost and nothing is reported
+    assert [refusal.path for refusal in report.invalid] == [WILD]
+    assert report.dropped == ()
+    assert _read(b, WILD) == before
+    assert before.count(FAKE_ENV) == 2

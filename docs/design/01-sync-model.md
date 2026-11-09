@@ -259,8 +259,8 @@ tell another what not to scan (``AGENTS.md`` §3.3).
   model's proposal settled. A file with carried keys is compared through the ledger's object, as the records
   were projected. No commit is made for this.
 - **What a restore point cannot hold is reported.** Only the projected bytes are in any commit, so a local value a
-  preset excludes (an `env` map) is in none. It normally stays in the live file; but when another machine deleted the
-  item it belongs to (a server, a profile), the apply removes it with the item, and no restore point can bring it
+  preset excludes (an `env` map) is in none. It normally stays in the live file; but when the synced settings do not have the
+  item it belongs to (a server, a profile: another machine deleted it, or the repo never had it), the apply removes it with the item, and no restore point can bring it
   back. The report lists each such file, item and key count in `SyncReport.dropped`
   (`02-base-and-merge.md`, "Projection"). Nothing is listed for a file the apply did not write.
 - **The restore ref covers a file no commit holds.** A first-sight (or suppressed) record applied with

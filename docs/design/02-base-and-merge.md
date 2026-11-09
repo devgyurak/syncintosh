@@ -169,9 +169,9 @@ The loss is **not recoverable**. An excluded value is in no commit, and the rest
 bytes (`01-sync-model.md`, "Commits and rewrites"), so it is not there either, whether the item vanished through a
 merge or through `--adopt remote`. A sync that writes such a file therefore reports it in `SyncReport.dropped`
 (the file, the item's label and the number of local keys it held, never a value), and the CLI prints it under
-"removed with an item another Mac deleted (not recoverable)". It is a notice and does not change the exit code. "Another Mac deleted" is what the two trees show, not something
-proven: with no base, an item the repo never had (a first sync, `--adopt remote`) reads the same, and is reported the
-same way.
+"removed with an item the synced settings do not have (not recoverable)". It is a notice and does not change the
+exit code. The notice does not say which Mac deleted the item, because with no base a merge deletion and an item the repo never had (a first sync, `--adopt remote`)
+cannot be told apart.
 
 The cut is verified rather than trusted. `project_text` re-parses its own output and compares it
 with the projected tree, so a renderer that half-applied an edit cannot seal a file that is

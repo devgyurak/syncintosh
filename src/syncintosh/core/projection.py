@@ -198,7 +198,7 @@ def strip(tree: Tree, paths: frozenset[KeyPattern]) -> Tree:
 
 @dataclass(frozen=True)
 class DroppedItem:
-    """A user-named item another machine deleted, whose local values this machine loses on apply.
+    """A user-named item the synced settings do not have, whose local values this machine loses on apply.
 
     `item` is the outermost deleted item the values belonged to, and `keys` how many local entries went with it.
     No value is held: an excluded value is in no store, so there is nothing to recover and nothing to show.
