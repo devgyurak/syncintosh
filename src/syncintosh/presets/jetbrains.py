@@ -32,7 +32,8 @@ folder that has never been customized has none of them). The `@Storage` lines we
 
 ## What is never tracked
 
-Left out of the catalog (and, where it is sensitive, also blocked by `system/deny_list.py`): every
+Left out of the catalog (and, where it is sensitive, also blocked by name in `system/deny_list.py`, which is narrower
+than this list: it names `dataSources.xml` and `dataSources.local.xml`, not every `dataSources*.xml`): every
 `RoamingType.DISABLED` file (`window.state.xml`, `recentProjects.xml`, `usage.statistics.xml`,
 `features.usage.statistics.xml`,
 `trusted-paths.xml`, `path.macros.xml`, `updates.xml`, `ide.general.local.xml`, `security.xml`, `proxy.settings.xml`,
@@ -46,6 +47,9 @@ Left out of the catalog (and, where it is sensitive, also blocked by `system/den
 
 * A colour scheme's `<metaInfo>` records `created`, `modified`, `ide` and `ideVersion` (the `META_INFO_*` names in
   `AbstractColorsScheme.java`): when and by which product the file was saved, so two Macs would disagree on every save.
+  The **whole element** is stripped, not those four properties: a second `<metaInfo>` is a repeated group with no
+  per-property path, and an empty `<metaInfo />` on one machine against a full one on another made apply refuse.
+  Any other property inside `<metaInfo>` is therefore not synced either (none is known).
 * `ide.general.xml`'s Registry holds `source="SYSTEM"` entries, which the IDE sets itself (`RegistryValueSource`). A key
   pattern matches a **key**, never an attribute value, so "every SYSTEM entry" cannot be written: only the one entry
   seen on a real install, `trace.state.event.service.url`, is stripped, and the others stay a known gap.
@@ -54,6 +58,9 @@ Left out of the catalog (and, where it is sensitive, also blocked by `system/den
 
 When the IDE's own Settings Sync is on (`options/settingsSync.xml`, read in memory by `system/app_config_dir.py`), the
 product's files are neither collected nor applied, and `doctor` says so: two writers on one file would fight.
+`syncEnabled` is compared case-insensitively. A missing file is off; a file that exists but cannot be read safely
+(symlink, oversize, not UTF-8, broken XML, DOCTYPE) is unknown, and the product is skipped with "could not read
+settingsSync.xml; leaving files alone", not read as off.
 
 ## Defer while running
 
@@ -100,10 +107,11 @@ COMMON_GLOBS: tuple[tuple[str, str], ...] = (
     ("colors/*.icls", "xml"),
 )
 
-# `ColorsScheme` `<metaInfo><property name="created">…</property>`: when and by which IDE the scheme was saved.
-SCHEME_NOISE: frozenset[KeyPattern] = frozenset(
-    ("metaInfo", f"property[{name}]") for name in ("created", "modified", "ide", "ideVersion")
-)
+# The whole `<metaInfo>` of a `ColorsScheme`, not its four `<property>` children one by one: it is when and by which IDE
+# the scheme was saved. Naming the element also covers the shapes a per-property pattern misses: a second
+# `<metaInfo>` (a repeated group, so no `property[...]` path exists under it) and an empty `<metaInfo />`
+# (which one machine's file can have while another's is full, and apply then refused to re-attach it).
+SCHEME_NOISE: frozenset[KeyPattern] = frozenset({("metaInfo",)})
 
 # The one Registry entry known to be set by the IDE itself (`source="SYSTEM"`); see "Noise".
 GENERAL_NOISE: frozenset[KeyPattern] = frozenset({("component[Registry]", "entry[trace.state.event.service.url]")})

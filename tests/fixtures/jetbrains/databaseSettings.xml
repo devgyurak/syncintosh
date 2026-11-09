@@ -1,6 +1,7 @@
 <application>
+  <!-- Only names seen on a real install (csv-format name/id, parameter-pattern value); the component name and the nesting of csv-format are unverified. -->
   <component name="DatabaseSettings">
-    <option name="queryTimeout" value="30" />
+    <csv-format name="Sample" id="sample-format" />
     <parameter-pattern value="sample_:name" />
     <parameter-pattern value="sample_\?" />
   </component>
