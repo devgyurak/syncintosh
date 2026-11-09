@@ -27,6 +27,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `rustrover` | `Library/Application Support/JetBrains/@RustRover/` (logical; the real folder is `RustRover<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.rustrover` | <https://www.jetbrains.com/rust/download/> | `rustrover` |
 | `webstorm` | `Library/Application Support/JetBrains/@WebStorm/` (logical; the real folder is `WebStorm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.WebStorm` | <https://www.jetbrains.com/webstorm/download/> | `webstorm` |
 | `orca` | `Library/Application Support/orca/profiles/local-default/@profile-state/settings.json` (virtual: the `settings` row of `profile-state.db`, shown as an indented JSON file; `local-default` only) | `jsonc` (the row's JSON) | `notifications.customSoundPath`; every key outside the allowlist stays local | an exact allowlist of top-level preference keys (`presets/orca.py` `SYNCED`); each credential-shaped key is also named as excluded: `opencodeSessionCookie` · `opencodeGoApiKey` · `codexManagedAccounts` · `claudeManagedAccounts` · `agentDefaultEnv` · `agentCmdOverrides` · `httpProxyUrl` · `mobilePairingCustomAddress(es)` · … | `com.stablyai.orca` | <https://github.com/stablyai/orca/releases> | — (Homebrew's `orca` is another app) |
+| `claude-memory` | `.claude/projects/@<name>/memory/*.md` (logical; the real folder is the project's real path with every non-alphanumeric turned into `-`). Per project this machine maps in `agent_projects`; never by default | `text` | — (a memory file has no key paths) | — (the secret scan is the backstop) | — (a CLI) | — | — |
 
 ### `docker` notes
 
@@ -384,6 +385,44 @@ copied.
 - **No cask.** Homebrew's `orca` is plotly's unrelated app. The download page is the GitHub release feed the bundle's
   own `app-update.yml` names (`stablyai/orca`); the vendor's site (`orca.dev` in the repository's metadata,
   `www.onorca.dev` in the bundle's help links) was not confirmed as the download page.
+
+## Per-project agent data
+
+A coding agent keeps a project's data under a folder named after the project's **real absolute path**, and two Macs rarely
+keep a project at the same path (issue #56). A record therefore carries a **logical** path naming the project, the way a
+VS Code profile and a JetBrains release are named: `.claude/projects/@<name>/memory/MEMORY.md`. The leading `@` cannot
+start a real folder name (Claude Code spells every non-alphanumeric as `-`), so a logical path never collides with a real
+one, and the manifest schema is unchanged; a build that predates this refuses the record at the catalog check.
+
+`<name>` is a label chosen in **this machine's** config, never a path. Mapping is opt-in and per project: nothing is
+collected until a project is listed, and a record is written only under a name the config maps.
+
+```json
+{
+  "agent_projects": [
+    {"name": "syncintosh", "path": "Develop/syncintosh", "presets": ["claude-memory"]}
+  ]
+}
+```
+
+* `path` is relative to `$HOME` and is the only place the real project is named; another Mac maps the same `name` to its
+  own root (`code/syncintosh`). The folder is derived from the root's real path (symlinks resolved), by the CLI's own rule:
+  NFC, every character outside `[a-zA-Z0-9]` becomes `-` (a character outside the BMP is two), a name over 200 characters is
+  cut to 200 plus `-` and a base-36 hash of the path.
+* `presets` lists what travels for the project; `init --preset claude-memory` is refused, because it would track nothing.
+* The root must exist on this Mac (apply defers until the project is cloned) and must not be a symlink, a dangerous path,
+  or leave `$HOME`. The agent's own folder is created on apply if the agent has not run in the project yet.
+* **Refused, and shown in `syncintosh doctor`:** `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_PROJECT_DIR_NAME` set (the derived folder
+  would be wrong). **Skipped for the project:** `autoMemoryDirectory` in `~/.claude/settings.json` or the project's
+  `.claude/settings{,.local}.json` (only that key is read; a file that cannot be read counts as set).
+* v1 maps the root the person names, which for memory is the repository's canonical git root (memory is shared by its
+  worktrees). A worktree is not mapped separately.
+* The deny-list refuses every other path the agents keep, even when a config names it: `~/.claude.json*`,
+  `.claude/{session-env,shell-snapshots,file-history,paste-cache,cache,sessions,daemon*,history.jsonl}`,
+  `.codex/{auth.json,installation_id,history.jsonl,shell_snapshots,sqlite,*.sqlite*,thread-writer-locks,app-server-*,ipc}`.
+
+A secret-scan hit in a memory file stops the cycle like any other file (there is no per-session refusal for memory); the
+transcripts presets that follow refuse a whole session instead.
 
 ## Versioned config directories
 

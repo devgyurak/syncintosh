@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
+from syncintosh.core.agent_projects import AgentProjectSpec
 from syncintosh.core.config_dirs import ConfigDirSpec
 from syncintosh.core.documents import DocumentSource
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
@@ -310,6 +311,10 @@ class Preset:
     source's virtual view path is one of the preset's exact files. Like `config_dir` it is local behaviour, not part
     of the object bytes, so it is not in the policy digest.
 
+    `agent_projects` says the files' paths are **logical** under a per-project folder (`core/agent_projects.py`): each
+    file is listed with the bare marker for the project's element (`.claude/projects/@/memory/*.md`) and is written
+    once per project this machine's config enabled it for. Local behaviour like `config_dir`, so not in the digest.
+
     `download_url` is the vendor's official page. Only a URL hard-coded here is trusted
     (``AGENTS.md`` §3.6), so the field is restricted to `https`. A deferral report reads it
     directly (`services.sync`); a URL that arrived from anywhere else is screened through
@@ -326,6 +331,7 @@ class Preset:
     config_dir: ConfigDirSpec | None = None
     defer_while_running: bool = False
     documents: tuple[DocumentSource, ...] = ()
+    agent_projects: AgentProjectSpec | None = None
 
     @classmethod
     def create(
@@ -341,6 +347,7 @@ class Preset:
         config_dir: ConfigDirSpec | None = None,
         defer_while_running: bool = False,
         documents: tuple[DocumentSource, ...] = (),
+        agent_projects: AgentProjectSpec | None = None,
     ) -> Preset:
         """Validate and freeze a preset; never assign fields afterwards."""
         if not isinstance(policy_epoch, int) or isinstance(policy_epoch, bool) or policy_epoch < 1:
@@ -399,6 +406,19 @@ class Preset:
             if any(file.ignore_list and file.path in {source.view for source in documents} for file in files):
                 # The ignore list is read from the file's own path, which here is virtual.
                 raise ConfigError(f"preset {name!r}: a document cannot be an ignore-list file")
+        if agent_projects is not None:
+            if profiles is not None or config_dir is not None or documents:
+                # Each of the four owns a logical `@` element, and which resolver a path took would depend on order.
+                raise ConfigError(
+                    f"preset {name!r}: agent projects cannot be combined with profiles, a config directory or documents"
+                )
+            stray = [file.path for file in files if agent_projects.relative_of_template(file.path) is None]
+            if stray:
+                # A file outside the project's element would be written verbatim, never through the resolved folder.
+                raise ConfigError(f"preset {name!r}: files outside the agent project layout: {stray}")
+            if any(file.ignore_list for file in files):
+                # The ignore list is read from the file's own path, which here is a template and not a real file.
+                raise ConfigError(f"preset {name!r}: an agent project preset cannot hold an ignore-list file")
         if defer_while_running and bundle_id is None:
             raise ConfigError(f"preset {name!r}: deferring while running needs a bundle id to ask about")
         return cls(
@@ -412,6 +432,7 @@ class Preset:
             config_dir=config_dir,
             defer_while_running=defer_while_running,
             documents=documents,
+            agent_projects=agent_projects,
         )
 
 

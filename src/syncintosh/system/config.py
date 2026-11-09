@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from syncintosh.core.agent_projects import AgentLayout, AgentProject
 from syncintosh.core.config import NO_LLM, LlmConfig, LocalGlob, LocalItem, LocalProfiles, SyncConfig
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.ports import PresetCatalog
@@ -81,6 +82,30 @@ def _parse_profiles(raw: object, where: str, catalog: PresetCatalog) -> LocalPro
     )
 
 
+_AGENT_PROJECT_KEYS = frozenset({"name", "path", "presets"})
+
+
+def _parse_agent_project(raw: object, where: str, catalog: PresetCatalog) -> AgentProject:
+    """One `agent_projects` entry. The layouts come from the built-in presets by name, never from the file."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a JSON object")
+    unknown = sorted(raw.keys() - _AGENT_PROJECT_KEYS)
+    if unknown:
+        raise ConfigError(f"{where} has unknown fields: {unknown}")
+    if "name" not in raw or "path" not in raw or "presets" not in raw:
+        raise ConfigError(f"{where} must name name, path, and presets")
+    names = raw["presets"]
+    if not isinstance(names, list) or not all(isinstance(each, str) for each in names):
+        raise ConfigError(f"{where}: presets must be a list of preset names")
+    layouts: list[AgentLayout] = []
+    for each in names:
+        preset = catalog.get(each)
+        if preset is None or preset.agent_projects is None:
+            raise ConfigError(f"{where}: {each!r} is not a built-in preset with per-project data")
+        layouts.append(AgentLayout.create(preset=preset.name, spec=preset.agent_projects))
+    return AgentProject.create(name=raw["name"], path=raw["path"], layouts=layouts)
+
+
 def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) -> SyncConfig:
     """Read and validate `config.json`, defaulting to this machine's config path.
 
@@ -110,13 +135,20 @@ def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) 
     profiles_raw = parsed.get("profiles", [])
     if not isinstance(profiles_raw, list):
         raise ConfigError(f"config {resolved} must hold a `profiles` list")
-    if profiles_raw and catalog is None:
+    projects_raw = parsed.get("agent_projects", [])
+    if not isinstance(projects_raw, list):
+        raise ConfigError(f"config {resolved} must hold an `agent_projects` list")
+    if (profiles_raw or projects_raw) and catalog is None:
         from syncintosh.presets import BuiltinCatalog
 
         catalog = BuiltinCatalog.default()
     profiles = tuple(
         _parse_profiles(raw, f"profiles[{index}]", catalog)  # ty: ignore[invalid-argument-type]  # set above when the list is non-empty
         for index, raw in enumerate(profiles_raw)
+    )
+    agent_projects = tuple(
+        _parse_agent_project(raw, f"agent_projects[{index}]", catalog)  # ty: ignore[invalid-argument-type]  # set above when the list is non-empty
+        for index, raw in enumerate(projects_raw)
     )
     return SyncConfig.create(
         remote=parsed.get("remote"),
@@ -125,6 +157,7 @@ def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) 
         globs=globs,
         llm=llm,
         profiles=profiles,
+        agent_projects=agent_projects,
     )
 
 
@@ -180,6 +213,12 @@ def config_to_mapping(config: SyncConfig) -> dict[str, Any]:
     if config.profiles:
         # Written only when present, so a config that never tracked profiles keeps its exact shape.
         mapping["profiles"] = [_profiles_mapping(entry) for entry in config.profiles]
+    if config.agent_projects:
+        # Written only when present, so a config that never mapped a project keeps its exact shape.
+        mapping["agent_projects"] = [
+            {"name": project.name, "path": project.path, "presets": [layout.preset for layout in project.layouts]}
+            for project in config.agent_projects
+        ]
     if config.llm != NO_LLM:
         # Written only when set, so a config that never used the feature keeps its exact shape.
         mapping["llm"] = _llm_mapping(config.llm)
