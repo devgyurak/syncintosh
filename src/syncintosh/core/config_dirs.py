@@ -55,15 +55,19 @@ class ConfigDirSpec:
     * `vendor` — what the app's own metadata must say it is published by; a folder name taken from an app that
       says otherwise is not trusted.
     * `bundle_id` — the app whose metadata names the folder.
+    * `sync_conflict` — the sentence shown when the app's own settings sync is on
+      (`ConfigDirMap.settings_sync_enabled`), so two writers do not fight over one file. Empty means a generic
+      sentence. It is local behaviour, not part of the object bytes, so it is not in the policy digest.
     """
 
     home: str
     prefix: str
     vendor: str
     bundle_id: str
+    sync_conflict: str = ""
 
     @classmethod
-    def create(cls, *, home: str, prefix: str, vendor: str, bundle_id: str) -> ConfigDirSpec:
+    def create(cls, *, home: str, prefix: str, vendor: str, bundle_id: str, sync_conflict: str = "") -> ConfigDirSpec:
         """Validate and freeze the layout; never assign fields afterwards."""
         try:
             validated_home = validate_path(home)
@@ -75,7 +79,9 @@ class ConfigDirSpec:
             raise ConfigError("a config directory layout must name its vendor")
         if not isinstance(bundle_id, str) or _BUNDLE_ID.fullmatch(bundle_id) is None:
             raise ConfigError(f"a config directory layout needs a bundle id, got {bundle_id!r}")
-        return cls(home=validated_home, prefix=prefix, vendor=vendor, bundle_id=bundle_id)
+        if not isinstance(sync_conflict, str):
+            raise ConfigError("a config directory's sync conflict notice must be text")
+        return cls(home=validated_home, prefix=prefix, vendor=vendor, bundle_id=bundle_id, sync_conflict=sync_conflict)
 
     @property
     def root(self) -> str:
@@ -157,21 +163,34 @@ class ConfigDirMap:
     with the sentence in `reason`. A map that is not resolved is never a deletion: the caller keeps its records and
     defers (``docs/design/03-manifest.md``). `problems` are notes that do not stop a resolve (several installs).
     `settings_sync_enabled` is `True` only when the app is read to have its own settings sync turned on.
+    `settings_sync_unreadable` is `True` when its sync file exists but could not be read safely: the state is then
+    unknown, and the caller leaves the folder alone rather than guess "off". A missing file is off, not unreadable.
     """
 
     directory: str | None
     reason: str = ""
     problems: tuple[str, ...] = ()
     settings_sync_enabled: bool = False
+    settings_sync_unreadable: bool = False
 
     @classmethod
     def resolved(
-        cls, directory: str, problems: tuple[str, ...] = (), *, settings_sync_enabled: bool = False
+        cls,
+        directory: str,
+        problems: tuple[str, ...] = (),
+        *,
+        settings_sync_enabled: bool = False,
+        settings_sync_unreadable: bool = False,
     ) -> ConfigDirMap:
         """The map for an app whose config directory is `directory`."""
         if not isinstance(directory, str) or directory == "":
             raise ConfigError("a resolved config directory must be named")
-        return cls(directory=directory, problems=tuple(problems), settings_sync_enabled=settings_sync_enabled)
+        return cls(
+            directory=directory,
+            problems=tuple(problems),
+            settings_sync_enabled=settings_sync_enabled,
+            settings_sync_unreadable=settings_sync_unreadable,
+        )
 
     @classmethod
     def unresolved(cls, reason: str, problems: tuple[str, ...] = ()) -> ConfigDirMap:

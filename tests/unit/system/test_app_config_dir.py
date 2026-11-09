@@ -179,6 +179,96 @@ def test_the_locator_is_asked_for_the_layouts_bundle_id() -> None:
     assert asked == ["com.example.widget"]
 
 
+# --------------------------------------------------------------------------- the app's own settings sync (in memory)
+
+SYNC_FILE = "Library/Application Support/JetBrains/Widget2026.2/options/settingsSync.xml"
+_SYNC_ON = (
+    '<application><component name="SettingsSyncSettings">'
+    '<option name="syncEnabled" value="true" /></component></application>'
+)
+_SYNC_OFF = (
+    '<application><component name="SettingsSyncSettings">'
+    '<option name="migrationFromOldStorageChecked" value="true" /></component></application>'
+)
+
+
+def _sync_map(tmp_path: Path, content: bytes | None):
+    app = _app(tmp_path, "Widget", _info())
+    if content is not None:
+        target = tmp_path / "home" / SYNC_FILE
+        target.parent.mkdir(parents=True)
+        target.write_bytes(content)
+    return ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (_SYNC_ON.encode(), (True, False)),
+        (_SYNC_ON.replace("true", "TRUE").encode(), (True, False)),
+        (_SYNC_ON.replace("true", "True").encode(), (True, False)),
+        (_SYNC_OFF.encode(), (False, False)),
+        (_SYNC_ON.replace("true", "false").encode(), (False, False)),
+        # A missing file is the IDE default (off), not "cannot tell".
+        (None, (False, False)),
+        # A file that exists but cannot be read safely is unknown, never off.
+        (b"<application", (False, True)),
+        (b"", (False, True)),
+        (b'<!DOCTYPE a [<!ENTITY x "y">]>' + _SYNC_ON.encode(), (False, True)),
+        (_SYNC_ON.encode() + b" " * (64 * 1024), (False, True)),
+        (b"\xff\xfe not utf-8", (False, True)),
+        (('<?xml version="1.0" encoding="utf-16"?>' + _SYNC_ON).encode("utf-16"), (False, True)),
+    ],
+)
+def test_sync_state_is_on_off_or_unreadable(tmp_path, content: bytes | None, expected: tuple[bool, bool]) -> None:
+    # when
+    found = _sync_map(tmp_path, content)
+
+    # then
+    assert (found.settings_sync_enabled, found.settings_sync_unreadable) == expected
+
+
+def test_a_symlinked_sync_file_is_unreadable_not_off(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+    outside = tmp_path / "elsewhere.xml"
+    outside.write_text(_SYNC_ON, encoding="utf-8")
+    link = tmp_path / "home" / SYNC_FILE
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+
+    # when
+    found = ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC)
+
+    # then
+    assert (found.settings_sync_enabled, found.settings_sync_unreadable) == (False, True)
+
+
+def test_without_a_home_the_sync_file_is_not_read(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+
+    # when
+    found = _reader(app).read(SPEC)
+
+    # then
+    assert (found.settings_sync_enabled, found.settings_sync_unreadable) == (False, False)
+
+
+def test_a_fifo_in_place_of_the_sync_file_does_not_hang_and_is_unreadable(tmp_path) -> None:
+    # given
+    app = _app(tmp_path, "Widget", _info())
+    fifo = tmp_path / "home" / SYNC_FILE
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    # when
+    found = ProductInfoConfigDir(lambda _bundle: (app,), home=tmp_path / "home").read(SPEC)
+
+    # then
+    assert (found.settings_sync_enabled, found.settings_sync_unreadable) == (False, True)
+
+
 def test_a_huge_build_number_resolves_nothing_instead_of_raising(tmp_path) -> None:
     # given — int() of thousands of digits raises, which would abort the whole sync
     app = _app(tmp_path, "Widget", _info("Widget2026." + "9" * 5000))

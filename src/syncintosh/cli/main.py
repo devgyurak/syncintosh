@@ -388,7 +388,7 @@ def doctor() -> None:
         transport = GitCLITransport(paths.repo_dir)
         daemon = _launchd_daemon(paths.home)
         index = SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles)
-        live_paths = open_live_paths(config, BuiltinCatalog.default(), index, ProductInfoConfigDir())
+        live_paths = open_live_paths(config, BuiltinCatalog.default(), index, ProductInfoConfigDir(home=paths.home))
         summaries = tuple(
             row for row in (profile_summary(config, live_paths), config_dir_summary(config, live_paths)) if row
         )
@@ -449,7 +449,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             adapters=_adapters(),
             validators=validators(),
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
-            config_dirs=ProductInfoConfigDir(),
+            config_dirs=ProductInfoConfigDir(home=paths.home),
         )
     except DomainError as exc:
         _fail(exc)
@@ -935,7 +935,7 @@ def _sync_ports(config, paths) -> dict:
         # Whether a preset's app is open right now: a file of a preset that defers while running waits for it to quit.
         "running": LsappinfoRunningApps(),
         # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
-        "config_dirs": ProductInfoConfigDir(),
+        "config_dirs": ProductInfoConfigDir(home=paths.home),
         # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
         "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         "source": SecureFileIdSource(),
