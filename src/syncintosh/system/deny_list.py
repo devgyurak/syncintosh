@@ -26,6 +26,16 @@ from pathlib import Path
 from syncintosh.core.paths import collision_key
 from syncintosh.system.paths import MachinePaths
 
+# Orca's whole data folder is denied. Beside the settings row a preset syncs it holds credentials and state in places
+# that change with every release: the secret-protection file, an E2EE key pair, a session-authority key, the terminal
+# host's token (`daemon/`), browser session stores under `Partitions/` and `Network/`, `codex-runtime-home/` auth files,
+# `terminal-history/`, `orchestration.db`, the profile database with its `-wal`/`-shm`, and `orca-data.json` with its
+# backups and its `.sqlite-export.<revision>.json` copies, which hold the whole state, credentials included. Naming
+# them one by one fails open for the next folder Orca adds, so the folder is denied as a tree (``AGENTS.md`` §3.4). The
+# one exception is the virtual `@profile-state/settings.json` of the `local-default` profile (`_is_orca_view`): it is
+# not a file, and it is how the preset reaches the settings row.
+_ORCA_ROOT = "Library/Application Support/orca"
+
 # Relative to `$HOME`. A directory entry denies everything beneath it. An element may be `*` (any one element) or a
 # name pattern; a wildcard never spans a `/`, so there is no recursion and `JetBrains/*/ssl` is the `ssl` of one
 # release folder, not of every descendant.
@@ -117,6 +127,7 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/options/mac/wslRecentConnections*.xml",
     "Library/Application Support/JetBrains/*/options/mac/recentConnections.xml",
     "Library/Application Support/JetBrains/*/options/mac/trusted-paths.xml",
+    _ORCA_ROOT,
 )
 
 
@@ -158,21 +169,35 @@ def _denied_entry(denied: str, home: Path, *, real_candidate: str, written_candi
     )
 
 
+def _is_orca_view(candidate: str, home: Path) -> bool:
+    """True when `candidate` is exactly the virtual settings view of Orca's `local-default` profile, folded."""
+    base = collision_key(str(home.joinpath(_ORCA_ROOT, "profiles")))
+    folded = collision_key(candidate)
+    if not folded.startswith(base + "/"):
+        return False
+    return folded[len(base) + 1 :].split("/") == ["local-default", "@profile-state", "settings.json"]
+
+
 def is_denied(path: Path, home: Path) -> bool:
     """True when `path` is a dangerous path that must never be collected.
 
     `path` is the live path to read; `home` is the user's home directory. Both the real path and
     the path as written are compared, so neither a symlink into a denied tree nor a denied tree
-    replaced by a symlink gets through.
+    replaced by a symlink gets through. Orca's virtual settings view is exempt from the Orca tree
+    entry only when **both** spellings are that view, so a symlink dressed as the view still
+    resolves into the denied tree.
     """
     real_home: Path = Path(os.path.realpath(home))
     real_candidate = os.path.realpath(path)
     # `abspath`, not `realpath`: this is the path as written, so a denied directory that is
     # itself a symlink is still recognised by its name.
+    written_home = Path(os.path.abspath(home))  # noqa: PTH100 — resolve() would follow a link
     written_candidate = os.path.abspath(path)  # noqa: PTH100 — resolve() would follow the link we must detect
+    view = _is_orca_view(real_candidate, real_home) and _is_orca_view(written_candidate, written_home)
     return any(
         _denied_entry(denied, real_home, real_candidate=real_candidate, written_candidate=written_candidate)
         for denied in DENIED_PATHS
+        if not (view and denied == _ORCA_ROOT)
     )
 
 

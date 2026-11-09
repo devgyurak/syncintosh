@@ -616,3 +616,17 @@ def test_diff_prints_a_colon_name_literally(monkeypatch) -> None:
     output = _combined(result)
     assert ":rocket:.json" in output
     assert "🚀" not in output
+
+
+def test_importing_the_cli_does_not_import_sqlite_or_the_database_store() -> None:
+    # given — a settings row in a database is only needed once a preset that has one is synced
+    code = (
+        "import sys, syncintosh.cli.main; "
+        "print(','.join(m for m in ('sqlite3', 'syncintosh.system.sqlite_documents', 'ctypes') if m in sys.modules))"
+    )
+
+    # when
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+
+    # then
+    assert result.stdout.strip() == ""
