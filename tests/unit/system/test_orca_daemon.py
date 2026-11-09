@@ -9,8 +9,10 @@ real process is asked about except in the one test of the default lookup, which 
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -159,12 +161,29 @@ def test_a_file_where_the_daemon_directory_should_be_holds_no_pid_files(tmp_path
     assert running is False
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="the default lookup reads libproc, which only macOS has")
 def test_the_default_lookup_finds_this_process() -> None:
     # when
     path = executable_path(os.getpid())
 
-    # then
-    assert Path(path).name.startswith("python")
+    # then — the same file the interpreter was started from, whatever uv or a venv calls it
+    assert Path(path).samefile(sys.executable)
+
+
+def test_a_platform_without_libproc_cannot_be_told_and_does_not_raise(tmp_path, monkeypatch) -> None:
+    # given — a live pid file, but the library the default lookup loads is not there (as on Linux)
+    def _missing(*_args, **_kwargs):
+        raise OSError("/usr/lib/libproc.dylib: cannot open shared object file: No such file or directory")
+
+    monkeypatch.setattr(ctypes, "CDLL", _missing)
+    _pid_file(tmp_path, _record(pid=os.getpid()))
+    apps = OrcaDaemonRunningApps(_Inner(False), home=str(tmp_path), bundle_id=ORCA)
+
+    # when
+    running = apps.running(ORCA)
+
+    # then — "cannot tell", which defers the apply, instead of an error out of the sync
+    assert running is None
 
 
 def test_the_default_lookup_reports_a_process_that_is_gone() -> None:
