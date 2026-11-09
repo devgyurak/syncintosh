@@ -123,6 +123,13 @@ of any name (`context_servers.<name>.env`). It is a sentinel and not the string 
 setting called `*` is that setting, and `PresetFile.create` refuses an all-wildcard pattern and a wildcard on
 an ignore-list file. The policy digest writes `ANY_KEY` as JSON `null`, so it cannot read as a key name.
 
+A file may instead name an **allowlist** (`PresetFile.synced`, exact key paths): only the keys at or beneath
+one of them travel, and every other key is local, cut and grafted back exactly as noise is. It is for an app whose
+file mixes a few shared preferences with state and credentials and adds keys over time, where a deny-list would
+carry each new key until someone noticed. `noise` and `excluded` still apply inside it, and `PresetFile.create`
+refuses an empty allowlist, the root, a key that is also excluded (or beneath an excluded key), a non-keyed format,
+and an ignore-list file. With no allowlist the policy digest is what it always was.
+
 Both are removed **on the collect side**, before the object is sealed — not by the merge's
 `ignore` set. Ignoring a key in `merge_tree` keeps it out of the *conflict* but still writes its
 value into the object, which for `excluded` is exactly the leak. `services` projects every

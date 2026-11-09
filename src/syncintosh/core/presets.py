@@ -35,7 +35,7 @@ from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.profiles import ProfileSpec
-from syncintosh.core.tree import AnyKey, KeyPath, KeyPattern, pattern_sort_key
+from syncintosh.core.tree import AnyKey, KeyPath, KeyPattern, matches_pattern, pattern_sort_key
 
 # The syntax checkers a preset may name. A value is serialized verbatim, so it is a `Literal`
 # and never an `Enum` (``AGENTS.md`` §4); `services` looks the implementation up in a mapping
@@ -136,6 +136,32 @@ class PresetGlob:
         return tuple(f"{self.directory}/{name}" if self.directory else name for name in matched)
 
 
+def _check_allowlist(
+    path: str, allowed: frozenset[KeyPath], excluded: frozenset[KeyPattern], format: FileFormat, ignore_list: bool
+) -> None:
+    """Refuse an allowlist that would disable the file, contradict an exclusion, or cannot be applied."""
+    if not allowed:
+        # An empty allowlist makes every key local: the file would be collected as `{}` forever, which reads as
+        # a working preset that syncs nothing.
+        raise ConfigError(f"{path}: an allowlist must name at least one key")
+    if () in allowed:
+        raise ConfigError(f"{path}: an allowlisted key path must name a key below the root")
+    if any(not isinstance(segment, str) for key in allowed for segment in key):
+        # The allowlist is exact: a wildcard segment would match no real key, so the file would silently sync nothing.
+        raise ConfigError(f"{path}: an allowlisted key path takes literal keys only, not a wildcard")
+    if format not in KEYED_FORMATS:
+        raise ConfigError(f"{path}: an allowlist needs a keyed format, not {format!r}")
+    if ignore_list:
+        # The ignore list carries exact top-level keys beside the keys the preset strips; an allowlist that cut
+        # the rest would leave it to decide, per key, which side of two rules a key falls on.
+        raise ConfigError(f"{path}: an allowlist cannot be combined with an ignore list")
+    clashing = sorted(key for key in allowed if any(matches_pattern(key, pattern) for pattern in excluded))
+    if clashing:
+        # An excluded key is in no object at all; naming it (or a key beneath it) as synced says the opposite,
+        # and which wins must not depend on the reader.
+        raise ConfigError(f"{path}: an allowlisted key is also excluded: {clashing}")
+
+
 @dataclass(frozen=True)
 class PresetFile:
     """One file a preset owns, with the keys to strip and the checker to run.
@@ -155,6 +181,12 @@ class PresetFile:
     `ignore_list` marks the file that holds the user's own list of settings to keep to themselves
     (VS Code's ``settingsSync.ignoredSettings``) and obeys it (`core/ignore.py`). The list is read from
     this exact path, and the files a profile takes this policy for obey the same list.
+
+    `synced` is an allowlist, the opposite way round: when it is set, **only** the keys at or beneath its paths
+    travel, and every other key is local — cut before sealing and put back from the live file on apply, as a
+    noise key is. It is for an app whose file mixes a few shared preferences with state and credentials, and
+    that adds keys over time: a deny-list would carry each new key until someone noticed, the allowlist holds it
+    back until the preset names it. `noise` and `excluded` still apply inside it. `None` is no allowlist.
     """
 
     path: str
@@ -165,6 +197,7 @@ class PresetFile:
     glob: PresetGlob | None
     arrays: tuple[tuple[KeyPath, ArrayRule], ...] = ()
     ignore_list: bool = False
+    synced: frozenset[KeyPath] | None = None
 
     @property
     def array_rules(self) -> dict[KeyPath, ArrayRule]:
@@ -182,6 +215,7 @@ class PresetFile:
         validator: ValidatorName | None = None,
         array_identity: Mapping[KeyPath, ArrayRule] | None = None,
         ignore_list: bool = False,
+        synced: Iterable[KeyPath] | None = None,
     ) -> PresetFile:
         """Validate and freeze one preset file; never assign fields afterwards."""
         try:
@@ -216,6 +250,9 @@ class PresetFile:
             # The ignore list carries exact top-level keys (`core/ignore.py`); a wildcard beside it would blur
             # which keys are carried and which are stripped.
             raise ConfigError(f"{validated_path}: an ignore-list file cannot use a wildcard key pattern")
+        allowed = None if synced is None else frozenset(synced)
+        if allowed is not None:
+            _check_allowlist(validated_path, allowed, excluded_paths, validated_format, ignore_list)
         repeated = noise_paths & excluded_paths
         if repeated:
             raise ConfigError(
@@ -230,6 +267,7 @@ class PresetFile:
             glob=glob,
             arrays=tuple(sorted((array_identity or {}).items(), key=lambda item: item[0])),
             ignore_list=ignore_list,
+            synced=allowed,
         )
 
     @property
@@ -247,6 +285,11 @@ class PresetFile:
     def stripped(self) -> frozenset[KeyPattern]:
         """Every key pattern this file removes before sealing, noise and excluded together."""
         return self.noise | self.excluded
+
+    @property
+    def strips(self) -> bool:
+        """True when projecting this file can remove anything: a stripped key pattern or an allowlist."""
+        return bool(self.stripped) or self.synced is not None
 
 
 @dataclass(frozen=True)

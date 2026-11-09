@@ -251,7 +251,7 @@ class _Presets:
 
     def projects(self, policy: PresetFile) -> bool:
         """True when the file is projected at all: it strips a key, or carries one."""
-        return bool(policy.stripped) or bool(self.carried(policy))
+        return policy.strips or bool(self.carried(policy))
 
     def notes(self) -> tuple[str, ...]:
         """Fixed sentences about the ignore list that are not failures, for the report."""
@@ -692,7 +692,7 @@ def _project_file(
         # the file anyway would put a key the user meant to keep local into the repo (``AGENTS.md`` §3.4).
         return _Projected(raw=raw, view=None, failure="ignore-list")
     carried = presets.carried(policy) if carry else frozenset()
-    if not policy.stripped and not carried:
+    if not policy.strips and not carried:
         # Nothing to cut, so no adapter is needed and the projection is the file itself. This is
         # the `text` case: a shell script has no keys to strip.
         return _Projected(raw=raw, view=raw)
@@ -792,7 +792,7 @@ def _record_refusal(
 def _strips(presets: _Presets, path: str) -> bool:
     """True when this machine's policy for `path` removes any key before sealing."""
     policy = presets.policy_for(path)
-    return policy is not None and bool(policy.stripped)
+    return policy is not None and policy.strips
 
 
 def _project_merged(
