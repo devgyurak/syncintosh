@@ -61,65 +61,99 @@ class ProductInfoConfigDir:
             return ConfigDirMap.unresolved(_CANNOT_ASK)
         if not found:
             return ConfigDirMap.unresolved(_NOT_FOUND)
-        names = [name for each in found if (name := self._name_of(spec, each)) is not None]
+        results = [self._name_of(spec, each) for each in found]
+        names = [name for name, _ in results if name is not None]
+        # An install whose metadata cannot be used is said so, never silently left out of the candidates.
+        notes = tuple(f"{each!r}: {why}" for each, (name, why) in zip(found, results, strict=True) if name is None)
         if not names:
-            return ConfigDirMap.unresolved(_UNTRUSTED)
+            return ConfigDirMap.unresolved(_UNTRUSTED, notes)
         # The newest release wins: it is the one a person launching the app today runs. The others are noted so
         # `doctor` can say there is more than one (an old copy left in a backup folder, a second channel).
         ordered = sorted(set(names), key=spec.release_key, reverse=True)
-        problems = (
+        several = (
             () if len(ordered) == 1 else (f"several releases are installed ({', '.join(ordered)}); using {ordered[0]}",)
         )
-        return ConfigDirMap.resolved(ordered[0], problems, settings_sync_enabled=self._sync_enabled(spec, ordered[0]))
+        enabled, unreadable = self._sync_state(spec, ordered[0])
+        return ConfigDirMap.resolved(
+            ordered[0], several + notes, settings_sync_enabled=enabled, settings_sync_unreadable=unreadable
+        )
 
-    def _sync_enabled(self, spec: ConfigDirSpec, name: str) -> bool:
-        """True only when `settingsSync.xml` says `syncEnabled` is `true`; anything else reads as off.
+    def _sync_state(self, spec: ConfigDirSpec, name: str) -> tuple[bool, bool]:
+        """`(enabled, unreadable)` for the app's own settings sync, read from `options/settingsSync.xml` in memory.
 
         `<component name="SettingsSyncSettings"><option name="syncEnabled" value="true"/></component>`; the IDE
-        default is off. The file is read in memory and dropped.
+        reads the value case-insensitively, so `TRUE` is on. A **missing** file or key is off (the IDE default). A
+        file that **exists but cannot be read safely** (a symlink, a non-regular file, oversize, not UTF-8, a DOCTYPE,
+        broken XML) is `unreadable`: reading it as off would let two sync tools fight over the same files.
         """
         if self._home is None or not spec.is_release_name(name):
-            return False
+            return False, False
         path = self._home / spec.real_directory(name) / _SYNC_SETTINGS
         try:
             # No symlink at the file, `O_NONBLOCK` so a FIFO cannot hang the cycle, and the type is checked on the
             # descriptor that is read, so a swap between check and open is not followed.
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return False, False
+        except OSError:
+            return False, True
+        try:
             with os.fdopen(descriptor, "rb") as handle:
                 if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    return False
+                    return False, True
                 raw = handle.read(MAX_SYNC_SETTINGS_BYTES + 1)
-            # Strict UTF-8 only: a UTF-16 file hides a DOCTYPE from a byte scan, so anything else reads as off.
+            # Strict UTF-8 only: a UTF-16 file hides a DOCTYPE from a byte scan, so anything else is unreadable.
             text = raw.decode("utf-8")
             if len(raw) > MAX_SYNC_SETTINGS_BYTES or "<!" in text.replace("<!--", "") or "\x00" in text:
-                return False
+                return False, True
             root = ET.fromstring(raw)
         except (OSError, UnicodeDecodeError, ET.ParseError, ValueError, RecursionError):
-            return False
-        return any(
-            option.get("name") == "syncEnabled" and option.get("value") == "true"
+            return False, True
+        enabled = any(
+            option.get("name") == "syncEnabled" and (option.get("value") or "").strip().lower() == "true"
             for component in root.iter("component")
             if component.get("name") == "SettingsSyncSettings"
             for option in component.iter("option")
         )
+        return enabled, False
 
     @staticmethod
-    def _name_of(spec: ConfigDirSpec, app_path: str) -> str | None:
-        """The validated `dataDirectoryName` of one install, or `None` when it cannot be trusted."""
+    def _name_of(spec: ConfigDirSpec, app_path: str) -> tuple[str | None, str]:
+        """The validated `dataDirectoryName` of one install, or `None` and why it cannot be trusted. Never raises."""
         if not app_path.endswith(".app"):
-            return None
+            return None, "not an app bundle"
         try:
-            with (Path(app_path) / _PRODUCT_INFO).open("rb") as handle:
-                raw = handle.read(MAX_PRODUCT_INFO_BYTES + 1)
-            if len(raw) > MAX_PRODUCT_INFO_BYTES:
-                return None
+            raw = _read_bounded(Path(app_path) / _PRODUCT_INFO)
+            if raw is None:
+                return None, "the metadata is not a regular file or is too large"
             document = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
-            return None
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            return None, f"the metadata cannot be read ({type(exc).__name__})"
         if not isinstance(document, dict) or document.get("productVendor") != spec.vendor:
-            return None
+            return None, "the metadata does not name this layout's vendor"
         name = document.get("dataDirectoryName")
-        return name if isinstance(name, str) and spec.is_release_name(name) else None
+        if isinstance(name, str) and spec.is_release_name(name):
+            return name, ""
+        return None, "dataDirectoryName is not a release folder name of this layout"
+
+
+def _read_bounded(path: Path) -> bytes | None:
+    """The file's bytes, or `None` when it is not a regular file or exceeds the bound.
+
+    Opened with `O_NONBLOCK` so a FIFO planted at the path cannot hang the open, and checked on the **descriptor**
+    (`fstat`), not on the path, so nothing can be swapped in between the check and the read.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        handle = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        raw = handle.read(MAX_PRODUCT_INFO_BYTES + 1)
+    return None if len(raw) > MAX_PRODUCT_INFO_BYTES else raw
 
 
 __all__ = ["MAX_PRODUCT_INFO_BYTES", "MAX_SYNC_SETTINGS_BYTES", "ProductInfoConfigDir"]

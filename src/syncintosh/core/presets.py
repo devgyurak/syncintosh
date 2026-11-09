@@ -323,6 +323,10 @@ class Preset:
                 # Both would claim a logical `@` element under one app, and which resolver a path takes would
                 # depend on order.
                 raise ConfigError(f"preset {name!r}: a config directory and profiles cannot be combined")
+            if any(file.ignore_list for file in files):
+                # The ignore list is read from the file's own path, which here is logical text and not a real
+                # file, so it would silently be empty and carry nothing.
+                raise ConfigError(f"preset {name!r}: a config directory cannot hold an ignore-list file")
             if bundle_id != config_dir.bundle_id:
                 # The release folder is read from the app this preset detects; two spellings would let the
                 # detection and the folder name come from different apps.

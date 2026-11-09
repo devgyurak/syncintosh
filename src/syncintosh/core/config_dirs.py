@@ -122,11 +122,12 @@ class ConfigDirSpec:
         """True when `name` is a release folder of this product: `<prefix><year>.<n>` and nothing else.
 
         One path element by construction (no `/`, no `..`), so a name taken from an app's metadata can only point
-        to a folder directly inside `home`.
+        to a folder directly inside `home`. The build number is bounded: `int()` of thousands of digits raises, and
+        a name from an app's metadata must never be able to abort a sync.
         """
         return (
             isinstance(name, str)
-            and re.fullmatch(re.escape(self.prefix) + r"\d{4}\.\d+", name, flags=re.ASCII) is not None
+            and re.fullmatch(re.escape(self.prefix) + r"\d{4}\.\d{1,6}", name, flags=re.ASCII) is not None
         )
 
     def release_key(self, name: str) -> tuple[int, int]:
@@ -162,21 +163,34 @@ class ConfigDirMap:
     with the sentence in `reason`. A map that is not resolved is never a deletion: the caller keeps its records and
     defers (``docs/design/03-manifest.md``). `problems` are notes that do not stop a resolve (several installs).
     `settings_sync_enabled` is `True` only when the app is read to have its own settings sync turned on.
+    `settings_sync_unreadable` is `True` when its sync file exists but could not be read safely: the state is then
+    unknown, and the caller leaves the folder alone rather than guess "off". A missing file is off, not unreadable.
     """
 
     directory: str | None
     reason: str = ""
     problems: tuple[str, ...] = ()
     settings_sync_enabled: bool = False
+    settings_sync_unreadable: bool = False
 
     @classmethod
     def resolved(
-        cls, directory: str, problems: tuple[str, ...] = (), *, settings_sync_enabled: bool = False
+        cls,
+        directory: str,
+        problems: tuple[str, ...] = (),
+        *,
+        settings_sync_enabled: bool = False,
+        settings_sync_unreadable: bool = False,
     ) -> ConfigDirMap:
         """The map for an app whose config directory is `directory`."""
         if not isinstance(directory, str) or directory == "":
             raise ConfigError("a resolved config directory must be named")
-        return cls(directory=directory, problems=tuple(problems), settings_sync_enabled=settings_sync_enabled)
+        return cls(
+            directory=directory,
+            problems=tuple(problems),
+            settings_sync_enabled=settings_sync_enabled,
+            settings_sync_unreadable=settings_sync_unreadable,
+        )
 
     @classmethod
     def unresolved(cls, reason: str, problems: tuple[str, ...] = ()) -> ConfigDirMap:

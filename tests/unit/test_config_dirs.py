@@ -118,6 +118,7 @@ def test_a_logical_directory_is_split_below_the_root(directory: str, relative: s
         ("Widget2026.", False),
         ("Widget26.2", False),
         ("Widget2026.2.1", False),
+        ("Widget2026." + "9" * 4300, False),
         ("Widget2026.2\n", False),
         ("Widget2026.2/", False),
         ("../Widget2026.2", False),
@@ -235,6 +236,16 @@ def test_a_preset_cannot_combine_a_config_directory_with_profiles() -> None:
     # when & then
     with pytest.raises(ConfigError):
         _preset(profiles=profiles, paths=(_spec().logical_path("x"), "a/User/settings.json"))
+
+
+def test_a_config_directory_preset_cannot_hold_an_ignore_list_file() -> None:
+    # given — the list would be read from the logical path text, so it would silently be empty
+    path = _spec().logical_path("options/ignored.json")
+    file = PresetFile.create(path=path, format="jsonc", ignore_list=True)
+
+    # when & then
+    with pytest.raises(ConfigError):
+        Preset.create(name="widget", files=(file,), bundle_id=BUNDLE, config_dir=_spec())
 
 
 def test_a_config_directory_preset_must_use_its_own_bundle_id() -> None:

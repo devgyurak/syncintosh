@@ -330,3 +330,20 @@ def test_the_doctor_row_fails_when_the_apps_own_sync_is_on() -> None:
     # then
     assert row is not None and row.ok is False
     assert "widget: Widget2026.3" in row.detail and "settings sync is on" in row.detail
+
+
+def test_an_unreadable_sync_file_leaves_the_folder_alone_with_a_reason() -> None:
+    # when
+    located = _paths(ConfigDirMap.resolved("Widget2026.3", settings_sync_unreadable=True)).resolve(LOGICAL)
+
+    # then
+    assert located == Unresolved("could not read settingsSync.xml; leaving files alone")
+
+
+def test_the_doctor_row_fails_when_the_sync_file_cannot_be_read() -> None:
+    # when
+    row = config_dir_summary(_config(), _paths(ConfigDirMap.resolved("Widget2026.3", settings_sync_unreadable=True)))
+
+    # then
+    assert row is not None and row.ok is False
+    assert "could not read settingsSync.xml" in row.detail
