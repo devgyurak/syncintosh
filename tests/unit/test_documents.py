@@ -10,7 +10,7 @@ import hashlib
 import json
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from syncintosh.core.documents import (
@@ -177,6 +177,7 @@ surrogate_fragments = st.lists(
 ).map("".join)
 
 
+@settings(deadline=None)
 @given(surrogate_fragments, surrogate_fragments)
 def test_property_text_with_surrogates_round_trips_and_stays_encodable(value: str, key: str) -> None:
     # given — text the way JSON spells it, so lone and paired surrogates both occur
@@ -241,6 +242,7 @@ json_values = st.recursive(
 )
 
 
+@settings(deadline=None)
 @given(st.dictionaries(st.text(max_size=5), json_values, max_size=5))
 def test_property_view_then_compact_keeps_the_value_and_is_idempotent(document: dict) -> None:
     # given

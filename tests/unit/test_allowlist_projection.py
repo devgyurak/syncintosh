@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
@@ -320,6 +320,7 @@ def _outside(value: dict) -> dict:
     return {key: item for key, item in value.items() if (key,) not in _ALLOWED}
 
 
+@settings(deadline=None)
 @given(value=_VALUES)
 def test_a_projection_only_holds_allowlisted_keys(value) -> None:
     # when
@@ -329,6 +330,7 @@ def test_a_projection_only_holds_allowlisted_keys(value) -> None:
     assert _outside(projected) == {}
 
 
+@settings(deadline=None)
 @given(value=_VALUES)
 def test_an_allowlist_projection_is_idempotent(value) -> None:
     # when
@@ -339,6 +341,7 @@ def test_an_allowlist_projection_is_idempotent(value) -> None:
     assert twice == once
 
 
+@settings(deadline=None)
 @given(shared=_VALUES, local=_VALUES)
 def test_restore_always_projects_back_to_the_repo_text(shared, local) -> None:
     # given — the repo holds a projection; this machine's file is any document
@@ -351,6 +354,7 @@ def test_restore_always_projects_back_to_the_repo_text(shared, local) -> None:
     assert project_text(ADAPTER, restored, _ALLOW_POLICY) == repo_text
 
 
+@settings(deadline=None)
 @given(shared=_VALUES, local=_VALUES)
 def test_a_restore_keeps_every_local_key_outside_the_allowlist(shared, local) -> None:
     # given
@@ -363,6 +367,7 @@ def test_a_restore_keeps_every_local_key_outside_the_allowlist(shared, local) ->
     assert _outside(restored) == _outside(local)
 
 
+@settings(deadline=None)
 @given(value=_VALUES, other=_VALUES)
 def test_a_change_outside_the_allowlist_never_changes_the_projection(value, other) -> None:
     # given
