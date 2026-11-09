@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from syncintosh.system.app_detector import MdfindAppDetector
+from syncintosh.system.app_detector import MdfindAppDetector, find_app_paths
 
 
 class _Completed:
@@ -101,3 +101,23 @@ def test_the_query_names_the_bundle_id(monkeypatch) -> None:
     # then — a fixed argv list, never a shell string
     assert captured[0][0] == "mdfind"
     assert "com.docker.docker" in captured[0][1]
+
+
+def test_several_bundle_paths_are_all_returned(monkeypatch) -> None:
+    # given
+    monkeypatch.setattr(subprocess, "run", _run_returning(_Completed("/A/One.app\n\n/B/Two.app\n")))
+
+    # when
+    found = find_app_paths("com.example.app")
+
+    # then
+    assert found == ("/A/One.app", "/B/Two.app")
+
+
+@pytest.mark.parametrize("bundle_id", ["", "a b", "a'b", "x == 'y' || 'z", "-flag"])
+def test_a_bundle_id_that_is_not_the_plain_dotted_shape_is_never_queried(monkeypatch, bundle_id: str) -> None:
+    # given
+    monkeypatch.setattr(subprocess, "run", _run_raising(AssertionError("must not run")))
+
+    # when & then
+    assert find_app_paths(bundle_id) is None

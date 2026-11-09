@@ -58,6 +58,7 @@ from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import stamp_policies
 from syncintosh.core.ports import (
+    AppConfigDir,
     AppDetector,
     Cipher,
     ContentAdapter,
@@ -75,6 +76,7 @@ from syncintosh.core.ports import (
     RepoFiles,
     RingCodec,
     RotationMarkerStore,
+    RunningApps,
     SecretScanner,
     SyncLock,
     SyntaxValidator,
@@ -145,6 +147,20 @@ class _UnknownApps:
 
 
 NO_APP_INFO: AppDetector = _UnknownApps()
+
+
+class _UnknownRunning:
+    """A `RunningApps` that answers `None` for everything.
+
+    The port a caller with none passes. A preset that defers while its app runs treats `None` as running, so a
+    caller that cannot tell never writes under an open app (``docs/design/presets.md``).
+    """
+
+    def running(self, bundle_id: str) -> bool | None:
+        return None
+
+
+NO_RUNNING_INFO: RunningApps = _UnknownRunning()
 
 # What apply decided for one record.
 _Decision = Literal["write", "skip", "abort", "defer"]
@@ -743,6 +759,8 @@ _GLOB_FULL = "the glob is full, so this new file is not published"
 _GLOB_DIRECTORY_UNSAFE = "the glob's directory is a symbolic link or a dangerous path"
 _PROFILE_DIRECTORY_UNSAFE = "the profile's directory is a symbolic link or a dangerous path"
 _PROFILE_FOLDER_MISSING = "the profile has no folder on this machine yet; open the profile in the app once"
+_CONFIG_FOLDER_MISSING = "the app's settings folder is not on this machine yet; open the app once to create it"
+_APP_RUNNING = "the app is open (or cannot be told to be closed); quit it to apply this file"
 
 
 def _refusal(path: str, failure: ProjectionFailure) -> Refusal:
@@ -906,7 +924,9 @@ class _Expanded:
     deferrals: tuple[Deferral, ...] = ()
 
 
-def _unsafe_glob_directories(config: SyncConfig, live: LiveFiles, deny: DenyList, home: str) -> tuple[PresetGlob, ...]:
+def _unsafe_glob_directories(
+    config: SyncConfig, live: LiveFiles, deny: DenyList, home: str, paths: LivePaths
+) -> tuple[PresetGlob, ...]:
     """The globs whose **directory** may not be used here.
 
     A glob whose directory is a symlink (say `snippets` → `~/.docker`) would list — or write into —
@@ -914,10 +934,15 @@ def _unsafe_glob_directories(config: SyncConfig, live: LiveFiles, deny: DenyList
     credential the real owner excludes would be sealed (``AGENTS.md`` §2.4, §3.4). A denied directory
     or one outside `$HOME` is refused for the same reason. Checked on **both** ends: collect must not
     list it, and apply must not write through it.
+
+    A logical directory is judged at the **real** directory it resolves to: the logical text names nothing on
+    disk. One that does not resolve here is not unsafe — it lists nothing and is reported as deferred.
     """
     unsafe: list[PresetGlob] = []
     for entry in config.globs:
-        directory = entry.glob.directory
+        directory = paths.resolve_directory(entry.preset, entry.glob.directory)
+        if isinstance(directory, Unresolved):
+            continue
         if deny.is_denied(home, directory) or deny.escapes(home, directory):
             unsafe.append(entry.glob)
             continue
@@ -1023,27 +1048,36 @@ def _expand_profiles(
 
 
 def _real_path_refusal(live: LiveFiles, deny: DenyList, home: str, logical: str, located: Located) -> Refusal | None:
-    """Why a profile file's **real** path may not be used, or `None`.
+    """Why a profile or config-directory file's **real** path may not be used, or `None`.
 
-    Checked on the resolved path at every read and write, not only when the index was read: the index is
-    a snapshot, and a directory can become a symlink or a denied path between it and a write. A path that
-    is not a profile file has no profile directory, and the ordinary checks already cover it.
+    Checked on the resolved path at every read and write, not only when the index (or the app's metadata) was
+    read: that is a snapshot, and a directory can become a symlink or a denied path between it and a write. The
+    deny-list sees the real path here, which is the one a wildcard such as `JetBrains/*/ssl` is written for (the
+    logical `@` element matches it too, but only the real folder is ever read). A path that is not a resolved
+    logical one has no owner directory, and the ordinary checks already cover it.
     """
-    if located.profile_directory is None:
+    owner = located.owner_directory
+    if owner is None:
         return None
     if deny.is_denied(home, located.path):
         return Refusal(logical, _DENIED)
     if deny.escapes(home, located.path):
         return Refusal(logical, _ESCAPES)
     parent = located.path.rpartition("/")[0]
-    if live.is_symlink(_join(home, located.profile_directory)) or (
-        parent != located.profile_directory and live.is_symlink(_join(home, parent))
-    ):
+    # Every directory from the owner down to the file's parent, not only the two ends: a symlinked middle element
+    # (`Release/a/` -> elsewhere in `$HOME`) passes the deny and escape checks and would still be written through.
+    between = [owner]
+    for part in parent[len(owner) :].split("/") if parent != owner else ():
+        if part:
+            between.append(f"{between[-1]}/{part}")
+    if any(live.is_symlink(_join(home, each)) for each in between):
         return Refusal(logical, _PROFILE_DIRECTORY_UNSAFE)
     return None
 
 
-def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str) -> _Expanded:
+def _expand_globs(
+    config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str, paths: LivePaths
+) -> _Expanded:
     """Turn the config's exact items and its globs into one list of concrete items.
 
     A glob is one directory listing, never a walk (`core.presets.PresetGlob`): only the last element
@@ -1064,18 +1098,25 @@ def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, de
     `LocalItem`s, so `_collect` runs them through the **same** deny → ownership → symlink →
     projection checks an exact item gets: the directory is listed, but every file inside is judged on
     its own.
+
+    A glob inside a versioned config directory is listed at the **resolved** real directory, never at its logical
+    text; the paths it yields stay logical, because those are what a record carries. One whose directory does not
+    resolve here lists nothing and is reported as deferred.
     """
     head_records = () if head is None else tuple(head.records.values())
     items = list(config.items)
     refusals: list[Refusal] = []
-    unsafe = {glob.path for glob in _unsafe_glob_directories(config, live, deny, home)}
+    deferrals: list[Deferral] = []
+    unsafe = {glob.path for glob in _unsafe_glob_directories(config, live, deny, home, paths)}
     for entry in config.globs:
+        real = paths.resolve_directory(entry.preset, entry.glob.directory)
+        if isinstance(real, Unresolved):
+            deferrals.append(Deferral(entry.glob.path, real.reason))
+            continue
         if entry.glob.path in unsafe:
             refusals.append(Refusal(entry.glob.path, _GLOB_DIRECTORY_UNSAFE))
             continue
-        matched, held = _bounded(
-            entry.glob, entry.glob.expand(live.list_dir(_join(home, entry.glob.directory))), head_records
-        )
+        matched, held = _bounded(entry.glob, entry.glob.expand(live.list_dir(_join(home, real))), head_records)
         refusals.extend(held)
         items.extend(
             LocalItem.create(
@@ -1087,7 +1128,7 @@ def _expand_globs(config: SyncConfig, head: Manifest | None, live: LiveFiles, de
             )
             for path in matched
         )
-    return _Expanded(items=tuple(items), refusals=tuple(refusals))
+    return _Expanded(items=tuple(items), refusals=tuple(refusals), deferrals=tuple(deferrals))
 
 
 def _collect(
@@ -1111,10 +1152,10 @@ def _collect(
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     state = _Collect(records={} if head is None else dict(head.records))
-    expanded = _expand_globs(config, head, live, deny, home)
+    expanded = _expand_globs(config, head, live, deny, home, paths)
     profiled = _expand_profiles(config, head, live, deny, home, paths)
     state.refused.extend((*expanded.refusals, *profiled.refusals))
-    state.deferred.extend(profiled.deferrals)
+    state.deferred.extend((*expanded.deferrals, *profiled.deferrals))
     for item in (*expanded.items, *profiled.items):
         if deny.is_denied(home, item.path):
             # The dangerous-path check comes first so a private key or a cloud credential is
@@ -2230,6 +2271,20 @@ def _installed(apps: AppDetector, cache: dict[str, bool | None], bundle_id: str)
     return cache[bundle_id]
 
 
+def _held_while_running(presets: _Presets, running: RunningApps, cache: dict[str, bool | None], path: str) -> bool:
+    """True when `path`'s preset asks to wait for its app to quit and the app is open or cannot be told.
+
+    The flag is the preset's data (`Preset.defer_while_running`), found by path from the local catalog and never from
+    a record's preset name; this function knows no app. One query per bundle ID per cycle (§2.6).
+    """
+    owner = presets.catalog.preset_for(path)
+    if owner is None or not owner.defer_while_running or owner.bundle_id is None:
+        return False
+    if owner.bundle_id not in cache:
+        cache[owner.bundle_id] = running.running(owner.bundle_id)
+    return cache[owner.bundle_id] is not False
+
+
 def _apply(
     *,
     transport: PolicyView,
@@ -2250,6 +2305,7 @@ def _apply(
     scanner: SecretScanner,
     unstored: frozenset[str] = frozenset(),
     paths: LivePaths | None = None,
+    running: RunningApps = NO_RUNNING_INFO,
 ) -> _Applied:
     """Step 14: write the merged records into the live files, compare-and-swap checked.
 
@@ -2286,9 +2342,10 @@ def _apply(
     invalid: list[Refusal] = []
     # One `mdfind` per app per cycle, however many files that app owns (§2.6).
     installed_cache: dict[str, bool | None] = {}
+    running_cache: dict[str, bool | None] = {}
     # The same directory check the collect side makes: a record must not be *written* through a
     # symlinked glob directory either.
-    unsafe = _unsafe_glob_directories(config, live, deny, home)
+    unsafe = _unsafe_glob_directories(config, live, deny, home, paths)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -2311,6 +2368,11 @@ def _apply(
             # The profile is registered but its folder is not here yet. Creating it would hand the app a
             # profile it did not make, so the file waits (decision D5).
             deferred.append(Deferral(record.path, _PROFILE_FOLDER_MISSING))
+            continue
+        if located.config_directory is not None and not live.exists(_join(home, located.config_directory)):
+            # The release folder is the app's own: its first run may import settings from an older release, and a
+            # folder created here would make it skip that. Never created, so the file waits.
+            deferred.append(Deferral(record.path, _CONFIG_FOLDER_MISSING))
             continue
         policy = presets.policy_for(record.path)
         if policy is not None and policy.format != record.format:
@@ -2410,7 +2472,7 @@ def _apply(
             installed = None if bundle_id is None else _installed(apps, installed_cache, bundle_id)
             # A profile file's profile folder was checked above, so the app is there for it: its own
             # `snippets/` may be missing, and creating that inside a profile that exists is ordinary.
-            parent_exists = located.profile_directory is not None or live.exists(str(Path(live_path).parent))
+            parent_exists = located.owner_directory is not None or live.exists(str(Path(live_path).parent))
             if _missing_file_decision(installed, parent_exists=parent_exists) == _DEFER:
                 deferred.append(_deferral(record.path, preset, installed))
                 continue
@@ -2427,6 +2489,11 @@ def _apply(
             data, losses = reduced
         if not _syntax_ok(presets, data, record.path):
             invalid.append(Refusal(record.path, _SYNTAX_FAILED))
+            continue
+        if live_bytes != data and _held_while_running(presets, running, running_cache, record.path):
+            # An IDE rewrites its settings when it quits, so a file written under it is lost (or fought over). Only
+            # a write that would change something waits; collect already ran, so local edits keep flowing out.
+            deferred.append(Deferral(record.path, _APP_RUNNING))
             continue
         if live_bytes is not None and live_bytes != data and backup.commit is None:
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
@@ -2580,7 +2647,7 @@ def _settle_ledger(
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     settled: dict[str, LedgerEntry] = {}
-    unsafe = _unsafe_glob_directories(config, live, deny, home)
+    unsafe = _unsafe_glob_directories(config, live, deny, home, paths)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
@@ -2600,7 +2667,11 @@ def _settle_ledger(
                 settled[file_id] = old
             continue
         live_path = _join(home, located.path)
-        if live.is_symlink(live_path):
+        if live.is_symlink(live_path) or (
+            located.config_directory is not None and not live.exists(_join(home, located.config_directory))
+        ):
+            # A symlink is never read, and a release folder that is not there is not a file the user removed: the
+            # baseline stays, so the record is neither suppressed nor re-created when the app comes back.
             old = ledger.get(file_id)
             if old is not None:
                 settled[file_id] = old
@@ -2659,11 +2730,13 @@ def sync(
     catalog: PresetCatalog = NO_CATALOG,
     validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
     apps: AppDetector = NO_APP_INFO,
+    running: RunningApps = NO_RUNNING_INFO,
     adopt: AdoptChoice | None = None,
     resolving: bool = False,
     decide: Decide | None = None,
     when_tag: WhenTag | None = None,
     profiles: ProfileIndex | None = None,
+    config_dirs: AppConfigDir | None = None,
     rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
@@ -2684,7 +2757,7 @@ def sync(
         # Read once per run: every live path of the cycle is resolved against this one view of the profiles, and
         # every file that obeys the user's ignore list against this one reading of it.
         presets = replace(presets, ignores=_read_ignores(catalog, adapters, live, deny, home))
-        paths = open_live_paths(config, catalog, profiles)
+        paths = open_live_paths(config, catalog, profiles, config_dirs)
         view = PolicyView(
             transport,
             cipher=cipher,
@@ -2708,6 +2781,7 @@ def sync(
             rotation_marker=rotation_marker,
             deny=deny,
             apps=apps,
+            running=running,
             source=source,
             config=config,
             home=home,
@@ -2761,6 +2835,7 @@ def _cycle(
     rotation_marker: RotationMarkerStore,
     deny: DenyList,
     apps: AppDetector,
+    running: RunningApps,
     source: FileIdSource,
     config: SyncConfig,
     home: str,
@@ -2788,6 +2863,7 @@ def _cycle(
             rotation_marker=rotation_marker,
             deny=deny,
             apps=apps,
+            running=running,
             source=source,
             config=config,
             home=home,
@@ -2965,6 +3041,7 @@ def _cycle(
         live=live,
         deny=deny,
         apps=apps,
+        running=running,
         config=config,
         home=home,
         adopt=adopt,
@@ -3015,6 +3092,7 @@ __all__ = [
     "NO_APP_INFO",
     "NO_CATALOG",
     "NO_RESOLUTION",
+    "NO_RUNNING_INFO",
     "NO_VALIDATORS",
     "Backup",
     "Deferral",

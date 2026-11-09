@@ -21,6 +21,7 @@ from syncintosh.core.presets import MAX_GLOB_EXPANSION, Preset, PresetFile
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.policy_gate import PolicyView
+from syncintosh.services.profile_paths import LivePaths
 from syncintosh.services.sync import (
     NO_APP_INFO,
     Backup,
@@ -173,7 +174,9 @@ def test_expand_globs_turns_a_listing_into_concrete_items() -> None:
     live = _ListingLive(("a.json", "b.json", "c.txt"))
 
     # when
-    expanded = _expand_globs(_config("d/*.json"), None, live, SystemDenyList(), "/home")
+    expanded = _expand_globs(
+        _config("d/*.json"), None, live, SystemDenyList(), "/home", LivePaths(catalog=BuiltinCatalog.default())
+    )
 
     # then
     assert [item.path for item in expanded.items] == ["d/a.json", "d/b.json"]

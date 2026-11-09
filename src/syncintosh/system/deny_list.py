@@ -20,12 +20,15 @@ it is given, so a case-sensitive comparison here is a bypass, not a nicety.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from syncintosh.core.paths import collision_key
 from syncintosh.system.paths import MachinePaths
 
-# Relative to `$HOME`. A directory entry denies everything beneath it.
+# Relative to `$HOME`. A directory entry denies everything beneath it. An element may be `*` (any one element) or a
+# name pattern; a wildcard never spans a `/`, so there is no recursion and `JetBrains/*/ssl` is the `ssl` of one
+# release folder, not of every descendant.
 DENIED_PATHS: tuple[str, ...] = (
     ".ssh",
     ".aws",
@@ -51,6 +54,25 @@ DENIED_PATHS: tuple[str, ...] = (
     # Zed's Dev build keeps its sign-in token here as plaintext (`zed_credentials_provider.rs`). The `zed`
     # preset never tracks it; the entry keeps a user-added item or a glob from pulling it in.
     ".config/zed/development_credentials",
+    # JetBrains IDEs keep database credentials and connection material in a release folder next to the settings a
+    # preset syncs (`DataGrip2026.2/…`). `*` is that folder, whichever release it is, and the logical `@DataGrip`
+    # element of a record path matches it too. `dataSources.xml` holds connection URLs and user names, `security.xml`
+    # the trust store, `c.kdbx`/`c.pwd` the credential store, `ssl` and the key files TLS and SSH key material.
+    # Blocked here, in code, whatever the catalog says (``AGENTS.md`` §3.4).
+    "Library/Application Support/JetBrains/*/ssl",
+    "Library/Application Support/JetBrains/*/jdbc-drivers",
+    "Library/Application Support/JetBrains/*/consoles",
+    "Library/Application Support/JetBrains/*/dataSourcesHistory",
+    "Library/Application Support/JetBrains/*/workspace",
+    "Library/Application Support/JetBrains/*/tasks",
+    "Library/Application Support/JetBrains/*/settingsSync",
+    "Library/Application Support/JetBrains/*/options/dataSources",
+    "Library/Application Support/JetBrains/*/*.key",
+    "Library/Application Support/JetBrains/*/c.kdbx",
+    "Library/Application Support/JetBrains/*/c.pwd",
+    "Library/Application Support/JetBrains/*/options/dataSources.xml",
+    "Library/Application Support/JetBrains/*/options/dataSources.local.xml",
+    "Library/Application Support/JetBrains/*/options/security.xml",
 )
 
 
@@ -59,6 +81,37 @@ def _under(candidate: str, root: str) -> bool:
     folded_candidate = collision_key(candidate)
     folded_root = collision_key(root)
     return folded_candidate == folded_root or folded_candidate.startswith(folded_root + "/")
+
+
+def _element_pattern(element: str) -> re.Pattern[str]:
+    """The regex one path element of a denied entry means: `*` any run of characters, everything else literal."""
+    return re.compile("".join("[^/]*" if char == "*" else re.escape(char) for char in collision_key(element)))
+
+
+def _denied_by(candidate: str, base: str, pattern: tuple[str, ...]) -> bool:
+    """True when `candidate` is `base` plus elements matching `pattern` (or lies beneath such a path), folded.
+
+    `base` is the literal part of the entry, resolved or as written; `pattern` is the rest, where an element
+    may hold `*`. One element is matched by one pattern element, so the match never crosses a `/`.
+    """
+    folded, folded_base = collision_key(candidate), collision_key(base)
+    if folded != folded_base and not folded.startswith(folded_base + "/"):
+        return False
+    below = folded[len(folded_base) + 1 :].split("/") if len(folded) > len(folded_base) else []
+    return len(below) >= len(pattern) and all(
+        _element_pattern(want).fullmatch(have) is not None for want, have in zip(pattern, below, strict=False)
+    )
+
+
+def _denied_entry(denied: str, home: Path, *, real_candidate: str, written_candidate: str) -> bool:
+    """True when either spelling of the candidate falls under one `DENIED_PATHS` entry."""
+    elements = denied.split("/")
+    literal = next((index for index, element in enumerate(elements) if "*" in element), len(elements))
+    base = home.joinpath(*elements[:literal])
+    pattern = tuple(elements[literal:])
+    return _denied_by(real_candidate, os.path.realpath(base), pattern) or _denied_by(
+        written_candidate, str(base), pattern
+    )
 
 
 def is_denied(path: Path, home: Path) -> bool:
@@ -74,8 +127,7 @@ def is_denied(path: Path, home: Path) -> bool:
     # itself a symlink is still recognised by its name.
     written_candidate = os.path.abspath(path)  # noqa: PTH100 — resolve() would follow the link we must detect
     return any(
-        _under(real_candidate, os.path.realpath(real_home / denied))
-        or _under(written_candidate, str(real_home / denied))
+        _denied_entry(denied, real_home, real_candidate=real_candidate, written_candidate=written_candidate)
         for denied in DENIED_PATHS
     )
 

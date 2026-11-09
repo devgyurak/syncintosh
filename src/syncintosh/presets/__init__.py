@@ -57,7 +57,35 @@ class BuiltinCatalog:
             )
             raise ConfigError(f"two built-in presets claim one path: {list(clashes)} ({', '.join(breeders)})")
         cls._refuse_glob_over_exact(presets)
+        cls._refuse_config_dir_overlap(presets)
         return cls(presets=presets)
+
+    @staticmethod
+    def _refuse_config_dir_overlap(presets: tuple[Preset, ...]) -> None:
+        """Refuse a catalog where a logical config-directory path and a real path could claim one file.
+
+        A versioned config directory is owned through its logical root, and the real release folder it resolves to
+        is only ever reached through the resolver. Another preset that names a path inside such a real folder would
+        own the same file under a second spelling, and the two policies (which keys are stripped) would disagree.
+        Two presets with one layout would split the logical root between them.
+        """
+        specs = [(preset.name, preset.config_dir) for preset in presets if preset.config_dir is not None]
+        roots = [spec.root for _, spec in specs if spec is not None]
+        twice = sorted(
+            {collision_key(root) for root in roots if [collision_key(r) for r in roots].count(collision_key(root)) > 1}
+        )
+        if twice:
+            raise ConfigError(f"two built-in presets share one config directory: {twice}")
+        shadowed = sorted(
+            f"{preset.name}:{file.path} is inside {owner}'s config directory"
+            for owner, spec in specs
+            if spec is not None
+            for preset in presets
+            for file in preset.files
+            if spec.owns_real(file.path)
+        )
+        if shadowed:
+            raise ConfigError(f"a real path overlaps a logical config directory: {shadowed}")
 
     @staticmethod
     def _refuse_glob_over_exact(presets: tuple[Preset, ...]) -> None:
@@ -120,9 +148,11 @@ class BuiltinCatalog:
     @staticmethod
     def _owns(preset: Preset, path: str) -> bool:
         """True when `preset` owns `path`, directly or as a logical profile path of its own layout."""
-        return any(file.matches(path) for file in preset.files) or (
-            preset.profiles is not None and preset.profiles.parse(path) is not None
-        )
+        if any(file.matches(path) for file in preset.files):
+            # A logical path is matched **exactly** under its root: files compare folded, but a differently cased
+            # `@` element is not ours, and owning it would let a record choose the case `apply` creates.
+            return preset.config_dir is None or preset.config_dir.contains(path)
+        return preset.profiles is not None and preset.profiles.parse(path) is not None
 
     def knows(self, preset: str, path: str) -> bool:
         """True when `path` is one `preset` may name here.
@@ -142,7 +172,20 @@ class BuiltinCatalog:
 
     @staticmethod
     def _reserved(preset: Preset, path: str) -> bool:
-        """True when `path` is under `preset`'s profiles home but is not a logical profile path."""
+        """True when `path` sits where only a logical path may: under a profiles home, or on a config-directory root.
+
+        A raw profile id, or a logical `@` element that no preset file owns, would be collected or written verbatim
+        with no policy at all, whatever the record's preset name claims.
+        """
+        config_dir = preset.config_dir
+        if config_dir is not None:
+            folded, root = collision_key(path), collision_key(config_dir.root)
+            if (folded == root or folded.startswith(root + "/")) and not BuiltinCatalog._owns(preset, path):
+                return True
+            if config_dir.owns_real(path):
+                # A real release folder is never a record path: it is where a logical path lands on one machine
+                # and a different folder on another.
+                return True
         spec = preset.profiles
         if spec is None:
             return False

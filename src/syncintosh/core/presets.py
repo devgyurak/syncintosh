@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
+from syncintosh.core.config_dirs import ConfigDirSpec
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.keyed_array import ArrayRule
 from syncintosh.core.manifest import FileFormat, validate_format, validate_path
@@ -256,6 +257,11 @@ class Preset:
     no data field does, so the digest (`core/policy.py`) would not see it. It is part of the digest; bump it,
     then append the new digest to `POLICY_HISTORY`.
 
+    `config_dir` says the files' paths are **logical** under a versioned folder (`core/config_dirs.py`), and
+    `defer_while_running` holds back only the apply of this preset's files while the app is open (an IDE rewrites
+    its settings on quit, so a file written under it would be overwritten). Both are local behaviour, not part of
+    the object bytes, so neither is in the policy digest.
+
     `download_url` is the vendor's official page. Only a URL hard-coded here is trusted
     (``AGENTS.md`` §3.6), so the field is restricted to `https`. A deferral report reads it
     directly (`services.sync`); a URL that arrived from anywhere else is screened through
@@ -269,6 +275,8 @@ class Preset:
     cask: str | None
     profiles: ProfileSpec | None = None
     policy_epoch: int = 1
+    config_dir: ConfigDirSpec | None = None
+    defer_while_running: bool = False
 
     @classmethod
     def create(
@@ -281,6 +289,8 @@ class Preset:
         cask: str | None = None,
         profiles: ProfileSpec | None = None,
         policy_epoch: int = 1,
+        config_dir: ConfigDirSpec | None = None,
+        defer_while_running: bool = False,
     ) -> Preset:
         """Validate and freeze a preset; never assign fields afterwards."""
         if not isinstance(policy_epoch, int) or isinstance(policy_epoch, bool) or policy_epoch < 1:
@@ -308,6 +318,21 @@ class Preset:
                 # The index is read in memory for the profile list only; it also holds window state and a
                 # telemetry machine id, so a preset must never be able to collect and seal it.
                 raise ConfigError(f"preset {name!r}: the profile index must not be a tracked file")
+        if config_dir is not None:
+            if profiles is not None:
+                # Both would claim a logical `@` element under one app, and which resolver a path takes would
+                # depend on order.
+                raise ConfigError(f"preset {name!r}: a config directory and profiles cannot be combined")
+            if bundle_id != config_dir.bundle_id:
+                # The release folder is read from the app this preset detects; two spellings would let the
+                # detection and the folder name come from different apps.
+                raise ConfigError(f"preset {name!r}: the config directory's bundle id must be the preset's")
+            stray = [file.path for file in files if not config_dir.contains(file.path)]
+            if stray:
+                # A path outside the logical root would be written verbatim, never through the resolved folder.
+                raise ConfigError(f"preset {name!r}: files outside the config directory: {stray}")
+        if defer_while_running and bundle_id is None:
+            raise ConfigError(f"preset {name!r}: deferring while running needs a bundle id to ask about")
         return cls(
             name=name,
             files=files,
@@ -316,6 +341,8 @@ class Preset:
             cask=cask,
             profiles=profiles,
             policy_epoch=policy_epoch,
+            config_dir=config_dir,
+            defer_while_running=defer_while_running,
         )
 
 
