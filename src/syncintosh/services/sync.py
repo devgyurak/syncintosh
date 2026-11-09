@@ -82,7 +82,7 @@ from syncintosh.core.ports import (
     remote_ref,
 )
 from syncintosh.core.presets import EMPTY_CATALOG, MAX_GLOB_EXPANSION, Preset, PresetFile, PresetGlob, ValidatorName
-from syncintosh.core.projection import Carry, project_text, restore_text
+from syncintosh.core.projection import Carry, DroppedItem, project_text, restore_with_drops
 from syncintosh.core.record_merge import (
     PathCollision,
     RecordConflict,
@@ -278,6 +278,20 @@ class Backup:
 
 
 @dataclass(frozen=True)
+class DroppedLocal:
+    """Local values an apply removed because another Mac deleted the item they belonged to.
+
+    `item` is the item's label (`core.tree.path_label`), `keys` how many local entries went with it. No value is
+    held: an excluded value is in no commit, so a restore point cannot bring it back, and this report is the only
+    account of the loss.
+    """
+
+    path: str
+    item: str
+    keys: int
+
+
+@dataclass(frozen=True)
 class RestorePoint:
     """The commit one overwritten file's previous bytes can be restored from."""
 
@@ -295,6 +309,8 @@ class SyncReport:
     # Per overwritten file, the commit its previous bytes are in. Usually `backup_commit`; a file published
     # earlier but never applied is restored from the ledger's commit instead.
     restore_points: tuple[RestorePoint, ...] = ()
+    # Local values an apply removed with an item another Mac deleted; written files only (see `DroppedLocal`).
+    dropped: tuple[DroppedLocal, ...] = ()
     created: tuple[str, ...] = ()
     collected: tuple[str, ...] = ()
     applied: tuple[str, ...] = ()
@@ -812,8 +828,12 @@ def static_projector(presets: _Presets) -> Callable[[bytes, str, FileFormat], by
     return project
 
 
-def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile) -> bytes | None:
-    """`repo_bytes` with the live file's local values re-attached, or `None` on failure.
+def _restore_file(
+    presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy: PresetFile
+) -> tuple[bytes, tuple[DroppedItem, ...]] | None:
+    """`repo_bytes` with the live file's local values re-attached, and what that left out, or `None` on failure.
+
+    The second element is the items another machine deleted, whose local values are not re-attached.
 
     The live file's ignored keys come back along with the preset's noise: they are this machine's own, and
     the object being applied is the carry source of the round-trip check (`core.projection.restore_text`).
@@ -824,15 +844,18 @@ def _restore_file(presets: _Presets, repo_bytes: bytes, live_raw: bytes, policy:
     if adapter is None or repo_text is None or live_text is None:
         return None
     try:
-        return restore_text(adapter, repo_text, live_text, policy, Carry(presets.carried(policy))).encode("utf-8")
+        text, dropped = restore_with_drops(adapter, repo_text, live_text, policy, Carry(presets.carried(policy)))
+        return text.encode("utf-8"), dropped
     except ProjectionError:
         return None
 
 
 def _reduce_for_apply(
     presets: _Presets, data: bytes, live_bytes: bytes | None, policy: PresetFile, record: ManifestRecord
-) -> bytes | str:
+) -> tuple[bytes, tuple[DroppedItem, ...]] | str:
     """What apply writes for a stored object under a policy that projects, or the reason it must not be written.
+
+    The bytes come with the items whose local values the write removes (none without a live file).
 
     The one place apply checks that an object is the local policy's projection, because the stamp that says so is
     a claim by whoever wrote the repo (``docs/design/03-manifest.md``). With a live file, this machine's own keys
@@ -846,7 +869,7 @@ def _reduce_for_apply(
     reduced = _project_file(presets, data, record.path, record.format, carry=False)
     if reduced.failure is not None or reduced.view != data:
         return _PROJECTION_FAILURE_MIGRATED
-    return data
+    return data, ()
 
 
 def _syntax_ok(presets: _Presets, data: bytes, path: str) -> bool:
@@ -2158,6 +2181,7 @@ class _Applied:
 
     backup: str | None = None
     restore_points: tuple[RestorePoint, ...] = ()
+    dropped: tuple[DroppedLocal, ...] = ()
     applied: tuple[str, ...] = ()
     deferred: tuple[Deferral, ...] = ()
     symlinks: tuple[str, ...] = ()
@@ -2252,6 +2276,7 @@ def _apply(
     paths = paths or LivePaths(catalog=presets.catalog)
     applied: list[str] = []
     restore_points: list[RestorePoint] = []
+    dropped: list[DroppedLocal] = []
     deferred: list[Deferral] = []
     symlinks: list[str] = []
     aborted: list[str] = []
@@ -2392,12 +2417,13 @@ def _apply(
         if data is None:
             deferred.append(Deferral(record.path, _OBJECT_MISSING))
             continue
+        losses: tuple[DroppedItem, ...] = ()
         if stripped_policy is not None:
             reduced = _reduce_for_apply(presets, data, live_bytes, stripped_policy, record)
             if isinstance(reduced, str):
                 unprojectable.append(Refusal(record.path, reduced))
                 continue
-            data = reduced
+            data, losses = reduced
         if not _syntax_ok(presets, data, record.path):
             invalid.append(Refusal(record.path, _SYNTAX_FAILED))
             continue
@@ -2426,9 +2452,12 @@ def _apply(
             restore_points.append(RestorePoint(record.path, held_in))
         live.write(live_path, data)
         applied.append(record.path)
+        # Only a file that was written lost anything: a refusal, a deferral and a syntax failure left it as it was.
+        dropped.extend(DroppedLocal(record.path, path_label(loss.item), loss.keys) for loss in losses)
     return _Applied(
         backup=backup.commit,
         restore_points=tuple(restore_points),
+        dropped=tuple(dropped),
         applied=tuple(applied),
         deferred=tuple(deferred),
         symlinks=tuple(symlinks),
@@ -2455,7 +2484,9 @@ def _save_restore_point(
     pushed, but a secret the scan refuses stays out of every store this tool writes (``AGENTS.md`` §3.4). The
     seal uses the object domain and the record's file ID, the same AAD an object in the repo carries, so a
     restore commit's blob opens with `Cipher.open(domain="object", file_id=...)`. The projection is what is
-    saved because it is what the overwrite replaces: an excluded key stays in the live file.
+    saved because it is what the overwrite replaces. An excluded value is in no commit, so it is not here: it stays
+    in the live file unless the item it belongs to was deleted on another machine, and then it is gone and
+    `SyncReport.dropped` is the only account of it.
     """
     if view is None:
         return Refusal(record.path, _NOT_IN_RESTORE_POINT)
@@ -2959,6 +2990,7 @@ def _cycle(
         published_commit=outcome.published,
         backup_commit=applied.backup,
         restore_points=applied.restore_points,
+        dropped=applied.dropped,
         created=tuple(collected.created),
         collected=tuple(collected.collected),
         applied=applied.applied,
@@ -2985,6 +3017,7 @@ __all__ = [
     "NO_VALIDATORS",
     "Backup",
     "Deferral",
+    "DroppedLocal",
     "RecordReader",
     "Resolution",
     "RestorePoint",

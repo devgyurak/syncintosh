@@ -154,13 +154,24 @@ one failure that would loop forever.
 (`context_servers.<name>`, `profiles.<name>`). When another machine deletes one, the local values left here
 (an `env`, a noise path) would come back as an object with no `command`, or a profile holding only noise, and
 Zed would be left with an invalid server. So `graft` drops them with the item. It decides from the two trees
-alone, with no base: the item **entity** is the live path cut after the last `ANY_KEY` of the deepest matching
-pattern, and its local values are dropped when `live` has content under it that is neither stripped nor carried
-(it was shared) **and** `repo` has nothing at or under it (the merge deleted it). An item that held only local
-values (a server with just `env`, an extension server with just `settings`, a profile with just noise) was never
-shared, so it stays; an item `repo` still has stays even as `{}`. An exact path has no entity, so a fixed key such
-as `http.proxyAuthorization` is unchanged. This runs on apply only: the sealed bytes, the policy digest and
-`policy_epoch` do not change, and the result is still required to project back to `repo_text`.
+alone, with no base, in one function (`_drops`) that `dropped_items` shares. A path's **items** are its prefixes cut
+after each `ANY_KEY` of every pattern that matches it (`profiles.work`, and inside it
+`profiles.work.settings.context_servers.gh`). An item is *deleted* when `live` has content under it that is neither
+stripped nor carried (it was shared) **and** `repo` has nothing at or under it. A local value goes when **any**
+enclosing item is deleted, so a deleted profile takes an env-only server inside it. An item that held only local
+values (a server with just `env`, one with just `settings`, a profile with just noise) was never shared, so it
+stays, and so does one inside a profile `repo` still has; an item `repo` still has stays even as `{}`. An exact path
+has no item, so a fixed key such as `http.proxyAuthorization` is unchanged. This runs on apply only: the sealed
+bytes, the policy digest and `policy_epoch` do not change, and the result is still required to project back to
+`repo_text`.
+
+The loss is **not recoverable**. An excluded value is in no commit, and the restore point holds only the projected
+bytes (`01-sync-model.md`, "Commits and rewrites"), so it is not there either, whether the item vanished through a
+merge or through `--adopt remote`. A sync that writes such a file therefore reports it in `SyncReport.dropped`
+(the file, the item's label and the number of local keys it held, never a value), and the CLI prints it under
+"removed with an item another Mac deleted (not recoverable)". It is a notice and does not change the exit code. "Another Mac deleted" is what the two trees show, not something
+proven: with no base, an item the repo never had (a first sync, `--adopt remote`) reads the same, and is reported the
+same way.
 
 The cut is verified rather than trusted. `project_text` re-parses its own output and compares it
 with the projected tree, so a renderer that half-applied an edit cannot seal a file that is

@@ -46,6 +46,7 @@ This module is pure: it takes text, a policy, and a `ContentAdapter` port, and r
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -98,20 +99,21 @@ def _under_pattern(path: KeyPath, patterns: Iterable[KeyPattern]) -> bool:
     return any(_matches(path, pattern) for pattern in patterns)
 
 
-def _last_wildcard(pattern: KeyPattern) -> int:
-    """The index of the pattern's last `ANY_KEY`, or -1 when it has none."""
-    return max((index for index, segment in enumerate(pattern) if isinstance(segment, AnyKey)), default=-1)
+def _entities(path: KeyPath, patterns: Iterable[KeyPattern]) -> tuple[KeyPath, ...]:
+    """The user-named items `path` belongs to, outermost first: `path` cut after each `ANY_KEY` of a matching pattern.
 
-
-def _entity(path: KeyPath, patterns: Iterable[KeyPattern]) -> KeyPath | None:
-    """The user-named item `path` belongs to: `path` cut after the deepest last `ANY_KEY` of a matching pattern.
-
-    `context_servers.gh.env` under `context_servers.<any>.env` belongs to `context_servers.gh`. When several patterns
-    match, the one whose last wildcard sits deepest decides. A pattern with no wildcard names a fixed key, which is no
-    item the user created, so a path that only such patterns (or a carried key) hold has no entity.
+    `profiles.work.settings.context_servers.gh.env` lies in the item `profiles.work` and, inside it, in
+    `profiles.work.settings.context_servers.gh`. A pattern with no wildcard names a fixed key, which is no item the
+    user created, so a path that only such patterns (or a carried key) hold has no items.
     """
-    deepest = max((_last_wildcard(pattern) for pattern in patterns if _matches(path, pattern)), default=-1)
-    return None if deepest < 0 else path[: deepest + 1]
+    cuts = {
+        index + 1
+        for pattern in patterns
+        if _matches(path, pattern)
+        for index, segment in enumerate(pattern)
+        if isinstance(segment, AnyKey)
+    }
+    return tuple(path[:length] for length in sorted(cuts))
 
 
 def _prefixes(paths: Iterable[KeyPath]) -> set[KeyPath]:
@@ -194,6 +196,52 @@ def strip(tree: Tree, paths: frozenset[KeyPattern]) -> Tree:
     return _document(kept)
 
 
+@dataclass(frozen=True)
+class DroppedItem:
+    """A user-named item another machine deleted, whose local values this machine loses on apply.
+
+    `item` is the outermost deleted item the values belonged to, and `keys` how many local entries went with it.
+    No value is held: an excluded value is in no store, so there is nothing to recover and nothing to show.
+    """
+
+    item: KeyPath
+    keys: int
+
+    @classmethod
+    def create(cls, *, item: KeyPath, keys: int) -> DroppedItem:
+        """Validate and freeze one dropped item; never assign fields afterwards."""
+        if not item or keys < 1:
+            raise ProjectionError("a dropped item names a key path and at least one dropped key")
+        return cls(item=item, keys=keys)
+
+
+def _drops(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozenset[KeyPath]) -> dict[KeyPath, KeyPath]:
+    """Each pattern-held live entry that goes with a deleted item, mapped to the outermost deleted item.
+
+    The one place that decides it, for :func:`graft` and :func:`dropped_items` alike. An item is deleted when `live`
+    has content under it that is neither stripped nor carried (it was shared) and `repo` has nothing at or under it.
+    Any enclosing item counts, so a profile the merge deleted takes a server inside it whose only content was local.
+    """
+    held = [path for path in live.entries if _under_pattern(path, paths) or _under(path, carried)]
+    local = set(held)
+    shared = _prefixes(path for path in live.entries if path not in local)
+    present = _prefixes(repo.entries)
+    drops: dict[KeyPath, KeyPath] = {}
+    for path in held:
+        deleted = [item for item in _entities(path, paths) if item in shared and item not in present]
+        if deleted:
+            drops[path] = deleted[0]
+    return drops
+
+
+def dropped_items(
+    repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozenset[KeyPath] = frozenset()
+) -> tuple[DroppedItem, ...]:
+    """The items `graft` leaves out because the merge deleted them, in the order `live` lists them."""
+    counts = Counter(_drops(repo, live, paths, carried).values())
+    return tuple(DroppedItem.create(item=item, keys=keys) for item, keys in counts.items())
+
+
 def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozenset[KeyPath] = frozenset()) -> Tree:
     """`repo` with `live`'s values at `paths` and `carried` re-attached, ordered by `live`.
 
@@ -208,7 +256,7 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozens
     A key that `live` has and `repo` does not — outside `paths` — was deleted by the merge, so
     it is dropped; a key `repo` has and `live` does not is carried over.
 
-    The same holds for a user-named item (:func:`_entity`) that the merge deleted. Its local values would come back
+    The same holds for a user-named item (:func:`_entities`) that the merge deleted. Its local values would come back
     as an object with no `command` (a server) or a profile holding only noise, so they are dropped with it. That is
     decided from the two trees alone: the item was shared if `live` has content under it that is neither stripped nor
     carried, and it was deleted if `repo` has nothing at or under it. An item with only local values, or one `repo`
@@ -221,17 +269,11 @@ def graft(repo: Tree, live: Tree, paths: frozenset[KeyPattern], carried: frozens
         return _under_pattern(path, paths) or _under(path, carried)
 
     repo_entries = repo.entries
-    held_paths = {path for path in live.entries if held(path)}
-    # An item is deleted when live has content under it that is not stripped (it was shared) and repo has nothing at
-    # or under it. Both sides are indexed once, so asking about an item is a lookup.
-    shared = _prefixes(path for path in live.entries if path not in held_paths)
-    present = _prefixes(repo_entries)
-
+    drops = _drops(repo, live, paths, carried)
     entries: dict[KeyPath, Node] = {}
     for path, node in live.entries.items():
-        if path in held_paths:
-            entity = _entity(path, paths)
-            if entity is None or entity not in shared or entity in present:
+        if held(path):
+            if path not in drops:
                 entries[path] = node
         elif path in repo_entries:
             entries[path] = repo_entries[path]
@@ -311,6 +353,23 @@ def restore_text(
             f"{policy.path}: re-attaching this machine's local keys did not round-trip; refusing to write"
         )
     return rendered
+
+
+def restore_with_drops(
+    adapter: ContentAdapter, repo_text: str, live_text: str, policy: PresetFile, carried: Carry = NO_CARRY
+) -> tuple[str, tuple[DroppedItem, ...]]:
+    """:func:`restore_text`, and the items whose local values it left out because the merge deleted them.
+
+    The text is exactly `restore_text`'s; the second element comes from :func:`dropped_items`, the same decision
+    `graft` made, so a caller can tell the user what an apply is about to lose.
+    """
+    text = restore_text(adapter, repo_text, live_text, policy, carried)
+    if not policy.stripped and not carried.paths:
+        return text, ()
+    dropped = dropped_items(
+        _parse(adapter, repo_text, policy), _parse(adapter, live_text, policy), policy.stripped, carried.paths
+    )
+    return text, dropped
 
 
 def _rebased(
@@ -442,4 +501,15 @@ def _render(
         raise ProjectionError(f"{policy.path}: cannot rewrite the file safely ({exc})") from exc
 
 
-__all__ = ["NO_CARRY", "Carry", "carry", "graft", "project_text", "restore_text", "strip"]
+__all__ = [
+    "NO_CARRY",
+    "Carry",
+    "DroppedItem",
+    "carry",
+    "dropped_items",
+    "graft",
+    "project_text",
+    "restore_text",
+    "restore_with_drops",
+    "strip",
+]

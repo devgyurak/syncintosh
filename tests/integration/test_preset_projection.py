@@ -9,6 +9,7 @@ policy beside it — the machinery under test is the same one the VS Code preset
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,7 +32,7 @@ from syncintosh.core.policy import policy_digest
 from syncintosh.core.ports import ContentAdapter, PresetCatalog, TextEdit
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
-from syncintosh.core.tree import Tree
+from syncintosh.core.tree import ANY_KEY, Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
@@ -39,7 +40,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import DroppedLocal, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -1261,3 +1262,107 @@ def test_apply_refuses_an_unstripped_object_under_a_current_stamp_when_a_live_fi
         (JSONC, "this machine's own keys could not be re-attached to the file")
     ]
     assert _read(b, JSONC) == OWN_CREDENTIAL
+
+
+# --------------------------------------------------------------------------- local values removed with a deleted item
+
+WILD = "Config/app/settings.json"
+WILD_PRESET = Preset.create(
+    name="wild-test",
+    files=(PresetFile.create(path=WILD, format="jsonc", excluded={("servers", ANY_KEY, "env")}),),
+)
+WILD_CATALOG = _Catalog(WILD_PRESET)
+FAKE_ENV = b"FAKE-LOCAL-ENV-MARKER"
+
+
+def _wild_config(machine: Machine) -> SyncConfig:
+    return _config(machine, (LocalItem.create(path=WILD, preset="wild-test", scope="common", format="jsonc"),))
+
+
+def _servers(*names: str, env: bool = False) -> bytes:
+    """A settings file with one server per name; with `env`, each also holds a local credential map."""
+    local = {"env": {"K": FAKE_ENV.decode()}} if env else {}
+    return (
+        json.dumps({"servers": {name: {"command": "x", **local} for name in names}}, separators=(",", ":")) + "\n"
+    ).encode()
+
+
+def _wild_pair(tmp_path: Path, make_store) -> tuple[Machine, Machine]:
+    """Two machines in sync on servers `gh` and `fs`; B's own file also holds a local credential map for each."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a, _wild_config(a))
+    _write(a, WILD, _servers("gh", "fs"))
+    _run(a, catalog=WILD_CATALOG)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, _wild_config(b), import_from=a.recovery)
+    _run(b, catalog=WILD_CATALOG)
+    _write(b, WILD, _servers("gh", "fs", env=True))
+    _run(b, catalog=WILD_CATALOG)
+    return a, b
+
+
+def test_a_file_that_lost_a_deleted_items_local_values_is_reported_as_dropped(tmp_path, memory_key_store) -> None:
+    # given — B holds a local credential map under both servers
+    a, b = _wild_pair(tmp_path, memory_key_store)
+    assert _read(b, WILD).count(FAKE_ENV) == 2
+
+    # when — A deletes the `gh` server and B syncs
+    _write(a, WILD, _servers("fs"))
+    _run(a, catalog=WILD_CATALOG)
+    report = _run(b, catalog=WILD_CATALOG)
+
+    # then — the file is written without `gh`, and the report says what went with it, with no value
+    assert report.dropped == (DroppedLocal(WILD, "servers.gh", 1),)
+    assert _read(b, WILD).count(FAKE_ENV) == 1
+    assert FAKE_ENV.decode() not in repr(report)
+
+
+def test_nothing_is_reported_when_every_item_survives(tmp_path, memory_key_store) -> None:
+    # given
+    a, b = _wild_pair(tmp_path, memory_key_store)
+
+    # when — A changes a shared value of a server that stays
+    _write(a, WILD, _servers("gh", "fs").replace(b'"command":"x"', b'"command":"y"', 1))
+    _run(a, catalog=WILD_CATALOG)
+    report = _run(b, catalog=WILD_CATALOG)
+
+    # then
+    assert report.dropped == ()
+    assert _read(b, WILD).count(FAKE_ENV) == 2
+
+
+def test_an_adopt_remote_overwrite_reports_the_local_items_it_removed(tmp_path, memory_key_store) -> None:
+    # given — the repo holds `fs`; B's own file has a server `mine` with a local credential map, unknown to the repo
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _wild_config(a))
+    _write(a, WILD, _servers("fs"))
+    _run(a, catalog=WILD_CATALOG)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _wild_config(b), import_from=a.recovery)
+    _write(b, WILD, _servers("mine", env=True))
+
+    # when
+    report = _run(b, catalog=WILD_CATALOG, adopt="remote")
+
+    # then — the same report, and the local credential map is gone from the file
+    assert report.dropped == (DroppedLocal(WILD, "servers.mine", 1),)
+    assert FAKE_ENV not in _read(b, WILD)
+
+
+def test_a_file_that_is_deferred_reports_nothing_dropped(tmp_path, memory_key_store) -> None:
+    # given — B has no file and no app directory, so the record is deferred and nothing is written
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _wild_config(a))
+    _write(a, WILD, _servers("gh", "fs"))
+    _run(a, catalog=WILD_CATALOG)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _wild_config(b), import_from=a.recovery)
+
+    # when
+    report = _run(b, catalog=WILD_CATALOG)
+
+    # then
+    assert report.dropped == ()

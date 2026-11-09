@@ -15,11 +15,22 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.core.errors import ConfigError
+from syncintosh.core.errors import ConfigError, ProjectionError
 from syncintosh.core.ignore import IgnoreSpec
 from syncintosh.core.policy import policy_digest
 from syncintosh.core.presets import Preset, PresetFile
-from syncintosh.core.projection import NO_CARRY, Carry, _rebased, graft, project_text, restore_text, strip
+from syncintosh.core.projection import (
+    NO_CARRY,
+    Carry,
+    DroppedItem,
+    _rebased,
+    dropped_items,
+    graft,
+    project_text,
+    restore_text,
+    restore_with_drops,
+    strip,
+)
 from syncintosh.core.tree import ANY_KEY, AnyKey, tree_from_value
 
 ADAPTER = JsoncAdapter()
@@ -404,16 +415,57 @@ def test_graft_re_attaches_the_values_of_an_item_the_repo_still_holds_as_an_empt
     assert list(result) == [("context_servers", "gh", "env", "K")]
 
 
-def test_the_pattern_with_the_deepest_wildcard_decides_which_item_a_value_belongs_to() -> None:
-    # given — `a.x.c.y` matches both patterns; the second has the deeper wildcard, so the item is `a.x.c.y`
+def test_an_enclosing_item_counts_even_when_the_inner_one_was_never_shared() -> None:
+    # given — `a.x.c.y` is local-only, but it lies in `a.x`, which was shared (`a.x.shared`) and is gone from repo
     policy = _policy(noise={("a", ANY_KEY, "b"), ("a", ANY_KEY, "c", ANY_KEY)})
     live = tree_from_value({"a": {"x": {"c": {"y": 1}, "shared": 1}}})
 
     # when
     result = graft(tree_from_value({}), live, policy.stripped)
 
-    # then — `a.x.c.y` has no shared content of its own, so it is a local-only item and stays
-    assert list(result) == [("a", "x", "c", "y")]
+    # then — the outer item decides: nothing of the deleted `a.x` comes back (a document with nothing is `()`)
+    assert list(result) == [()]
+
+
+PROFILE_WITH_LOCAL_SERVER = {
+    "profiles": {
+        "work": {"settings": {"theme": "One", "node": {"path": "/n"}, "context_servers": {"gh": {"env": {"K": "1"}}}}}
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("live", "repo", "expected"),
+    [
+        pytest.param(PROFILE_WITH_LOCAL_SERVER, {}, {}, id="a deleted profile takes the env-only server inside it"),
+        pytest.param(
+            {
+                "profiles": {
+                    "work": {"settings": {"node": {"path": "/n"}, "context_servers": {"gh": {"env": {"K": 1}}}}}
+                }
+            },
+            {},
+            {
+                "profiles": {
+                    "work": {"settings": {"node": {"path": "/n"}, "context_servers": {"gh": {"env": {"K": 1}}}}}
+                }
+            },
+            id="a profile with only local values is not shared, so it and its server stay",
+        ),
+        pytest.param(
+            PROFILE_WITH_LOCAL_SERVER,
+            {"profiles": {"work": {"settings": {"theme": "One"}}}},
+            PROFILE_WITH_LOCAL_SERVER,
+            id="an env-only server in a profile the repo still has stays",
+        ),
+    ],
+)
+def test_a_deleted_profile_and_the_servers_inside_it_are_decided_together(live, repo, expected) -> None:
+    # when
+    restored = json.loads(_restored(live, repo))
+
+    # then
+    assert restored == expected
 
 
 def test_an_exact_path_policy_still_keeps_a_nested_credential_the_repo_lacks() -> None:
@@ -427,7 +479,24 @@ def test_an_exact_path_policy_still_keeps_a_nested_credential_the_repo_lacks() -
     assert json.loads(restored) == {"a": 1, "http": {"proxyAuthorization": "FAKE"}}
 
 
-def test_a_rebase_that_would_revive_a_deleted_item_is_refused_and_the_render_gives_the_same_result() -> None:
+def test_a_rebase_whose_text_does_not_match_the_restored_tree_is_refused_by_the_parse_comparison() -> None:
+    # given — the repo text keeps `gh`, so the lines match and `_place` finds a spot for the live text's edit; the
+    # restored tree is the one without the local env, which the placed text would bring back
+    repo_text = '{\n  "context_servers": {\n    "gh": { "command": "x" }\n  }\n}\n'
+    live_text = '{\n  "context_servers": {\n    "gh": { "command": "x", "env": { "K": "1" } }\n  }\n}\n'
+    wanted = graft(ADAPTER.parse(repo_text), ADAPTER.parse(live_text), ITEMS.stripped)
+    unwanted = ADAPTER.parse(repo_text)
+
+    # when
+    accepted = _rebased(ADAPTER, repo_text, live_text, wanted, ITEMS, NO_CARRY)
+    refused = _rebased(ADAPTER, repo_text, live_text, unwanted, ITEMS, NO_CARRY)
+
+    # then — the same placement is accepted for the tree it produces and refused for the one it does not
+    assert accepted is not None
+    assert refused is None
+
+
+def test_a_rebase_that_cannot_place_the_edit_is_refused_and_the_render_gives_the_same_result() -> None:
     # given — the live text's projection edit, undone onto the repo text, would bring the server back
     repo_text = '{\n  "context_servers": {\n    "fs": { "command": "x" }\n  }\n}\n'
     live_text = (
@@ -472,3 +541,154 @@ def test_restore_after_a_deletion_projects_back_and_keeps_only_repo_or_local_ite
     survivors = set(restored.get("context_servers", {}))
     assert project_text(ADAPTER, json.dumps(restored), ITEMS) == project_text(ADAPTER, json.dumps(repo), ITEMS)
     assert survivors - set(kept) <= {name for name, kind in kinds.items() if kind == "local"}
+
+
+# --------------------------------------------------------------------------- what an apply loses
+
+
+def _lost(live: dict, repo: dict) -> list[tuple[tuple[str, ...], int]]:
+    items = dropped_items(ADAPTER.parse(json.dumps(repo)), ADAPTER.parse(json.dumps(live)), ITEMS.stripped, frozenset())
+    return [(item.item, item.keys) for item in items]
+
+
+@pytest.mark.parametrize(
+    ("live", "repo", "expected"),
+    [
+        pytest.param(
+            {"context_servers": {"gh": _item(), "fs": _item()}},
+            {"context_servers": {"fs": {"command": "x"}}},
+            [(("context_servers", "gh"), 1)],
+            id="a deleted server",
+        ),
+        pytest.param(
+            {"profiles": {"work": {"settings": {"theme": 1, "node": {"path": "/x"}}}}},
+            {},
+            [(("profiles", "work"), 1)],
+            id="a deleted profile",
+        ),
+        pytest.param(PROFILE_WITH_LOCAL_SERVER, {}, [(("profiles", "work"), 2)], id="the outermost item is named"),
+        pytest.param(
+            {"profiles": {"w": {"settings": {"context_servers": {"gh": _item(), "fs": _item()}, "t": 1}}}},
+            {"profiles": {"w": {"settings": {"context_servers": {"fs": {"command": "x"}}, "t": 1}}}},
+            [(("profiles", "w", "settings", "context_servers", "gh"), 1)],
+            id="a server deleted inside a profile that stays",
+        ),
+        pytest.param(
+            {"context_servers": {"gh": {"env": {"A": 1, "B": 2}}, "fs": _item()}},
+            {"context_servers": {"fs": {"command": "x"}}},
+            [],
+            id="a local-only server loses nothing",
+        ),
+    ],
+)
+def test_dropped_items_names_the_outermost_deleted_item_and_counts_its_local_entries(live, repo, expected) -> None:
+    # when & then
+    assert _lost(live, repo) == expected
+
+
+def test_a_dropped_item_shows_no_value_in_its_repr() -> None:
+    # given
+    live = {"context_servers": {"gh": {"command": "x", "env": {"TOKEN": "FAKE-SECRET-VALUE"}}}}
+
+    # when
+    shown = repr(dropped_items(tree_from_value({}), tree_from_value(live), ITEMS.stripped))
+
+    # then — the item's name and a count, never what the entries held
+    assert "FAKE-SECRET-VALUE" not in shown
+    assert "gh" in shown
+
+
+def test_an_exact_path_policy_drops_nothing() -> None:
+    # given
+    policy = _policy(excluded={("http", "proxyAuthorization")})
+    live = tree_from_value({"a": 1, "http": {"proxyAuthorization": "FAKE"}})
+
+    # when & then
+    assert dropped_items(tree_from_value({"a": 1}), live, policy.stripped) == ()
+
+
+@pytest.mark.parametrize("keys", [0, -1])
+def test_a_dropped_item_needs_at_least_one_key(keys: int) -> None:
+    # when & then
+    with pytest.raises(ProjectionError):
+        DroppedItem.create(item=("context_servers", "gh"), keys=keys)
+
+
+def test_restore_with_drops_gives_restore_texts_text_and_the_dropped_items() -> None:
+    # given
+    live_text = json.dumps({"context_servers": {"gh": _item(), "fs": _item()}})
+    repo_text = json.dumps({"context_servers": {"fs": {"command": "x"}}})
+
+    # when
+    text, dropped = restore_with_drops(ADAPTER, repo_text, live_text, ITEMS)
+
+    # then
+    assert text == restore_text(ADAPTER, repo_text, live_text, ITEMS)
+    assert [(item.item, item.keys) for item in dropped] == [(("context_servers", "gh"), 1)]
+
+
+def test_restore_with_drops_reports_nothing_for_a_policy_without_wildcards() -> None:
+    # given
+    policy = _policy(excluded={("http", "proxyAuthorization")})
+
+    # when
+    _, dropped = restore_with_drops(ADAPTER, '{"a": 1}', '{"a": 1, "http": {"proxyAuthorization": "FAKE"}}', policy)
+
+    # then
+    assert dropped == ()
+
+
+_PROFILE_NAMES = ["p", "q"]
+
+
+@st.composite
+def _nested(draw):
+    """profile → server, as the live file has them, and which servers/profiles the repo kept."""
+    layout = draw(
+        st.dictionaries(
+            st.sampled_from(_PROFILE_NAMES),
+            st.dictionaries(st.sampled_from(_SERVER_NAMES), _KINDS, min_size=1, max_size=3),
+            min_size=1,
+        )
+    )
+    kept = {
+        profile: sorted(name for name, kind in servers.items() if kind == "shared" and draw(st.booleans()))
+        for profile, servers in layout.items()
+    }
+    return layout, kept
+
+
+@given(case=_nested())
+def test_a_nested_deletion_projects_back_and_keeps_only_repo_or_local_only_items(case) -> None:
+    # given — live: profiles with shared/local servers; repo: the shared servers the other Mac kept
+    layout, kept = case
+    live = {
+        "profiles": {
+            profile: {"settings": {"context_servers": {n: _item(shared=k == "shared") for n, k in servers.items()}}}
+            for profile, servers in layout.items()
+        }
+    }
+    repo = {
+        "profiles": {
+            profile: {"settings": {"context_servers": {name: {"command": "x"} for name in names}}}
+            for profile, names in kept.items()
+            if names
+        }
+    }
+    repo = repo if repo["profiles"] else {}
+
+    # when
+    restored = json.loads(_restored(live, repo))
+
+    # then — (a) a projection of the repo; (b) a surviving server is in the repo or was local-only, and a
+    # surviving profile is one the repo kept or one with nothing shared in it
+    assert project_text(ADAPTER, json.dumps(restored), ITEMS) == project_text(ADAPTER, json.dumps(repo), ITEMS)
+    survivors = {
+        (profile, name)
+        for profile, body in restored.get("profiles", {}).items()
+        for name in body.get("settings", {}).get("context_servers", {})
+    }
+    allowed = {(profile, name) for profile, names in kept.items() for name in names} | {
+        (profile, name) for profile, servers in layout.items() for name, kind in servers.items() if kind == "local"
+    }
+    assert survivors <= allowed

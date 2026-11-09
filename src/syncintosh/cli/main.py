@@ -1039,6 +1039,13 @@ def _render(report: SyncReport, config) -> None:
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
             _say(f"{label} ({refusal.reason}): {_shown(refusal.path)}", err=True)
+    if report.dropped:
+        from syncintosh.core.advice import visible
+
+        # Not a failure, so stdout and no exit code. Names and counts only: the values are in no store.
+        _say("removed with an item another Mac deleted (not recoverable):")
+        for lost in report.dropped:
+            _say(f"  {_shown(lost.path)}: {visible(lost.item)} ({lost.keys} local keys)")
     for note in report.notes:
         # A fixed sentence from the service; this only prints it.
         _say(f"note: {note}")
