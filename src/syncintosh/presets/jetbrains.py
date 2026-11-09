@@ -32,8 +32,8 @@ folder that has never been customized has none of them). The `@Storage` lines we
 
 ## What is never tracked
 
-Left out of the catalog (and, where it is sensitive, also blocked by name in `system/deny_list.py`, which is narrower
-than this list: it names `dataSources.xml` and `dataSources.local.xml`, not every `dataSources*.xml`): every
+Left out of the catalog (and, where it is sensitive, also blocked by name in `system/deny_list.py`, which covers
+`dataSources*.xml` and the credential-shaped files; the local state that is only in no preset is not on it): every
 `RoamingType.DISABLED` file (`window.state.xml`, `recentProjects.xml`, `usage.statistics.xml`,
 `features.usage.statistics.xml`,
 `trusted-paths.xml`, `path.macros.xml`, `updates.xml`, `ide.general.local.xml`, `security.xml`, `proxy.settings.xml`,

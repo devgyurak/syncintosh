@@ -18,6 +18,14 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 | `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` (and `language_models.openai_compatible`/`anthropic_compatible`.`*.custom_headers`) · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
 | `datagrip` | `Library/Application Support/JetBrains/@DataGrip/` (logical; the real folder is `DataGrip<year>.<n>`): `options/{editor-font,console-font,terminal-font,colors.scheme,customization,ide.general,diff,editor,code.style.schemes,laf,databaseSettings,csvSettings}.xml` · `options/mac/keymap.xml` · `keymaps/*.xml` · `codestyles/*.xml` · `templates/*.xml` · `colors/*.icls` | `xml` | the `metaInfo` element of a colour scheme (`created`/`modified`/`ide`/`ideVersion`) · `ide.general.xml` Registry `trace.state.event.service.url` | none in a tracked file; `dataSources.xml`, `dataSources.local.xml`, `*.key`, `c.kdbx`, `c.pwd`, `security.xml`, `ssl/` are never tracked and are denied in code | `com.jetbrains.datagrip` | <https://www.jetbrains.com/datagrip/download/> | `datagrip` |
+| `clion` | `Library/Application Support/JetBrains/@CLion/` (logical; the real folder is `CLion<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.CLion` | <https://www.jetbrains.com/clion/download/> | `clion` |
+| `goland` | `Library/Application Support/JetBrains/@GoLand/` (logical; the real folder is `GoLand<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.goland` | <https://www.jetbrains.com/go/download/> | `goland` |
+| `intellij-idea` | `Library/Application Support/JetBrains/@IntelliJIdea/` (logical; the real folder is `IntelliJIdea<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.intellij` | <https://www.jetbrains.com/idea/download/> | `intellij-idea` |
+| `phpstorm` | `Library/Application Support/JetBrains/@PhpStorm/` (logical; the real folder is `PhpStorm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.PhpStorm` | <https://www.jetbrains.com/phpstorm/download/> | `phpstorm` |
+| `pycharm` | `Library/Application Support/JetBrains/@PyCharm/` (logical; the real folder is `PyCharm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.pycharm` | <https://www.jetbrains.com/pycharm/download/> | `pycharm` |
+| `rubymine` | `Library/Application Support/JetBrains/@RubyMine/` (logical; the real folder is `RubyMine<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.rubymine` | <https://www.jetbrains.com/ruby/download/> | `rubymine` |
+| `rustrover` | `Library/Application Support/JetBrains/@RustRover/` (logical; the real folder is `RustRover<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.rustrover` | <https://www.jetbrains.com/rust/download/> | `rustrover` |
+| `webstorm` | `Library/Application Support/JetBrains/@WebStorm/` (logical; the real folder is `WebStorm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.WebStorm` | <https://www.jetbrains.com/webstorm/download/> | `webstorm` |
 
 ### `docker` notes
 
@@ -242,11 +250,12 @@ The shared rules live in `presets/jetbrains.py` (a builder, one product is a few
   `proxy.settings`, `certificates`, `gitlab`, `remote-servers`, `settingsSyncLocal`), `other.xml`, `window.layouts.xml`,
   `jdk.table.xml`, `databaseDrivers.xml`, `settingsSync*.xml`, `github.xml`, `sshConfigs.xml`, `webServers.xml`,
   `dataSources*.xml`, `*.key`, `c.kdbx`, `c.pwd`, and the folders `consoles/`, `workspace/`, `ssl/`, `jdbc-drivers/`.
-  They are in no preset. What `system/deny_list.py` blocks by name in every release folder is narrower than that
-  list: `options/dataSources.xml`, `options/dataSources.local.xml`, the `options/dataSources/` directory,
-  `options/security.xml`, `c.kdbx`, `c.pwd`, `*.key` and the folders `ssl`, `jdbc-drivers`, `consoles`,
-  `dataSourcesHistory`, `workspace`, `tasks`, `settingsSync`. Another `dataSources*.xml` spelling (a `.bak`, a
-  future name) is kept out of a sync only because no preset names it, not by the deny list.
+  They are in no preset. `system/deny_list.py` blocks the sensitive ones by name in every release folder
+  (`options/dataSources*.xml`, so `dataSources.local.xml` and any other spelling too, `options/dataSources/`,
+  `options/security.xml`, the credential-shaped files listed under "Denied in code" below, `c.kdbx`, `c.pwd`, `*.key`
+  and the folders `ssl`, `jdbc-drivers`, `consoles`, `dataSourcesHistory`, `workspace`, `tasks`, `settingsSync`).
+  The rest of that list is local state that is merely in no preset (`window.state.xml`, `other.xml`, ...), and
+  `settingsSync*.xml` is read in memory and never tracked, but is not on the deny list.
 - **D5 Noise.** In a `.icls`, the whole `metaInfo` element (its `created`/`modified`/`ide`/`ideVersion` properties are
   the `META_INFO_*` names in `AbstractColorsScheme.java`: when and by which product the scheme was saved). The element
   is named, not each property, so a second `<metaInfo>` (a repeated group) and an empty `<metaInfo />` are stripped
@@ -271,6 +280,50 @@ The shared rules live in `presets/jetbrains.py` (a builder, one product is a few
   invented; `editor.xml`, `code.style.schemes.xml`, `laf.xml` and `options/mac/keymap.xml` were not
   observed on a real folder; a macOS run with the IDE open, a real Settings Sync switch, and a second Mac were not
   exercised.
+
+### The other JetBrains IDEs
+
+`presets/jetbrains_ides.py` ships `clion`, `goland`, `intellij-idea`, `phpstorm`, `pycharm`, `rubymine`, `rustrover` and
+`webstorm` through the same builder, each as one call with its own metadata. Issue #54, PR D.
+
+A product ships only when its bundle ID, folder prefix, cask and download page are **all** source-verified (2026-11-09):
+
+| Product | Bundle ID (cask `quit:` id and `Preferences/<id>.plist`) | Prefix (cask zap path, vendor help page) | Cask | Download page (HTTP 200) |
+| --- | --- | --- | --- | --- |
+| CLion | `com.jetbrains.CLion` | `CLion` (`/help/clion/`) | `clion` | `/clion/download/` |
+| GoLand | `com.jetbrains.goland` | `GoLand` (`/help/go/`) | `goland` | `/go/download/` |
+| IntelliJ IDEA | `com.jetbrains.intellij` | `IntelliJIdea` (`/help/idea/`) | `intellij-idea` | `/idea/download/` |
+| PhpStorm | `com.jetbrains.PhpStorm` | `PhpStorm` (`/help/phpstorm/`) | `phpstorm` | `/phpstorm/download/` |
+| PyCharm | `com.jetbrains.pycharm` | `PyCharm` (`/help/pycharm/`) | `pycharm` | `/pycharm/download/` |
+| RubyMine | `com.jetbrains.rubymine` | `RubyMine` (`/help/ruby/`) | `rubymine` | `/ruby/download/` |
+| RustRover | `com.jetbrains.rustrover` | `RustRover` (`/help/rust/`) | `rustrover` | `/rust/download/` |
+| WebStorm | `com.jetbrains.WebStorm` | `WebStorm` (`/help/webstorm/`) | `webstorm` | `/webstorm/download/` |
+
+All URLs are under `https://www.jetbrains.com`. Case matters in a bundle ID: `CLion`, `PhpStorm` and `WebStorm` are
+capitalised, `rustrover`, `rubymine`, `goland` are not. RubyMine's download page is `/ruby/download/` (`/rubymine/download/`
+redirects to a landing page); the RubyMine cask's zap path omits the `JetBrains/` segment and is stale, and the vendor's
+help page confirms `~/Library/Application Support/JetBrains/RubyMine<ver>`.
+
+- **No product-specific `options/` file.** The PhpStorm candidates (`php.xml`, `php-tools.xml`, `php-test-framework.xml`,
+  `twig.xml`) and RubyMine's (`gemmanager.xml`, `ruby-debugger-type-renderers-settings.xml`) may roam, but those plugins
+  are closed source, so no `@Storage` / `RoamingType` could be read; CLion and RustRover have none to confirm. Only the
+  common set ships.
+- **Denied in code.** The basis of each group is the storage name seen in intellij-community's
+  `ide-settings-model.json` (the file names of the connection, deployment, container, Kubernetes and HTTP-client
+  settings); that they hold a host, a user name or a token is **inferred, not verified**, and they are blocked
+  conservatively. Beside the DataGrip entries, `system/deny_list.py` now blocks, under
+  `JetBrains/*/options/`, `remote-servers`, `sshConfigs`, `webServers`, `webDeployTransportHostTargets`,
+  `dataSources*`, `databaseDrivers`, `certificates`, `proxy.settings`, `github`, `gitlab`, `docker`, `docker-registry`,
+  `kubernetes-settings`, `http-client`, `sshRecentConnections*`, `wslRecentConnections*`, `recentConnections` and
+  `trusted-paths` (all `.xml`), folded for case and normalization, symlink-safe; the same names under `options/mac/` too; `JetBrains/Toolbox/apps/...` is not
+  matched (a file directly in a sibling's `options/` would be, which is harmless).
+- **Not shipped.** Rider (JetBrains' docs place the ReSharper settings at
+  `Rider<version>/resharper-host/GlobalSettingsStorage.DotSettings` (https://www.jetbrains.com/help/rider/2026.2/Sharing_Configuration_Options.html), but its `options/` layout and
+  whether `GlobalSettingsStorage.DotSettings` is safe to sync (it may hold machine paths, and has its own Settings
+  Sync behaviour) are unverified, so it stays out until both are checked), the Community editions
+  (`IdeaIC`, `PyCharmCE`; their casks are deprecated), Android Studio (Google's vendor folder, not `JetBrains`).
+- **Unverified.** No app of these products was installed on the authoring machine, so a real folder of each was not
+  inspected; the format evidence is DataGrip's, and the shared file set is source-verified for every product.
 
 ## Versioned config directories
 
