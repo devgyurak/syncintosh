@@ -159,7 +159,7 @@ def test_the_scheme_noise_is_the_four_meta_info_properties() -> None:
     noise = _policy("colors/sample.icls").noise
 
     # then
-    assert noise == {("metaInfo", f"property[{name}]") for name in ("created", "modified", "ide", "ideVersion")}
+    assert noise == {("metaInfo",)}
 
 
 @pytest.mark.parametrize(
@@ -295,3 +295,43 @@ def test_the_builder_adds_a_products_extra_options_after_the_common_ones() -> No
     # then
     assert paths.index(layout.logical_path("options/x.xml")) == len(jetbrains.COMMON_OPTIONS)
     assert other.config_dir == layout
+
+
+_SCHEME = '<scheme name="S" version="142">\n{meta}  <colors>\n    <option name="C" value="1" />\n  </colors>\n</scheme>'
+_META = (
+    '  <metaInfo>\n    <property name="created">{n}</property>\n    <property name="ide">X</property>\n  </metaInfo>\n'
+)
+_FILLED = _SCHEME.format(meta=_META.format(n=1))
+_BARE = _SCHEME.format(meta="")
+_METAS = {
+    "filled": _FILLED,
+    "twice": _SCHEME.format(meta=_META.format(n=1) + _META.format(n=2)),
+    "empty": _SCHEME.format(meta="  <metaInfo />\n"),
+    "empty-then-filled": _SCHEME.format(meta="  <metaInfo />\n" + _META.format(n=1)),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_METAS))
+def test_every_shape_of_metainfo_is_stripped(shape: str) -> None:
+    # given
+    policy = _policy("colors/sample.icls")
+
+    # when
+    projected = project_text(ADAPTER, _METAS[shape], policy)
+
+    # then
+    assert projected == _BARE
+
+
+@pytest.mark.parametrize("repo_shape", sorted(_METAS))
+@pytest.mark.parametrize("live_shape", sorted(_METAS))
+def test_apply_restores_any_metainfo_shape_against_any_other(repo_shape: str, live_shape: str) -> None:
+    # given
+    policy = _policy("colors/sample.icls")
+    repo = project_text(ADAPTER, _METAS[repo_shape], policy)
+
+    # when
+    restored = restore_text(ADAPTER, repo, _METAS[live_shape], policy)
+
+    # then
+    assert project_text(ADAPTER, restored, policy) == repo

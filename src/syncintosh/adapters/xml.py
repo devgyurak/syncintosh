@@ -197,6 +197,8 @@ class _Element:
     pieces: list[_Piece] = field(default_factory=list)
     # A comment or processing instruction directly inside the element.
     has_markup: bool = False
+    # Where the last of those ends, so an element holding only comments can take children after them.
+    markup_end: int = 0
 
     @property
     def text(self) -> str:
@@ -238,7 +240,7 @@ def _lex(text: str) -> _Element:
             end = text.find("-->", position + 4)
             if end < 0:
                 raise _refuse("an unterminated comment")
-            _note_markup(stack)
+            _note_markup(stack, end + 3)
             position = end + 3
         elif text.startswith("<![CDATA[", position):
             end = text.find("]]>", position + 9)
@@ -250,7 +252,7 @@ def _lex(text: str) -> _Element:
             end = text.find("?>", position + 2)
             if end < 0:
                 raise _refuse("an unterminated processing instruction")
-            _note_markup(stack)
+            _note_markup(stack, end + 2)
             position = end + 2
         elif text.startswith("<!", position):
             raise _refuse(DOCTYPE_REFUSED)
@@ -287,9 +289,10 @@ def _lex(text: str) -> _Element:
     return root
 
 
-def _note_markup(stack: list[_Element]) -> None:
+def _note_markup(stack: list[_Element], end: int) -> None:
     if stack:
         stack[-1].has_markup = True
+        stack[-1].markup_end = end
 
 
 def _start_tag(text: str, position: int) -> _Element:
@@ -685,6 +688,16 @@ class _Render:
         else:
             self._edits.append(TextEdit(element.start_tag_end, element.close_start, content))
 
+    def _add_after_markup(self, element: _Element, children: list[_Described]) -> None:
+        inner = self._child_indent(element)
+        if inner is None:
+            body = "".join(self._serialize(child, None) for child in children)
+        else:
+            body = "".join(f"{self._nl}{inner}{self._serialize(child, inner)}" for child in children)
+            if "\n" not in self._text[element.markup_end : element.close_start]:
+                body += self._nl + (self._indent_of(element) or "")
+        self._edits.append(TextEdit(element.markup_end, element.markup_end, body))
+
     # --- one element ----------------------------------------------------------------------------------------
 
     def _element(self, element: _Element, path: KeyPath, identity: str | None, wanted: _Trie) -> None:
@@ -696,14 +709,21 @@ class _Render:
             raise RenderRefused(MIXED_CONTENT_REFUSED)
         if element.children:
             if text:
+                # Swapping the children for text rewrites the whole content, comments included.
+                if element.has_markup:
+                    raise RenderRefused(COMMENT_IN_VALUE_REFUSED)
                 self._set_content(element, _escape_text(text))
             else:
                 self._children(element, path, children)
         elif children:
             described = [item for step, kid in children.items() for item in _described_from_trie(step, kid)]
-            if element.text and element.has_markup:
+            if not element.has_markup:
+                self._set_content(element, self._block(element, described))
+            elif element.text:
                 raise RenderRefused(COMMENT_IN_VALUE_REFUSED)
-            self._set_content(element, self._block(element, described))
+            else:
+                # Only comments (and whitespace) are inside: the children go after them so none is lost.
+                self._add_after_markup(element, described)
         else:
             self._text_leaf(element, path, text)
 
@@ -767,7 +787,8 @@ class _Render:
     def _children(self, parent: _Element, path: KeyPath, wanted: dict[str, _Trie]) -> None:
         groups = _groups(parent.children)
         removed: list[_Element] = []
-        survivors: list[_Element] = []
+        # Every sibling this render deletes or replaces: a new element must never be placed against one of them.
+        touched: list[_Element] = []
         for segment, members in groups.items():
             kid = wanted.get(segment)
             if kid is not None and isinstance(kid.leaf, Scalar | Object):
@@ -775,62 +796,66 @@ class _Render:
             if kid is None:
                 removed.extend(member for member, _ in members)
             elif isinstance(kid.leaf, Array):
-                self._group([member for member, _ in members], segment, kid.leaf)
+                touched.extend(self._group([member for member, _ in members], segment, kid.leaf))
             elif len(members) == 1:
                 self._element(members[0][0], (*path, segment), members[0][1], kid)
-                survivors.append(members[0][0])
             else:
                 first, *rest = (member for member, _ in members)
                 described = _described_from_trie(segment, kid)
                 self._replace(first, described[0])
+                touched.append(first)
                 removed.extend(rest)
         fresh = [(segment, kid) for segment, kid in wanted.items() if segment not in groups]
-        self._insert_new(parent, fresh, survivors, removed)
+        self._insert_new(parent, fresh, {id(item) for item in (*touched, *removed)}, removed)
 
     def _insert_new(
-        self, parent: _Element, fresh: list[tuple[str, _Trie]], survivors: list[_Element], removed: list[_Element]
+        self, parent: _Element, fresh: list[tuple[str, _Trie]], touched: set[int], removed: list[_Element]
     ) -> None:
         placed: dict[int, tuple[_Element, list[_Described]]] = {}
-        takes_the_place_of_removed: list[_Described] = []
+        unanchored: list[_Described] = []
         for segment, kid in fresh:
             described = _described_from_trie(segment, kid)
-            anchor = self._anchor(parent, _tag_of(segment), survivors, removed)
+            anchor = self._anchor(parent, _tag_of(segment), touched)
             if anchor is None:
-                takes_the_place_of_removed.extend(described)
+                unanchored.extend(described)
             else:
                 placed.setdefault(id(anchor), (anchor, []))[1].extend(described)
-        if takes_the_place_of_removed:
+        if unanchored and removed:
             first, removed = removed[0], removed[1:]
-            self._replace(first, takes_the_place_of_removed[0], *takes_the_place_of_removed[1:])
+            self._replace(first, unanchored[0], *unanchored[1:])
+        elif unanchored:
+            self._insert_at_end(parent, unanchored)
         for anchor, items in placed.values():
             self._insert_after(anchor, items)
         for element in removed:
             self._delete(element)
 
-    def _anchor(
-        self, parent: _Element, tag: str, survivors: list[_Element], removed: list[_Element]
-    ) -> _Element | None:
-        """The sibling a new element goes after, or `None` when it takes the place of a removed one."""
-        for element in reversed(survivors):
+    def _anchor(self, parent: _Element, tag: str, touched: set[int]) -> _Element | None:
+        """The sibling a new element goes after, or `None` when every sibling is deleted or replaced.
+
+        An edit placed against a touched sibling would overlap the edit that removes it and refuse the render, so
+        only an untouched one qualifies: the last of the same tag, else the last of any.
+        """
+        untouched = [element for element in parent.children if id(element) not in touched]
+        for element in reversed(untouched):
             if element.tag == tag:
                 return element
-        if survivors:
-            return survivors[-1]
-        if removed:
-            return None
-        return parent.children[-1]
+        return untouched[-1] if untouched else None
 
-    def _group(self, members: list[_Element], segment: str, wanted: Array) -> None:
+    def _group(self, members: list[_Element], segment: str, wanted: Array) -> list[_Element]:
+        """Edit a repeated element to the wanted array; the members it replaced or deleted are returned."""
         tag = _tag_of(segment)
         old = [_object_of(member) for member in members]
         new = list(wanted.elements)
         matcher = SequenceMatcher(None, old, new, autojunk=False)
+        touched: list[_Element] = []
         for kind, old_start, old_end, new_start, new_end in matcher.get_opcodes():
             if kind == "equal":
                 continue
             shared = min(old_end - old_start, new_end - new_start)
             for offset in range(shared):
                 self._replace(members[old_start + offset], _described_from_object(tag, new[new_start + offset]))
+            touched.extend(members[old_start:old_end])
             for member in members[old_start + shared : old_end]:
                 self._delete(member)
             extra = [_described_from_object(tag, node) for node in new[new_start + shared : new_end]]
@@ -840,10 +865,13 @@ class _Render:
                 self._insert_before(members[old_start + shared], extra)
             else:
                 self._insert_after(members[-1], extra)
+        return touched
 
     # --- placing elements -----------------------------------------------------------------------------------
 
     def _replace(self, element: _Element, described: _Described, *more: _Described) -> None:
+        if any(item.has_markup for item in element.walk()):
+            raise RenderRefused(COMMENT_IN_VALUE_REFUSED)
         indent = self._indent_of(element)
         pieces = [self._serialize(described, indent)]
         pieces.extend(self._serialize(item, indent) for item in more)
@@ -857,6 +885,22 @@ class _Render:
         else:
             text = "".join(f"{self._nl}{indent}{self._serialize(item, indent)}" for item in items)
         self._edits.append(TextEdit(anchor.end, anchor.end, text))
+
+    def _insert_at_end(self, parent: _Element, items: list[_Described]) -> None:
+        """Add `items` as the last children of `parent`, for when every child it has is deleted or replaced."""
+        inner = self._child_indent(parent)
+        close = parent.close_start
+        if inner is None:
+            self._edits.append(TextEdit(close, close, "".join(self._serialize(item, None) for item in items)))
+            return
+        # The close tag's own line start: a deleted last child takes its line up to there, so this never overlaps it.
+        start = self._line_start(close)
+        if self._text[start:close].strip(" \t"):
+            body = "".join(f"{self._nl}{inner}{self._serialize(item, inner)}" for item in items)
+            self._edits.append(TextEdit(close, close, body + self._nl + (self._indent_of(parent) or "")))
+            return
+        body = "".join(f"{inner}{self._serialize(item, inner)}{self._nl}" for item in items)
+        self._edits.append(TextEdit(start, start, body))
 
     def _insert_before(self, anchor: _Element, items: list[_Described]) -> None:
         indent = self._indent_of(anchor)

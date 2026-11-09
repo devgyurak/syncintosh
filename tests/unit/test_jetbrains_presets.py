@@ -143,3 +143,25 @@ def test_the_default_catalog_builds_with_every_product() -> None:
     assert {name: preset.name if preset else None for name, preset in owners.items()} == {
         name: name for name in EXPECTED
     }
+
+
+@pytest.mark.parametrize(
+    ("prefix", "folder"),
+    [
+        ("PyCharm", "PyCharmCE2025.2"),
+        ("IntelliJIdea", "IdeaIC2025.2"),
+        ("PyCharm", "PyCharm2025"),
+        ("PyCharm", "PyCharm2025.2.1"),
+        ("PyCharm", "pycharm2025.2x"),
+        ("PyCharm", "PyCharmCE"),
+    ],
+)
+def test_a_stable_prefix_does_not_claim_a_community_or_malformed_folder_beside_it(prefix: str, folder: str) -> None:
+    # given
+    spec = ConfigDirSpec.create(home=jetbrains.HOME, prefix=prefix, vendor="JetBrains", bundle_id="com.example.app")
+
+    # when
+    claimed = spec.is_release_name(folder)
+
+    # then
+    assert claimed is False

@@ -547,3 +547,46 @@ def test_a_symlinked_middle_directory_is_refused(tmp_path, memory_key_store) -> 
 
     # then — nothing is written through the link
     assert list(elsewhere.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- an IDE upgrade moves the folder
+
+
+def _upgraded_pair(tmp_path, memory_key_store):
+    """A and B both on 2026.2 and in sync; B then upgrades its app to 2026.3, whose folder exists and is empty."""
+    a, b = _pair(tmp_path, memory_key_store, a_release="Widget2026.2", b_release="Widget2026.2")
+    _run(b)
+    _install_app(b.app.parent, "Widget2026.3")
+    _folder(b, "Widget2026.3").mkdir(parents=True)
+    return a, b
+
+
+def test_an_upgrade_without_import_does_not_publish_the_new_folders_defaults(tmp_path, memory_key_store) -> None:
+    # given — the new release's folder holds the IDE's defaults (font size 12), not the settings B had (14)
+    a, b = _upgraded_pair(tmp_path, memory_key_store)
+    defaults = EDITOR_TEXT.replace(b'"14"', b'"12"')
+    _write(_folder(b, "Widget2026.3") / "options" / "editor.xml", defaults)
+
+    # when
+    _run(b)
+    _run(a)
+
+    # then — the old folder's baseline is not applied to the new folder, so the defaults are no local change
+    assert (_folder(a) / "options" / "editor.xml").read_bytes() == EDITOR_TEXT
+    assert (_folder(b, "Widget2026.3") / "options" / "editor.xml").read_bytes() == defaults
+
+
+def test_an_upgrade_whose_new_folder_lacks_the_file_applies_it_and_never_suppresses_it(
+    tmp_path, memory_key_store
+) -> None:
+    # given — a fresh release folder: the IDE does not write settings that hold their default value
+    _, b = _upgraded_pair(tmp_path, memory_key_store)
+
+    # when
+    _run(b)
+
+    # then — the file is applied as to a first-seen file, and the version change marked nothing as suppressed
+    assert (_folder(b, "Widget2026.3") / "options" / "editor.xml").read_bytes() == EDITOR_TEXT
+    ledger = JsonLedgerStore(b.ledger).load()
+    assert [e for e in ledger.values() if e.suppressed] == []
+    assert {e.release for e in ledger.values()} == {"Widget2026.3"}

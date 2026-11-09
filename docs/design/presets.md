@@ -17,7 +17,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `vscode` | `Library/Application Support/Code/User/settings.json` · `…/keybindings.json` · `…/snippets/*.json` · `…/snippets/*.code-snippets` | `jsonc` | the settings `userDataSync` computes as not synced — `window.zoomLevel`, `keyboard.layout`, `files.dialog.defaultPath`, `git.path`, `typescript.npm`, `php.validate.executablePath`, … | `http.proxyAuthorization` (dotted and nested) | `com.microsoft.VSCode` | <https://code.visualstudio.com/download> | `visual-studio-code` |
 | `docker` | `.docker/config.json` · `.docker/daemon.json` | `jsonc` (plain JSON is a subset) | `currentContext` · `credsStore` · `credHelpers` (config) | `auths` · `proxies` · `HttpHeaders` (config) · `proxies` (daemon) | `com.docker.docker` | <https://www.docker.com/products/docker-desktop/> | `docker-desktop` |
 | `zed` | `.config/zed/settings.json` · `…/keymap.json` · `…/snippets/*.json` · `…/themes/*.json` | `jsonc` | `node.path` · `lsp.*.binary.path`/`arguments` · `terminal.shell` · `ssh_connections` · `session.trust_all_worktrees` · … (see the notes) | `context_servers.*.env`/`headers`/`oauth`/`settings` · `agent_servers.*.env` · `terminal.env` · `language_models.*.custom_headers` (and `language_models.openai_compatible`/`anthropic_compatible`.`*.custom_headers`) · `dev_container_connections` · … (each under the root, the four channels, the three platforms and `profiles.*.settings`) | `dev.zed.Zed` | <https://zed.dev/download> | `zed` |
-| `datagrip` | `Library/Application Support/JetBrains/@DataGrip/` (logical; the real folder is `DataGrip<year>.<n>`): `options/{editor-font,console-font,terminal-font,colors.scheme,customization,ide.general,diff,editor,code.style.schemes,laf,databaseSettings,csvSettings}.xml` · `options/mac/keymap.xml` · `keymaps/*.xml` · `codestyles/*.xml` · `templates/*.xml` · `colors/*.icls` | `xml` | `metaInfo` `created`/`modified`/`ide`/`ideVersion` of a colour scheme · `ide.general.xml` Registry `trace.state.event.service.url` | none in a tracked file; `dataSources*.xml`, `*.key`, `c.kdbx`, `c.pwd`, `security.xml`, `ssl/` are never tracked and are denied in code | `com.jetbrains.datagrip` | <https://www.jetbrains.com/datagrip/download/> | `datagrip` |
+| `datagrip` | `Library/Application Support/JetBrains/@DataGrip/` (logical; the real folder is `DataGrip<year>.<n>`): `options/{editor-font,console-font,terminal-font,colors.scheme,customization,ide.general,diff,editor,code.style.schemes,laf,databaseSettings,csvSettings}.xml` · `options/mac/keymap.xml` · `keymaps/*.xml` · `codestyles/*.xml` · `templates/*.xml` · `colors/*.icls` | `xml` | the `metaInfo` element of a colour scheme (`created`/`modified`/`ide`/`ideVersion`) · `ide.general.xml` Registry `trace.state.event.service.url` | none in a tracked file; `dataSources.xml`, `dataSources.local.xml`, `*.key`, `c.kdbx`, `c.pwd`, `security.xml`, `ssl/` are never tracked and are denied in code | `com.jetbrains.datagrip` | <https://www.jetbrains.com/datagrip/download/> | `datagrip` |
 | `clion` | `Library/Application Support/JetBrains/@CLion/` (logical; the real folder is `CLion<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.CLion` | <https://www.jetbrains.com/clion/download/> | `clion` |
 | `goland` | `Library/Application Support/JetBrains/@GoLand/` (logical; the real folder is `GoLand<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.goland` | <https://www.jetbrains.com/go/download/> | `goland` |
 | `intellij-idea` | `Library/Application Support/JetBrains/@IntelliJIdea/` (logical; the real folder is `IntelliJIdea<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.intellij` | <https://www.jetbrains.com/idea/download/> | `intellij-idea` |
@@ -250,21 +250,34 @@ The shared rules live in `presets/jetbrains.py` (a builder, one product is a few
   `proxy.settings`, `certificates`, `gitlab`, `remote-servers`, `settingsSyncLocal`), `other.xml`, `window.layouts.xml`,
   `jdk.table.xml`, `databaseDrivers.xml`, `settingsSync*.xml`, `github.xml`, `sshConfigs.xml`, `webServers.xml`,
   `dataSources*.xml`, `*.key`, `c.kdbx`, `c.pwd`, and the folders `consoles/`, `workspace/`, `ssl/`, `jdbc-drivers/`.
-  They are in no preset, and the sensitive ones are also denied in code in every release folder.
-- **D5 Noise.** In a `.icls`, `metaInfo` `property[created|modified|ide|ideVersion]` (the `META_INFO_*` names in
-  `AbstractColorsScheme.java`: when and by which product the scheme was saved). In `ide.general.xml` the Registry
+  They are in no preset. `system/deny_list.py` blocks the sensitive ones by name in every release folder
+  (`options/dataSources*.xml`, so `dataSources.local.xml` and any other spelling too, `options/dataSources/`,
+  `options/security.xml`, the credential-shaped files listed under "Denied in code" below, `c.kdbx`, `c.pwd`, `*.key`
+  and the folders `ssl`, `jdbc-drivers`, `consoles`, `dataSourcesHistory`, `workspace`, `tasks`, `settingsSync`).
+  The rest of that list is local state that is merely in no preset (`window.state.xml`, `other.xml`, ...), and
+  `settingsSync*.xml` is read in memory and never tracked, but is not on the deny list.
+- **D5 Noise.** In a `.icls`, the whole `metaInfo` element (its `created`/`modified`/`ide`/`ideVersion` properties are
+  the `META_INFO_*` names in `AbstractColorsScheme.java`: when and by which product the scheme was saved). The element
+  is named, not each property, so a second `<metaInfo>` (a repeated group) and an empty `<metaInfo />` are stripped
+  too; a property in it that is not one of the four is not synced either. Changing this appended a `POLICY_HISTORY`
+  entry for `datagrip`. In `ide.general.xml` the Registry
   holds `source="SYSTEM"` entries the IDE sets itself, but a key pattern matches a key, never an attribute value, so
   "all SYSTEM entries" cannot be expressed: only `component[Registry]/entry[trace.state.event.service.url]`, the one
   seen, is stripped, and any other IDE-set entry is a known gap that would show as a diff.
 - **D6 Settings Sync.** `options/settingsSync.xml` is read **in memory only** (`SettingsSyncSettings`,
-  `syncEnabled == "true"`; absent or unreadable means off). When on, neither collect nor apply touches that product's
+  `syncEnabled`, compared case-insensitively, so `true`, `TRUE` and `True` are on). A **missing** file, or a file
+  without that key, is off (the IDE default). A file that **exists but cannot be read safely** (a symlink or other
+  non-regular file, larger than 64 KiB, not UTF-8, unparseable XML, or one with a DOCTYPE) is *unknown*: reading it as
+  off would let two sync tools fight over the same files, so the product is skipped for collect and apply with
+  "could not read settingsSync.xml; leaving files alone", and `doctor` fails the row. When on, neither collect nor apply touches that product's
   files, the report says "JetBrains Settings Sync is on - turn off one of the two" (the preset's data), and `doctor`
   fails its config-folders row. The file is never tracked, sealed or written.
 - **Defer while running.** There is no VFS tracker for application-level storages, so an outside edit is overwritten
   when the component next saves (focus loss, exit; non-roamable state about every five minutes). `defer_while_running`
   therefore holds an apply that would change a file until the IDE quits; collect still runs.
-- **Unverified.** The component names inside a few fixtures (`databaseSettings.xml`) follow the evidence's element
-  names, not a real file; `editor.xml`, `code.style.schemes.xml`, `laf.xml` and `options/mac/keymap.xml` were not
+- **Unverified.** The component name and the nesting inside the `databaseSettings.xml` fixture follow the evidence's
+  element names (`csv-format` `name`/`id`, `parameter-pattern` `value`), not a real file; no other field name is
+  invented; `editor.xml`, `code.style.schemes.xml`, `laf.xml` and `options/mac/keymap.xml` were not
   observed on a real folder; a macOS run with the IDE open, a real Settings Sync switch, and a second Mac were not
   exercised.
 
@@ -295,13 +308,19 @@ help page confirms `~/Library/Application Support/JetBrains/RubyMine<ver>`.
   `twig.xml`) and RubyMine's (`gemmanager.xml`, `ruby-debugger-type-renderers-settings.xml`) may roam, but those plugins
   are closed source, so no `@Storage` / `RoamingType` could be read; CLion and RustRover have none to confirm. Only the
   common set ships.
-- **Denied in code.** Beside the DataGrip entries, `system/deny_list.py` now blocks, under
+- **Denied in code.** The basis of each group is the storage name seen in intellij-community's
+  `ide-settings-model.json` (the file names of the connection, deployment, container, Kubernetes and HTTP-client
+  settings); that they hold a host, a user name or a token is **inferred, not verified**, and they are blocked
+  conservatively. Beside the DataGrip entries, `system/deny_list.py` now blocks, under
   `JetBrains/*/options/`, `remote-servers`, `sshConfigs`, `webServers`, `webDeployTransportHostTargets`,
   `dataSources*`, `databaseDrivers`, `certificates`, `proxy.settings`, `github`, `gitlab`, `docker`, `docker-registry`,
   `kubernetes-settings`, `http-client`, `sshRecentConnections*`, `wslRecentConnections*`, `recentConnections` and
   `trusted-paths` (all `.xml`), folded for case and normalization, symlink-safe; the same names under `options/mac/` too; `JetBrains/Toolbox/apps/...` is not
   matched (a file directly in a sibling's `options/` would be, which is harmless).
-- **Not shipped.** Rider (its `options/` layout, and where `*.DotSettings` live, is unverified), the Community editions
+- **Not shipped.** Rider (JetBrains' docs place the ReSharper settings at
+  `Rider<version>/resharper-host/GlobalSettingsStorage.DotSettings` (https://www.jetbrains.com/help/rider/2026.2/Sharing_Configuration_Options.html), but its `options/` layout and
+  whether `GlobalSettingsStorage.DotSettings` is safe to sync (it may hold machine paths, and has its own Settings
+  Sync behaviour) are unverified, so it stays out until both are checked), the Community editions
   (`IdeaIC`, `PyCharmCE`; their casks are deprecated), Android Studio (Google's vendor folder, not `JetBrains`).
 - **Unverified.** No app of these products was installed on the authoring machine, so a real folder of each was not
   inspected; the format evidence is DataGrip's, and the shared file set is source-verified for every product.

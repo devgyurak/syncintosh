@@ -41,6 +41,7 @@ _NOT_A_PATH = "this is not a path the app's profile layout allows"
 _UNREADABLE = "the app's profile list could not be read, so profile files are left as they are"
 _CONFIG_NOT_TRACKED = "this machine does not track this app's settings folder"
 _CONFIG_BAD_NAME = "the app named a settings folder this layout does not allow"
+_SYNC_UNREADABLE = "could not read settingsSync.xml; leaving files alone"
 _OWN_SYNC_ON = "the app's own settings sync is on, so this tool leaves its settings folder alone"
 
 
@@ -122,6 +123,9 @@ class LivePaths:
             # Two writers on one file: the app's own sync and this one. Collect and apply both resolve through here,
             # so neither touches the folder; the records are kept (an unresolved path is never a deletion).
             return Unresolved(spec.sync_conflict or _OWN_SYNC_ON)
+        if view.directory.settings_sync_unreadable:
+            # The state is unknown, and "off" would be a guess that lets two tools write the same files.
+            return Unresolved(_SYNC_UNREADABLE)
         return spec.real_directory(view.directory.directory)
 
     def resolve_directory(self, preset: str, directory: str) -> str | Unresolved:
@@ -269,10 +273,14 @@ def config_dir_summary(config: SyncConfig, paths: LivePaths) -> Check | None:
         )
         if found.directory is not None and found.settings_sync_enabled:
             parts.append(f"{view.preset}: {view.spec.sync_conflict or _OWN_SYNC_ON}")
+        if found.directory is not None and found.settings_sync_unreadable:
+            parts.append(f"{view.preset}: {_SYNC_UNREADABLE}")
         parts.extend(f"{view.preset}: {problem}" for problem in found.problems)
     # A sync that is held back is a problem to act on (turn one of the two off), not a note.
     held = any(
-        view.directory.directory is not None and view.directory.settings_sync_enabled for view in paths.config_views
+        view.directory.directory is not None
+        and (view.directory.settings_sync_enabled or view.directory.settings_sync_unreadable)
+        for view in paths.config_views
     )
     return Check("config folders", not held, "; ".join(parts))
 

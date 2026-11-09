@@ -32,8 +32,13 @@ None adds an `options/` file of its own. A product-specific file (`php.xml`, `ph
 may roam, but the plugins are closed source, so no `@Storage` or `RoamingType` could be read and none is tracked. CLion
 and RustRover have none to confirm. They stay a follow-up (`docs/design/presets.md`).
 
-Not shipped: Rider (its `options/` layout, and where its `*.DotSettings` live, is unverified), the Community
-editions (`IdeaIC`, `PyCharmCE`: their casks are deprecated) and Android Studio (Google's vendor folder).
+Not shipped: Rider. JetBrains' Rider help
+(https://www.jetbrains.com/help/rider/2026.2/Sharing_Configuration_Options.html, read 2026-11-09) places the ReSharper
+"This computer" settings at
+`~/Library/Application Support/JetBrains/Rider2026.2/resharper-host/GlobalSettingsStorage.DotSettings`, but Rider's
+`options/` layout and whether that file is safe to sync (machine paths, its own Settings Sync behaviour) are still
+unverified, so it stays out. Also not shipped: the Community editions (`IdeaIC`, `PyCharmCE`: their casks are
+deprecated) and Android Studio (Google's vendor folder).
 """
 
 from __future__ import annotations

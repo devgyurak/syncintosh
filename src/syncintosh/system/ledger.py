@@ -28,7 +28,11 @@ def _parse_entry(file_id: str, raw: object) -> LedgerEntry:
     suppressed = raw.get("suppressed")
     if not isinstance(sha256, str) or not isinstance(commit, str) or not isinstance(suppressed, bool):
         raise LedgerCorrupt(f"ledger entry for {file_id!r} is missing sha256/commit/suppressed")
-    return LedgerEntry(sha256=sha256, commit=commit, suppressed=suppressed)
+    # Absent in a ledger written before release tracking: that reads as "release unknown", never as an error.
+    release = raw.get("release", "")
+    if not isinstance(release, str):
+        raise LedgerCorrupt(f"ledger entry for {file_id!r} has a non-string release")
+    return LedgerEntry(sha256=sha256, commit=commit, suppressed=suppressed, release=release)
 
 
 class JsonLedgerStore:
@@ -55,8 +59,10 @@ class JsonLedgerStore:
 
     def save(self, entries: Mapping[str, LedgerEntry]) -> None:
         """Replace the ledger atomically."""
+        # `release` is written only when set, so a ledger without versioned dirs is unchanged for older builds.
         files = {
             file_id: {"sha256": entry.sha256, "commit": entry.commit, "suppressed": entry.suppressed}
+            | ({"release": entry.release} if entry.release else {})
             for file_id, entry in entries.items()
         }
         payload = json.dumps({"version": LEDGER_VERSION, "files": files}, indent=2, sort_keys=True)

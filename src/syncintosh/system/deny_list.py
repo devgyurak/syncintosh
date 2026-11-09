@@ -94,6 +94,9 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/options/wslRecentConnections*.xml",
     "Library/Application Support/JetBrains/*/options/recentConnections.xml",
     "Library/Application Support/JetBrains/*/options/trusted-paths.xml",
+    # Basis for the group above: each name is a storage name seen in intellij-community's
+    # `platform/platform-impl/resources/settings/ide-settings-model.json`. That the file holds a host, a user name, a
+    # token or a trust decision is inferred from the name, not verified; it is blocked conservatively.
     # The same files under `options/mac/` (`RoamingType.PER_OS` storages live there).
     "Library/Application Support/JetBrains/*/options/mac/dataSources*.xml",
     "Library/Application Support/JetBrains/*/options/mac/security.xml",
