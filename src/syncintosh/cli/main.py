@@ -37,7 +37,8 @@ from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 if TYPE_CHECKING:  # these names appear only in annotations
     from collections.abc import Callable
 
-    from syncintosh.core.ports import SyntaxValidator
+    from syncintosh.core.manifest import FileFormat
+    from syncintosh.core.ports import ContentAdapter, SyntaxValidator
     from syncintosh.core.presets import ValidatorName
     from syncintosh.core.resolution import Choice, ConflictView, NamedChoice, Picks
     from syncintosh.services.keys import RotationMode
@@ -125,6 +126,19 @@ def _selectable(path: str) -> str:
 def _fail(exc: DomainError) -> None:
     typer.echo(f"error: {exc}", err=True)
     raise typer.Exit(code=1)
+
+
+def _adapters() -> dict[FileFormat, ContentAdapter]:
+    """Every structural adapter, by the format a preset file names.
+
+    Wired for `sync`, `watch` and `diff` alike so the three cannot disagree on which formats merge key by key. A
+    format with no entry falls back to the line-level driver. Imported here so CLI startup does not parse either
+    format's machinery (``AGENTS.md`` §4); `lxml` itself loads only inside the XML adapter's first parse.
+    """
+    from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.adapters.xml import XmlAdapter
+
+    return {"jsonc": JsoncAdapter(), "xml": XmlAdapter()}
 
 
 def validators() -> dict[ValidatorName, SyntaxValidator]:
@@ -407,7 +421,6 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     Values are hidden by default: the report names the file and the changed key paths. `--values`
     adds a unified diff of the plaintext, which is the explicit opt-in to see the settings.
     """
-    from syncintosh.adapters.jsonc import JsoncAdapter
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
@@ -433,7 +446,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             deny=SystemDenyList(),
             branch=transport.branch() or BRANCH,
             catalog=BuiltinCatalog.default(),
-            adapters={"jsonc": JsoncAdapter()},
+            adapters=_adapters(),
             validators=validators(),
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
             config_dirs=ProductInfoConfigDir(),
@@ -869,7 +882,6 @@ def _sync_ports(config, paths) -> dict:
     they wire (``AGENTS.md`` §7). The imports stay inside, so CLI startup does not pay for a heavy
     dependency (``AGENTS.md`` §4).
     """
-    from syncintosh.adapters.jsonc import JsoncAdapter
     from syncintosh.adapters.text_merge import TextMergeDriver
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
@@ -909,7 +921,7 @@ def _sync_ports(config, paths) -> dict:
         "store": store,
         "codec": KeyMaterial(),
         "driver": TextMergeDriver(),
-        "adapters": {"jsonc": JsoncAdapter()},
+        "adapters": _adapters(),
         "catalog": BuiltinCatalog.default(),
         "validators": validators(),
         "live": SystemLiveFiles(),

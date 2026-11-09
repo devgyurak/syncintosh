@@ -1,0 +1,35 @@
+<application>
+  <!-- shaped from the structure of DataGrip 2026.2 options/*.xml; every value here is synthetic -->
+  <component name="DefaultFont">
+    <option name="FONT_SIZE" value="14" />
+    <option name="FONT_FAMILY" value="Example Mono" />
+  </component>
+  <component name="Registry">
+    <entry key="trace.state.event.service.url" value="https://example.invalid/trace" source="SYSTEM" />
+    <entry key="ide.example.flag" value="true" source="SYSTEM" />
+  </component>
+  <component name="UpdatesConfigurable">
+    <option name="LAST_TIME_CHECKED" value="1700000000000" />
+  </component>
+  <component name="FindSettings">
+    <mask>*.java</mask>
+    <mask>*.kt</mask>
+    <mask>*.xml</mask>
+  </component>
+  <component name="DatabaseSettings">
+    <option name="QUERY" value="select 1;&#10;&#9;from t where a &lt; &quot;b&quot;" />
+    <option name="NOTE"><![CDATA[a < b && c]]></option>
+    <parameter-pattern value="\?" in-literals="false" />
+    <parameter-pattern value=":(\w+)" in-literals="false" />
+    <csv-format name="CSV" id="a1" />
+    <csv-format name="TSV" id="b2" />
+  </component>
+  <component name="CsvSettings">
+    <set>
+      <option value="a" />
+      <option value="b" />
+    </set>
+  </component>
+  <component name="Empty" />
+  <global_color_scheme name="Example Dark" />
+</application>
