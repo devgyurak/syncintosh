@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import subprocess
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,9 +25,10 @@ from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource
-from syncintosh.core.errors import DocumentRefused
+from syncintosh.core.errors import DocumentStale
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.policy import policy_digest
+from syncintosh.core.ports import LiveFiles
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -34,6 +36,7 @@ from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
+from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import SyncReport, sync
@@ -56,10 +59,11 @@ PASSPHRASE = "a recovery passphrase"
 BRANCH = "main"
 DATABASE = "Library/Application Support/acme/profiles/main/state.db"
 VIEW = "Library/Application Support/acme/profiles/main/@state/settings.json"
+PLAIN = "Library/Application Support/acme/notes.txt"
 SOURCE = DocumentSource.create(kind=ORCA_PROFILE_STATE, database=DATABASE, domain="settings", view=VIEW)
 ACME = Preset.create(
     name="acme",
-    files=(PresetFile.create(path=VIEW, format="text"),),
+    files=(PresetFile.create(path=VIEW, format="text"), PresetFile.create(path=PLAIN, format="text")),
     bundle_id="com.example.acme",
     documents=(SOURCE,),
 )
@@ -150,7 +154,7 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
-def _run(machine: Machine) -> SyncReport:
+def _run(machine: Machine, *, wrap: Callable[[LiveFiles], LiveFiles] = lambda live: live) -> SyncReport:
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     config: SyncConfig = load_config(machine.config_file)
@@ -165,7 +169,7 @@ def _run(machine: Machine) -> SyncReport:
         driver=TextMergeDriver(),
         adapters={},
         catalog=CATALOG,
-        live=open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents()),
+        live=wrap(open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents())),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
         lock=FileLock(machine.lock, timeout_seconds=5),
@@ -194,6 +198,11 @@ def _edit_like_the_app(machine: Machine, payload: str) -> None:
         connection.commit()
 
 
+def _write_plain(machine: Machine, text: str) -> None:
+    (machine.home / PLAIN).parent.mkdir(parents=True, exist_ok=True)
+    (machine.home / PLAIN).write_text(text, encoding="utf-8")
+
+
 def _manifest_paths(machine: Machine) -> list[str]:
     transport = GitCLITransport(machine.repo)
     sealed = transport.read_blob(transport.head() or "", MANIFEST_PATH) or b""
@@ -207,11 +216,13 @@ def _pair(tmp_path: Path, make_store, profile_state_db, *, b_database: bool = Tr
     a = _machine(tmp_path, make_store, "machine-a", remote)
     _initialize(a)
     profile_state_db(a.database, settings={"theme": "dark", "fontSize": 13})
+    _write_plain(a, "hello\n")
     _run(a)
     b = _machine(tmp_path, make_store, "machine-b", remote)
     _initialize(b, import_from=a.recovery)
     if b_database:
         profile_state_db(b.database, settings={"theme": "dark", "fontSize": 13}, **b_options)
+        _write_plain(b, "hello\n")
     return a, b
 
 
@@ -253,7 +264,7 @@ def test_the_record_carries_the_virtual_path_and_the_repo_names_no_database(
     names = sorted(p.name for p in (a.repo / "objects").iterdir())
 
     # then — the manifest holds the view path; no filename or tracked path names the database or the app
-    assert _manifest_paths(a) == [VIEW]
+    assert _manifest_paths(a) == [PLAIN, VIEW]
     assert [n for n in names if "state" in n or "acme" in n] == []
     assert (a.home / VIEW).exists() is False
 
@@ -285,21 +296,148 @@ def test_a_mac_whose_app_has_not_made_its_database_defers_and_creates_nothing(
     report = _run(b)
 
     # then
-    assert [d.path for d in report.deferred] == [VIEW]
+    assert [d.path for d in report.deferred if d.path == VIEW] == [VIEW]
     assert (b.home / "Library").exists() is False
 
 
+class _StaleOnWrite:
+    """A `LiveFiles` over another whose document write finds the row moved, as when the app saves mid-cycle."""
+
+    def __init__(self, inner: LiveFiles) -> None:
+        self._inner = inner
+
+    def read(self, path: str) -> bytes | None:
+        return self._inner.read(path)
+
+    def write(self, path: str, data: bytes) -> None:
+        if path.endswith("@state/settings.json"):
+            raise DocumentStale("the document changed since it was read, so it was not written")
+        self._inner.write(path, data)
+
+    def exists(self, path: str) -> bool:
+        return self._inner.exists(path)
+
+    def is_symlink(self, path: str) -> bool:
+        return self._inner.is_symlink(path)
+
+    def list_dir(self, path: str) -> tuple[str, ...]:
+        return self._inner.list_dir(path)
+
+    def remove(self, path: str) -> None:
+        self._inner.remove(path)
+
+
 @pytest.mark.parametrize(
-    "options", [{"user_version": 4}, {"profile_id": "someone-else"}, {"domain_version": 2}, {"stored_hash": "0" * 64}]
+    "statement",
+    [
+        "PRAGMA user_version = 4",
+        "UPDATE profile_state_meta SET value = 'someone-else' WHERE key = 'profile_id'",
+        "UPDATE profile_state_documents SET domain_version = 2 WHERE domain = 'settings'",
+        "UPDATE profile_state_documents SET content_hash = '0' WHERE domain = 'settings'",
+    ],
 )
-def test_an_unsupported_database_stops_the_cycle_with_a_clear_error_and_is_left_alone(
-    tmp_path, memory_key_store, profile_state_db, options: dict
+def test_an_unsupported_database_is_one_refused_file_and_deletes_nothing(
+    tmp_path, memory_key_store, profile_state_db, statement: str
+) -> None:
+    # given — in sync; then B's database becomes unsupported (an app update) while A changes both files
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    published = _manifest_paths(b)
+    _edit_like_the_app(a, '{"theme":"light"}')
+    _write_plain(a, "from a\n")
+    _run(a)
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute(statement)
+        connection.commit()
+    unchanged = _query(b, "SELECT * FROM profile_state_documents ORDER BY domain")
+    unchanged_meta = _query(b, "SELECT * FROM profile_state_meta ORDER BY key")
+
+    # when — the sync does not stop: the plain file still moves, and the document is reported by name
+    report = _run(b)
+
+    # then
+    entries = JsonLedgerStore(b.ledger).load()
+    assert [r.path for r in report.refused if r.blocking] == [VIEW]
+    assert tuple(report.applied) == (PLAIN,)
+    assert (b.home / PLAIN).read_text(encoding="utf-8") == "from a\n"
+    # the database was left alone, the record is still in the repo, and nothing was read as a deletion
+    assert _query(b, "SELECT * FROM profile_state_documents ORDER BY domain") == unchanged
+    assert _query(b, "SELECT * FROM profile_state_meta ORDER BY key") == unchanged_meta
+    assert _manifest_paths(b) == published == _manifest_paths(a)
+    assert [entry for entry in entries.values() if entry.suppressed] == []
+
+
+def test_the_refused_document_arrives_once_the_database_is_supported_again(
+    tmp_path, memory_key_store, profile_state_db
+) -> None:
+    # given — B was refused for a cycle while A moved on
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute("PRAGMA user_version = 4")
+    _edit_like_the_app(a, '{"theme":"light"}')
+    _run(a)
+    _run(b)
+
+    # when — the version is back
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute("PRAGMA user_version = 3")
+    report = _run(b)
+
+    # then — no conflict, no re-created record: the document just applies
+    assert report.has_conflicts is False
+    assert _query(b, "SELECT payload FROM profile_state_documents WHERE domain = 'settings'") == [
+        ('{"theme":"light"}',)
+    ]
+
+
+def test_a_document_that_moved_between_the_read_and_the_write_is_a_non_blocking_per_file_report(
+    tmp_path, memory_key_store, profile_state_db
 ) -> None:
     # given
-    _, b = _pair(tmp_path, memory_key_store, profile_state_db, **options)
-    before = _query(b, "SELECT * FROM profile_state_documents ORDER BY domain")
+    a, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    before = _query(b, "SELECT * FROM profile_state_documents WHERE domain = 'settings'")
+    _edit_like_the_app(a, '{"theme":"light"}')
+    _write_plain(a, "from a\n")
+    _run(a)
 
-    # when & then
-    with pytest.raises(DocumentRefused):
-        _run(b)
-    assert _query(b, "SELECT * FROM profile_state_documents ORDER BY domain") == before
+    # when
+    report = _run(b, wrap=_StaleOnWrite)
+
+    # then — the plain file applied, the document was not written, and the next plain cycle retries it
+    assert [(r.path, r.blocking) for r in report.refused] == [(VIEW, False)]
+    assert tuple(report.applied) == (PLAIN,)
+    assert _query(b, "SELECT * FROM profile_state_documents WHERE domain = 'settings'") == before
+    _run(b)
+    assert _query(b, "SELECT payload FROM profile_state_documents WHERE domain = 'settings'") == [
+        ('{"theme":"light"}',)
+    ]
+
+
+def test_diff_names_a_refused_document_as_deferred_and_still_compares_the_others(
+    tmp_path, memory_key_store, profile_state_db
+) -> None:
+    # given — B's database is unsupported
+    _, b = _pair(tmp_path, memory_key_store, profile_state_db)
+    _run(b)
+    with closing(sqlite3.connect(b.database)) as connection:
+        connection.execute("PRAGMA user_version = 4")
+    transport = GitCLITransport(b.repo)
+
+    # when
+    report = diff_repo(
+        transport=transport,
+        cipher=EnvelopeCipher(b.store),
+        live=open_live_files(SystemLiveFiles(), str(b.home), CATALOG.documents()),
+        config=load_config(b.config_file),
+        home=str(b.home),
+        deny=SystemDenyList(),
+        branch=transport.branch() or BRANCH,
+        catalog=CATALOG,
+        adapters={},
+        validators={},
+    )
+
+    # then
+    assert sorted((entry.path, entry.status) for entry in report.entries) == [(PLAIN, "in-sync"), (VIEW, "deferred")]

@@ -318,7 +318,15 @@ the filesystem.
 
 * **View.** A read returns the JSON indented two spaces (a diff and a resolve do not meet one long line); a write
   compacts it back to the app's own form with key order kept (`core/documents.py`). Whole-valued numbers are integers,
-  as JavaScript prints them. A value equal to the current row writes nothing, so the app's revision is not bumped.
+  as JavaScript prints them, and an unpaired surrogate stays the `\udXXX` escape JavaScript wrote (a raw one cannot be
+  UTF-8); text UTF-8 still cannot hold is a refusal, never a raw error. A value equal to the current row writes
+  nothing, so the app's revision is not bumped; equality is type-strict (`true` is not `1`).
+* **A refusal is one file's.** `DocumentRefused` (an unsupported database) and `DocumentStale` (the row moved between
+  the read and the write) do not stop the cycle: collect, apply and `diff` report that document (a blocking refusal for
+  the first, a non-blocking one for the second, which the next sync retries) and carry on with every other file. A
+  document the store would not open is **not** read as absent: its record stays in the manifest, its ledger baseline is
+  kept and never marked suppressed, nothing is collected from it and nothing is written to it, so no deletion can follow
+  from it. An app update that bumps `user_version` therefore costs only that one file.
 * **Fail closed.** The store refuses a `user_version` other than 3, a different table shape, a `profile_id` that is not
   the folder's, a `domain_version` other than 1, a missing row, a row newer than its profile, a content hash that is
   not the SHA-256 of the payload, and a database or folder that is a symlink. A database that does not exist is never

@@ -20,7 +20,7 @@ from typing import Literal
 
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.diff import changed_addresses
-from syncintosh.core.errors import ContentParseError
+from syncintosh.core.errors import ContentParseError, DocumentRefused
 from syncintosh.core.manifest import FileFormat, ManifestRecord
 from syncintosh.core.models import ConflictAddress
 from syncintosh.core.ports import (
@@ -40,6 +40,7 @@ from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Unresolved, open_live_paths
 from syncintosh.services.sync import (
     _decode,
+    _document_refusal,
     _Presets,
     _project_file,
     _read_ignores,
@@ -166,7 +167,10 @@ def _diff_record(
         return FileDiff(record.path, "deferred", reason="the file is a symbolic link")
     repo_bytes = _verified_object(transport, cipher, repo_commit, file_id, record.sha256)
     repo_text = None if repo_bytes is None else _decode(repo_bytes)
-    raw = live.read(str(Path(home) / located.path))
+    try:
+        raw = live.read(str(Path(home) / located.path))
+    except DocumentRefused as exc:
+        return FileDiff(record.path, "deferred", reason=_document_refusal(record.path, exc).reason)
     if raw is None:
         return FileDiff(record.path, "missing-here", repo=repo_text)
     # The repo side is the carry source, so an ignored key never shows as a difference.

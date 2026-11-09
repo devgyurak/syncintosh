@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -41,6 +42,10 @@ ORCA_PROFILE_STATE: Final = "orca-profile-state"
 
 # JS prints a whole-number double without a fraction and switches to an exponent at 1e21.
 _JS_INTEGER_LIMIT: Final = 1e21
+
+# An unpaired surrogate. `JSON.stringify` writes one as a `\\udXXX` escape, which Python reads into a lone surrogate
+# code point that UTF-8 cannot encode; it is written back the way JS wrote it.
+_LONE_SURROGATE: Final = re.compile("[\ud800-\udfff]")
 
 
 @dataclass(frozen=True)
@@ -95,9 +100,23 @@ class DocumentRead:
     revision: int
 
 
+def _utf8(text: str) -> bytes:
+    """`text` as UTF-8, or `DocumentRefused` for what UTF-8 cannot hold (never a raw `UnicodeEncodeError`)."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise DocumentRefused("the document holds text UTF-8 cannot encode") from None
+
+
+def _dump(value: Any, **options: Any) -> str:
+    """`value` as JSON text with non-ASCII kept, and only a lone surrogate re-escaped as the app's JS writes it."""
+    text = json.dumps(value, ensure_ascii=False, **options)
+    return _LONE_SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
 def content_hash(payload: str) -> str:
     """The row's integrity hash: SHA-256 of the payload's UTF-8 bytes, in hex (the app verifies it on every read)."""
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_utf8(payload)).hexdigest()
 
 
 def _js_number(text: str) -> float | int:
@@ -138,7 +157,7 @@ def _parse(text: str) -> dict[str, Any]:
 
 def render_view(payload: str) -> bytes:
     """The bytes `services` sees for a row: its JSON, indented two spaces, with a final newline."""
-    return (json.dumps(_parse(payload), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    return _utf8(_dump(_parse(payload), indent=2) + "\n")
 
 
 def compact_payload(view: bytes) -> str:
@@ -147,7 +166,7 @@ def compact_payload(view: bytes) -> str:
         text = view.decode("utf-8")
     except UnicodeDecodeError:
         raise DocumentRefused("the document is not UTF-8") from None
-    return json.dumps(_parse(text), ensure_ascii=False, separators=(",", ":"))
+    return _dump(_parse(text), separators=(",", ":"))
 
 
 def same_value(current: str, proposed: str) -> bool:
@@ -160,7 +179,7 @@ def same_value(current: str, proposed: str) -> bool:
 
 
 def _canonical(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return _dump(value, sort_keys=True, separators=(",", ":"))
 
 
 __all__ = [
