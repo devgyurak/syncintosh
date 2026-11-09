@@ -7,7 +7,7 @@ import pytest
 
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import SETTINGS
-from syncintosh.services.sync import NO_APP_INFO, _deferral, _missing_file_decision
+from syncintosh.services.sync import NO_APP_INFO, NO_RUNNING_INFO, _deferral, _missing_file_decision
 
 
 @pytest.mark.parametrize(
@@ -63,3 +63,8 @@ def test_an_undeterminable_app_defers_without_metadata() -> None:
 def test_the_default_detector_never_claims_to_know() -> None:
     # when & then — a caller with no detector keeps the directory heuristic
     assert NO_APP_INFO.installed("com.microsoft.VSCode") is None
+
+
+def test_the_default_running_port_cannot_tell() -> None:
+    # when & then — `None`, which a preset that waits for its app to quit treats as running
+    assert NO_RUNNING_INFO.running("com.example.app") is None

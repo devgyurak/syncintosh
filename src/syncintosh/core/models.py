@@ -118,6 +118,10 @@ class LedgerEntry:
     sha256: str
     commit: str
     suppressed: bool
+    # The release folder (`DataGrip2026.2`) a versioned-config-dir file was written from, or "" for any other record
+    # and for a ledger written before this field existed. A baseline taken in one release folder says nothing about
+    # the file in another, so a differing value makes the baseline count as absent (`services/sync.py`).
+    release: str = ""
 
 
 @dataclass(frozen=True)

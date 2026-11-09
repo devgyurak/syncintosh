@@ -157,3 +157,120 @@ def test_the_state_directory_is_denied_even_under_a_moved_data_root(tmp_path, mo
 
     # when & then
     assert SystemDenyList().is_denied(str(home), "elsewhere/syncintosh/scan-allow.json") is True
+
+
+# --------------------------------------------------------------------------- JetBrains release folders (wildcards)
+
+JB = "Library/Application Support/JetBrains"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{JB}/DataGrip2026.2/ssl/trust.jks",
+        f"{JB}/DataGrip2026.2/jdbc-drivers/driver.jar",
+        f"{JB}/IntelliJIdea2026.3/consoles/db/console.sql",
+        f"{JB}/DataGrip2026.2/dataSourcesHistory/x",
+        f"{JB}/DataGrip2026.2/workspace/x.xml",
+        f"{JB}/DataGrip2026.2/tasks/x",
+        f"{JB}/DataGrip2026.2/settingsSync/x",
+        f"{JB}/DataGrip2026.2/options/dataSources/uuid.xml",
+        f"{JB}/DataGrip2026.2/options/dataSources.xml",
+        f"{JB}/DataGrip2026.2/options/dataSources.local.xml",
+        f"{JB}/DataGrip2026.2/options/security.xml",
+        f"{JB}/DataGrip2026.2/c.kdbx",
+        f"{JB}/DataGrip2026.2/c.pwd",
+        f"{JB}/DataGrip2026.2/id_rsa.key",
+        f"{JB}/@DataGrip/options/dataSources.xml",
+        f"{JB}/@DataGrip/ssl/x",
+    ],
+)
+def test_a_jetbrains_credential_path_is_denied_whichever_release_folder_it_is_in(tmp_path, relative: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / relative, home) is True
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{JB}/DataGrip2026.2/options/editor-font.xml",
+        f"{JB}/DataGrip2026.2/options/ide.general.xml",
+        f"{JB}/DataGrip2026.2/colors/Dark.icls",
+        f"{JB}/Toolbox/apps/DataGrip/state.json",
+        f"{JB}/Toolbox/ssl_unrelated",
+        f"{JB}/DataGrip2026.2/options/sub/security.xml",
+        f"{JB}/DataGrip2026.2/sub/c.pwd",
+        f"{JB}/DataGrip2026.2/sub/id.key",
+        f"{JB}/DataGrip2026.2",
+        JB,
+        "Library/Application Support/JetBrainsOther/DataGrip2026.2/ssl/x",
+    ],
+)
+def test_a_jetbrains_path_that_holds_no_credential_is_allowed(tmp_path, relative: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then — a wildcard is one element and never recursive, and the sibling `Toolbox/` is not a release folder
+    assert is_denied(home / relative, home) is False
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        f"{JB.lower()}/datagrip2026.2/SSL/x",
+        f"{JB.upper()}/DATAGRIP2026.2/OPTIONS/DATASOURCES.XML",
+        f"{JB}/DataGrip2026.2/ID.KEY",
+    ],
+)
+def test_a_case_variant_of_a_jetbrains_credential_path_is_denied(tmp_path, variant: str) -> None:
+    # given — APFS is case-insensitive
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / variant, home) is True
+
+
+def test_a_decomposed_spelling_of_a_jetbrains_path_is_denied(tmp_path) -> None:
+    # given — the release folder is spelled with a decomposed character; the denied name is not touched, so the
+    # wildcard element is what normalization must not break
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / JB / "Café" / "ssl" / "x", home) is True
+
+
+def test_a_symlink_into_a_jetbrains_credential_directory_is_denied(tmp_path) -> None:
+    # given — an innocent-looking file whose target is a release folder's `ssl` directory
+    home = tmp_path / "home"
+    (home / JB / "DataGrip2026.2" / "ssl").mkdir(parents=True)
+    (home / "notes").mkdir()
+    (home / "notes" / "link").symlink_to(home / JB / "DataGrip2026.2" / "ssl" / "trust.jks")
+
+    # when & then
+    assert is_denied(home / "notes" / "link", home) is True
+
+
+def test_a_release_credential_directory_that_is_a_symlink_out_of_the_tree_is_still_denied(tmp_path) -> None:
+    # given — `ssl` is a symlink pointing elsewhere; the name as written is what names the credential
+    home = tmp_path / "home"
+    (home / JB / "DataGrip2026.2").mkdir(parents=True)
+    (home / "elsewhere").mkdir()
+    (home / JB / "DataGrip2026.2" / "ssl").symlink_to(home / "elsewhere")
+
+    # when & then
+    assert is_denied(home / JB / "DataGrip2026.2" / "ssl" / "x", home) is True
+
+
+def test_the_jetbrains_folder_itself_being_a_symlink_does_not_hide_a_credential(tmp_path) -> None:
+    # given — the whole vendor folder lives on another volume
+    home = tmp_path / "home"
+    (home / "Library" / "Application Support").mkdir(parents=True)
+    moved = tmp_path / "moved"
+    (moved / "DataGrip2026.2" / "ssl").mkdir(parents=True)
+    (home / JB).symlink_to(moved)
+
+    # when & then
+    assert is_denied(home / JB / "DataGrip2026.2" / "ssl" / "x", home) is True

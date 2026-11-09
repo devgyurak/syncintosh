@@ -218,6 +218,24 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   `git/config`, `AGENTS.md` (a follow-up candidate), a project's `.zed/`, extensions, and a bundle check for Preview
   or Nightly alone.
 
+## Versioned config directories
+
+A preset may set `config_dir` (`core/config_dirs.py`) when its app keeps settings under a folder named after the
+release. Its file paths are then **logical** — `Library/Application Support/JetBrains/@DataGrip/options/…` — and the
+real folder is whatever the installed app names in `Contents/Resources/product-info.json` (`dataDirectoryName`,
+checked against the preset's prefix and vendor). Rules for such a preset:
+
+- It cannot also have `profiles`, and its bundle ID must be the layout's.
+- A folder that does not resolve, or does not exist, defers; it is **never created** (it protects the IDE's
+  first-run settings import).
+- `defer_while_running` holds back only the **apply** while the app is open (`lsappinfo`); collect proceeds. When
+  the check cannot answer, the apply waits too. The flag is data; `services` names no app.
+- Credential files of the release folder are denied in code whatever the catalog lists (`system/deny_list.py`).
+- Not supported: `idea.config.path` overrides (like `ZDOTDIR`), EAP builds. Several installs of one bundle ID use the
+  highest release, and `doctor` says so.
+- `config_dir` and `defer_while_running` are local behaviour, not object bytes, so they are not in the policy digest;
+  the logical paths are (they are the files' paths).
+
 ## Changing a policy
 
 A preset's **policy** is what decides which bytes an object holds — its files, formats, `noise` and `excluded`

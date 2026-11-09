@@ -15,11 +15,41 @@ question and does no caching, and building it touches nothing (``AGENTS.md`` §2
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 # `mdfind` can be slow when Spotlight is rebuilding its index; a bounded wait keeps a sync from
 # hanging, and a timeout is reported as "undeterminable", which falls back to the directory check.
 MDFIND_TIMEOUT_SECONDS = 5.0
+
+
+_BUNDLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]*")
+
+
+def find_app_paths(bundle_id: str, *, timeout_seconds: float = MDFIND_TIMEOUT_SECONDS) -> tuple[str, ...] | None:
+    """The paths of the app bundles Spotlight knows under `bundle_id`, or `None` when the query cannot answer.
+
+    Every failure — no `mdfind` (a non-Mac, a stripped system), a nonzero exit, a timeout, or a bundle ID that
+    is not the plain dotted shape — is `None`, never an empty tuple: "cannot ask" and "not installed" are different
+    answers, and the callers treat them differently. The ID comes from the local catalog, and the shape check keeps
+    the query text from being anything else.
+    """
+    if _BUNDLE_ID.fullmatch(bundle_id) is None:
+        return None
+    query = f"kMDItemCFBundleIdentifier == '{bundle_id}'"
+    try:
+        result = subprocess.run(
+            ["mdfind", query],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return tuple(line for line in result.stdout.splitlines() if line.strip())
 
 
 class MdfindAppDetector:
@@ -33,24 +63,11 @@ class MdfindAppDetector:
         """True/False when Spotlight answers, `None` when the query cannot be made to answer.
 
         `mdfind` prints one path per matching bundle, so a non-empty stdout means installed. Every
-        failure — no `mdfind` (a non-Mac, a stripped system), a nonzero exit, or a timeout — is
-        `None`, never `False`: the caller then falls back to the directory heuristic rather than
-        deferring the record on a guess.
+        failure is `None`, never `False`: the caller then falls back to the directory heuristic rather
+        than deferring the record on a guess.
         """
-        query = f"kMDItemCFBundleIdentifier == '{bundle_id}'"
-        try:
-            result = subprocess.run(
-                ["mdfind", query],
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
-        return bool(result.stdout.strip())
+        found = find_app_paths(bundle_id, timeout_seconds=self._timeout)
+        return None if found is None else bool(found)
 
 
-__all__ = ["MDFIND_TIMEOUT_SECONDS", "MdfindAppDetector"]
+__all__ = ["MDFIND_TIMEOUT_SECONDS", "MdfindAppDetector", "find_app_paths"]

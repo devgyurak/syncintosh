@@ -371,7 +371,8 @@ def daemon_uninstall() -> None:
 def doctor() -> None:
     """Check that this machine's install can actually sync. Exits 1 when a check fails."""
     from syncintosh.presets import BuiltinCatalog, vscode
-    from syncintosh.services.profile_paths import open_live_paths, profile_summary
+    from syncintosh.services.profile_paths import config_dir_summary, open_live_paths, profile_summary
+    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.daemon import entry_point
     from syncintosh.system.deny_list import SystemDenyList
@@ -387,7 +388,10 @@ def doctor() -> None:
         transport = GitCLITransport(paths.repo_dir)
         daemon = _launchd_daemon(paths.home)
         index = SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles)
-        summary = profile_summary(config, open_live_paths(config, BuiltinCatalog.default(), index))
+        live_paths = open_live_paths(config, BuiltinCatalog.default(), index, ProductInfoConfigDir())
+        summaries = tuple(
+            row for row in (profile_summary(config, live_paths), config_dir_summary(config, live_paths)) if row
+        )
         report = doctor_service(
             transport=transport,
             store=_key_store(config.remote),
@@ -399,7 +403,7 @@ def doctor() -> None:
             plist_entry_point=daemon.recorded_entry_point(),
             expected_entry_point=entry_point(),
             job_loaded=daemon.is_loaded(),
-            extra=() if summary is None else (summary,),
+            extra=summaries,
         )
     except DomainError as exc:
         _fail(exc)
@@ -419,6 +423,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     """
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.live_files import SystemLiveFiles
@@ -444,6 +449,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             adapters=_adapters(),
             validators=validators(),
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
+            config_dirs=ProductInfoConfigDir(),
         )
     except DomainError as exc:
         _fail(exc)
@@ -881,6 +887,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
     from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.ledger import JsonLedgerStore
@@ -890,6 +897,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.system.rotation_marker import FileRotationMarker
+    from syncintosh.system.running_apps import LsappinfoRunningApps
     from syncintosh.system.scan_allow import load_scan_allow, when_tag_for
     from syncintosh.system.secret_scan import PatternSecretScanner
     from syncintosh.vcs.git import GitCLITransport
@@ -924,6 +932,10 @@ def _sync_ports(config, paths) -> dict:
         "lock": FileLock(paths.lock_file),
         "deny": SystemDenyList(),
         "apps": MdfindAppDetector(),
+        # Whether a preset's app is open right now: a file of a preset that defers while running waits for it to quit.
+        "running": LsappinfoRunningApps(),
+        # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
+        "config_dirs": ProductInfoConfigDir(),
         # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
         "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         "source": SecureFileIdSource(),
@@ -967,7 +979,9 @@ def watch(
 
     # Re-read after every sync: a profile created in the app (or one the other Mac sent) adds files to
     # watch, and the app's own profile list is followed too.
-    current_targets = functools.partial(watch_targets, config, ports["catalog"], ports["profiles"])
+    current_targets = functools.partial(
+        watch_targets, config, ports["catalog"], ports["profiles"], ports["config_dirs"]
+    )
 
     try:
         targets = current_targets()

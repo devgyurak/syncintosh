@@ -24,6 +24,7 @@ WhenTag = Callable[[str], str]
 if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
     # runtime import here would close the cycle (``AGENTS.md`` §4).
+    from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
     from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
     from syncintosh.core.profiles import ProfileMap, ProfileSpec
@@ -641,6 +642,39 @@ class ProfileIndex(Protocol):
         not a profile that was deleted. A single malformed entry is skipped and reported in the map's
         `problems`, not raised.
         """
+        ...
+
+
+@runtime_checkable
+class AppConfigDir(Protocol):
+    """This machine's installed app, asked which release folder its settings live in.
+
+    The folder is named after the release (`DataGrip2026.2`), and the only trustworthy source is the installed app's
+    own metadata: the highest folder on disk may belong to a release that was uninstalled, and syncing into it would
+    write settings the app never reads. The implementation reads that metadata in memory and never writes anything;
+    `core` and `services` see a `ConfigDirMap` (issue #54).
+    """
+
+    def read(self, spec: ConfigDirSpec) -> ConfigDirMap:
+        """The config directory this machine's app uses, or an unresolved map saying why not.
+
+        **Never raises.** An app that is absent, metadata that is missing or broken, or a name that does not fit the
+        layout all return `ConfigDirMap.unresolved(reason)`: the caller defers and **keeps its records**, since a
+        directory it cannot name is not one that was deleted. Read once per cycle, like `ProfileIndex`.
+        """
+        ...
+
+
+@runtime_checkable
+class RunningApps(Protocol):
+    """Whether a macOS app is running right now, by bundle ID.
+
+    Three-valued like `AppDetector`: `None` means the query could not be made to answer, and a caller that must not
+    write under a running app treats it the same as `True`, because guessing `False` would write under an open IDE.
+    """
+
+    def running(self, bundle_id: str) -> bool | None:
+        """True/False when it is known whether the app is running, `None` when it cannot be determined."""
         ...
 
 

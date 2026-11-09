@@ -287,6 +287,20 @@ deferral and is never read or written under its logical text. When the list cann
 kept** and the ledger baseline is left as it was: a live file that cannot be seen is not a deletion.
 The real directory is re-checked (symlink, denied, outside `$HOME`) immediately before each write.
 
+### Versioned config directories (logical paths)
+
+A product whose settings folder carries the release (`DataGrip2026.2`) is recorded by a **logical** path,
+`Library/Application Support/JetBrains/@<Prefix>/<relative>`, so Macs on different releases share one record. The
+schema is unchanged; a build that predates this owns no such path and refuses it (fail closed), and a catalog never
+treats a path inside a real release folder as a record path. The real folder is the one the **installed app** names
+(`Contents/Resources/product-info.json`, `dataDirectoryName`, validated against `^<Prefix>\d{4}\.\d+$` and the vendor
+the preset names) — the highest folder on disk is never used. It goes through the same resolver as profile paths
+(`services/profile_paths.py`): a folder that does not resolve, or does not exist, **defers** and is never created (the
+app's first run imports settings from an older release, and a folder made here would stop that); the records are kept
+and the ledger baseline is left as it was. A glob inside the directory is listed at the resolved real directory. The
+deny-list sees the real path before every read and write (`system/deny_list.py` carries the wildcard entries for the
+credential files of a release folder).
+
 ### Directory globs in the local allowlist
 
 The local allowlist is the config's `items` (exact paths) plus its `globs` (directory patterns). A
@@ -308,6 +322,10 @@ a `~/.zshrc → ~/dotfiles/zshrc` setup. The link is surfaced to the user, who r
 same conservative posture as a first-sight file.
 
 ## Open
+
+- A versioned config directory moved with `idea.config.path` (or the `*_PROPERTIES` override) is **not supported**: the
+  folder is the one the app's own metadata names, as with `ZDOTDIR` for zsh. An EAP build (a different folder name) is
+  not supported either.
 
 - Whether `schema` should be a per-record field as well as a manifest-wide one. Manifest-wide
   is enough today and simpler; per-record only helps if two record shapes ever coexist.
