@@ -26,6 +26,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `rubymine` | `Library/Application Support/JetBrains/@RubyMine/` (logical; the real folder is `RubyMine<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.rubymine` | <https://www.jetbrains.com/ruby/download/> | `rubymine` |
 | `rustrover` | `Library/Application Support/JetBrains/@RustRover/` (logical; the real folder is `RustRover<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.rustrover` | <https://www.jetbrains.com/rust/download/> | `rustrover` |
 | `webstorm` | `Library/Application Support/JetBrains/@WebStorm/` (logical; the real folder is `WebStorm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.WebStorm` | <https://www.jetbrains.com/webstorm/download/> | `webstorm` |
+| `orca` | `Library/Application Support/orca/profiles/local-default/@profile-state/settings.json` (virtual: the `settings` row of `profile-state.db`, shown as an indented JSON file; `local-default` only) | `jsonc` (the row's JSON) | `notifications.customSoundPath`; every key outside the allowlist stays local | an exact allowlist of top-level preference keys (`presets/orca.py` `SYNCED`); each credential-shaped key is also named as excluded: `opencodeSessionCookie` · `opencodeGoApiKey` · `codexManagedAccounts` · `claudeManagedAccounts` · `agentDefaultEnv` · `agentCmdOverrides` · `httpProxyUrl` · `mobilePairingCustomAddress(es)` · … | `com.stablyai.orca` | <https://github.com/stablyai/orca/releases> | — (Homebrew's `orca` is another app) |
 
 ### `docker` notes
 
@@ -324,6 +325,62 @@ help page confirms `~/Library/Application Support/JetBrains/RubyMine<ver>`.
   (`IdeaIC`, `PyCharmCE`; their casks are deprecated), Android Studio (Google's vendor folder, not `JetBrains`).
 - **Unverified.** No app of these products was installed on the authoring machine, so a real folder of each was not
   inspected; the format evidence is DataGrip's, and the shared file set is source-verified for every product.
+
+### `orca` notes
+
+Issue #55 (Step 0 and the decision: <https://github.com/devgyurak/syncintosh/issues/55#issuecomment-6734812135>; the
+issue body still describes the old `orca-data.json` layout and is stale). Orca 1.4.219 (Stably AI, Electron),
+inspected 2026-11-09 with `scripts/inspect_config.py --sqlite-document` (read-only, every string masked); no value was
+copied.
+
+- **The source is a database row, not a file.** Since 2026-10-03 the authority is
+  `profiles/<id>/profile-state.db` under Orca's data folder (SQLite, WAL, `user_version` 3). `settings` is the row
+  `domain = 'settings'` of `profile_state_documents`, a compact JSON payload with a `content_hash`. `orca-data.json`
+  beside it is only a compatibility export: Orca records the hash of the JSON it last accepted, and an outside edit
+  sends the user to its recovery flow. **It is never read, written or collected** (and is denied in code).
+- **A virtual path.** The row reaches `services` as the file `…/profiles/local-default/@profile-state/settings.json`
+  (`core/documents.py`, `system/document_files.py`); `@` marks it virtual, so no real file collides with it. It is
+  read as indented JSON, so a diff or a resolve does not meet a nine-kilobyte line, and written back compact with the
+  key order kept. A write equal to the current value is not made.
+- **The write follows Orca's own protocol** (`system/sqlite_documents.py`): one transaction that re-checks the profile
+  revision the row was read at, updates the row (`revision + 1`, `updated_at`, `content_hash = sha256(payload)`) and
+  the meta `revision`, and nothing else; it never creates the database. A `user_version`, `profile_id`,
+  `domain_version` or hash it does not recognise is refused with a fixed message, and the cycle stops (a refusal is
+  not a deferral).
+- **An allowlist.** 208 top-level keys were seen on the inspected machine. `SYNCED` names the ones that travel
+  (appearance, editor, terminal, diff, notification and default-agent preferences); `LOCAL` records the reason for each
+  other key seen (paths, migration markers, dismissed prompts, feature flags, command lines, permissions, machine
+  identity); a test pins that every observed key is one of synced, local or excluded. A key Orca adds later is **local
+  until the preset is updated**: that is why this is not a deny-list. The credential-shaped keys are named as
+  `EXCLUDED` as well, and moving one into `SYNCED` is refused at construction.
+- **Not verified.** Which settings Orca seals at rest with the OS secret store (the bundle's secret-store modules cover
+  credential *files*; no list of sealed keys inside the `settings` row was found). The allowlist holds only plain
+  preference values for that reason. The issue's noise keys (`windowBounds`, `uiZoomLevel`, sidebar widths) are **not
+  in the `settings` row** on this version: they live in the `ui` domain, which is never read.
+- **Keybindings** are not in `settings`; the bundle names a user file `~/.orca/keybindings.json` (absent on the
+  inspected machine). Not tracked: a follow-up once a real file can be inspected.
+- **Apply waits for Orca and `orcad`.** A running Orca keeps the revision it last saw, so a write from outside stops
+  its saving ("Saving has stopped. Restart Orca"). `defer_while_running` holds the apply while the app runs, and
+  `system/orca_daemon.py` counts `orcad` (`Orca Helper … daemon-entry.js`, pid in `daemon/daemon-v<N>.pid`, started
+  from inside `Orca.app`) as the app: a live pid whose executable is inside `Orca.app` means running, an unreadable pid
+  file or path means "cannot tell", which also defers. Collect still runs; it only reads. Not installed also defers,
+  with the download page. Whether `orcad` opens the database after the app quits was **not** checked (Orca was
+  running), so the check stays on.
+- **No watch.** Orca writes `ui` and `workspaceSession` every few seconds, so watching the database would run a cycle
+  without end. The virtual path is left out of the watch (`services/profile_paths.py`), and the row is collected by the
+  periodic sync (`syncintosh daemon install` runs `watch --poll`) or a manual `sync`.
+- **Denied in code** (`system/deny_list.py`), in the data root and in every profile folder: the secret-protection
+  file, the E2EE key pair, the agent-session authority key, the browser `Cookies*`, `codex-pane-accounts.json`,
+  `orca-devices.json`, `browser-host-client-identity.json`, `orca-github-cache.json`, `profile-state.db*` (with
+  `-wal`/`-shm` and backups), `orca-data.json*` (the export is a full copy of the state, credentials included) and
+  `daemon/`, and the Electron stores `Network/`, `Local Storage/`, `Session Storage/` and `IndexedDB/` (denied
+  defensively: cookies live in `Network/Cookies` on a modern Electron). The virtual `@profile-state/settings.json` is
+  not matched.
+- **One profile.** `local-default` is a constant in Orca's code (the default "Personal" profile); any other profile has
+  another id and is not supported (a follow-up).
+- **No cask.** Homebrew's `orca` is plotly's unrelated app. The download page is the GitHub release feed the bundle's
+  own `app-update.yml` names (`stablyai/orca`); the vendor's site (`orca.dev` in the repository's metadata,
+  `www.onorca.dev` in the bundle's help links) was not confirmed as the download page.
 
 ## Versioned config directories
 

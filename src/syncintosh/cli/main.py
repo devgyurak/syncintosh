@@ -888,6 +888,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
     from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.presets.orca import BUNDLE_ID as ORCA_BUNDLE_ID
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.deny_list import SystemDenyList
@@ -895,6 +896,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
+    from syncintosh.system.orca_daemon import OrcaDaemonRunningApps
     from syncintosh.system.pending import DirectoryPendingStore
     from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.system.repo_files import FileRepo
@@ -936,7 +938,8 @@ def _sync_ports(config, paths) -> dict:
         "deny": SystemDenyList(),
         "apps": MdfindAppDetector(),
         # Whether a preset's app is open right now: a file of a preset that defers while running waits for it to quit.
-        "running": LsappinfoRunningApps(),
+        # Orca's terminal host outlives its window, so for Orca that process counts as the app running too.
+        "running": OrcaDaemonRunningApps(LsappinfoRunningApps(), home=str(paths.home), bundle_id=ORCA_BUNDLE_ID),
         # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
         "config_dirs": ProductInfoConfigDir(home=paths.home),
         # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.

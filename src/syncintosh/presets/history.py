@@ -65,5 +65,6 @@ POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "f4073ceec5c7017e437a01232fba22d3e08fe0e61aa0ea28421dde74cd945399",
             "8d17d14ba7925843d4fbb57905ef95b53c4f1a739e0619b01c47c2db61d620fb",
         ),
+        "orca": ("d2d95e99f593407888066a2c39563d61738e5362614b2a65795fee444ce5a732",),
     }
 )

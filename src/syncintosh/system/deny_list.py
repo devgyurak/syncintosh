@@ -26,6 +26,34 @@ from pathlib import Path
 from syncintosh.core.paths import collision_key
 from syncintosh.system.paths import MachinePaths
 
+# Orca keeps credentials, a key pair, session cookies and a full copy of its state next to the one settings row a
+# preset syncs. The row is reached through the virtual `@profile-state/settings.json` path, which none of these names
+# match, so the preset works while a user-added item or a glob cannot pull in the files themselves (``AGENTS.md``
+# §3.4). Each name is denied both in the data root and in a profile folder (`*`: whichever profile it is), because
+# Orca keeps some of them at one level and some at the other. `*` inside a name covers `-wal`, `-shm`, `.bak.N` and
+# the `.sqlite-export.<revision>.json` suffixes: the export is a whole copy of the state, credentials included.
+_ORCA_ROOT = "Library/Application Support/orca"
+ORCA_DENIED_NAMES: tuple[str, ...] = (
+    "orca-secret-protection.json",
+    "orca-e2ee-keypair.json",
+    "agent-session-authority.key",
+    "Cookies*",
+    "codex-pane-accounts.json",
+    "orca-devices.json",
+    "browser-host-client-identity.json",
+    "orca-github-cache.json",
+    "profile-state.db*",
+    "orca-data.json*",
+)
+# Directories, denied whole. `daemon/` holds the terminal host's socket, token and pid file (a token that authenticates
+# to a running terminal host); the rest are the Electron stores a modern Electron keeps cookies and web storage in
+# (`Network/Cookies`, `Local Storage`, ...), denied defensively although no preset tracks them.
+ORCA_DENIED_DIRECTORIES: tuple[str, ...] = ("daemon", "Network", "Local Storage", "Session Storage", "IndexedDB")
+ORCA_DENIED_PATHS: tuple[str, ...] = (
+    *(f"{_ORCA_ROOT}/{name}" for name in (*ORCA_DENIED_NAMES, *ORCA_DENIED_DIRECTORIES)),
+    *(f"{_ORCA_ROOT}/profiles/*/{name}" for name in (*ORCA_DENIED_NAMES, *ORCA_DENIED_DIRECTORIES)),
+)
+
 # Relative to `$HOME`. A directory entry denies everything beneath it. An element may be `*` (any one element) or a
 # name pattern; a wildcard never spans a `/`, so there is no recursion and `JetBrains/*/ssl` is the `ssl` of one
 # release folder, not of every descendant.
@@ -117,6 +145,7 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/options/mac/wslRecentConnections*.xml",
     "Library/Application Support/JetBrains/*/options/mac/recentConnections.xml",
     "Library/Application Support/JetBrains/*/options/mac/trusted-paths.xml",
+    *ORCA_DENIED_PATHS,
 )
 
 

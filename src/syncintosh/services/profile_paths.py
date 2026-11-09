@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 
 from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
 from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
+from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import AppConfigDir, PresetCatalog, ProfileIndex
 from syncintosh.core.presets import PresetGlob
 from syncintosh.core.profiles import ProfileMap, ProfilePath, ProfileSpec
@@ -344,7 +345,25 @@ def watch_targets(
     is picked up. A logical config-directory path is watched where it really is.
     """
     paths = open_live_paths(config, catalog, index, config_dirs)
-    return WatchFilter.create(config_dir_targets(config, paths), profile_targets(config, paths))
+    real = config_dir_targets(_without_documents(config, catalog), paths)
+    return WatchFilter.create(real, profile_targets(config, paths))
+
+
+def _without_documents(config: SyncConfig, catalog: PresetCatalog) -> SyncConfig:
+    """`config` without the items that are a database row's virtual path.
+
+    A row is not a file an OS event names, and the database it lives in is rewritten by its app every few seconds for
+    state this tool never carries (Orca's `ui` and `workspaceSession`), so watching it would start a cycle without
+    end. Such an item is collected by the periodic and manual sync instead (``docs/design/presets.md``).
+    """
+
+    def virtual(path: str) -> bool:
+        owner = catalog.preset_for(path)
+        return owner is not None and any(
+            collision_key(source.view) == collision_key(path) for source in owner.documents
+        )
+
+    return replace(config, items=tuple(item for item in config.items if not virtual(item.path)))
 
 
 def describe_with(catalog: PresetCatalog, path: str) -> str:

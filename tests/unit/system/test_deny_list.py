@@ -367,3 +367,105 @@ def test_a_sensitive_options_file_is_also_denied_under_the_per_os_folder(tmp_pat
 
     # when & then
     assert is_denied(home / JB / "RustRover2026.3" / "options" / "mac" / name, home) is True
+
+
+# ------------------------------------------------------------------------------------------ Orca's data folder
+
+ORCA_ROOT = "Library/Application Support/orca"
+ORCA_VIEW = f"{ORCA_ROOT}/profiles/local-default/@profile-state/settings.json"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "orca-secret-protection.json",
+        "orca-e2ee-keypair.json",
+        "agent-session-authority.key",
+        "Cookies",
+        "Cookies-journal",
+        "codex-pane-accounts.json",
+        "orca-devices.json",
+        "browser-host-client-identity.json",
+        "orca-github-cache.json",
+        "profile-state.db",
+        "profile-state.db-wal",
+        "profile-state.db-shm",
+        "orca-data.json",
+        "orca-data.json.bak.0",
+        "orca-data.json.sqlite-export.5011.json",
+    ],
+)
+@pytest.mark.parametrize(
+    "folder", [ORCA_ROOT, f"{ORCA_ROOT}/profiles/local-default", f"{ORCA_ROOT}/profiles/another-id"]
+)
+def test_an_orca_secret_or_state_file_is_denied_in_the_data_root_and_in_every_profile(
+    tmp_path, folder: str, name: str
+) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / folder / name, home) is True
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "daemon/daemon-v38.sock",
+        "daemon/daemon-v38.token",
+        "daemon/daemon-v38.pid",
+        "Network/Cookies",
+        "Network/Trust Tokens",
+        "Local Storage/leveldb/000003.log",
+        "Session Storage/000003.log",
+        "IndexedDB/file__0.indexeddb.leveldb/CURRENT",
+    ],
+)
+@pytest.mark.parametrize(
+    "folder", [ORCA_ROOT, f"{ORCA_ROOT}/profiles/local-default", f"{ORCA_ROOT}/profiles/another-id"]
+)
+def test_everything_in_an_orca_daemon_or_electron_store_folder_is_denied_in_the_root_and_every_profile(
+    tmp_path, folder: str, relative: str
+) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / folder / relative, home) is True
+
+
+def test_the_virtual_settings_path_is_not_denied(tmp_path) -> None:
+    # given — the one path the preset syncs; no file is called `@profile-state`
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / ORCA_VIEW, home) is False
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{ORCA_ROOT}/profiles/local-default/@profile-state",
+        f"{ORCA_ROOT}/orca-profile-index.json",
+        f"{ORCA_ROOT}/Preferences",
+    ],
+)
+def test_a_neighbouring_orca_path_is_not_a_false_positive(tmp_path, relative: str) -> None:
+    # given
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / relative, home) is False
+
+
+def test_a_symlink_to_orcas_state_database_is_denied(tmp_path) -> None:
+    # given
+    home = tmp_path / "home"
+    target = home / ORCA_ROOT / "profiles" / "local-default" / "profile-state.db"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+    (home / "notes").mkdir()
+    (home / "notes" / "link").symlink_to(target)
+
+    # when & then
+    assert is_denied(home / "notes" / "link", home) is True
