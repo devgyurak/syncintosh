@@ -126,6 +126,70 @@ def test_a_view_that_is_not_one_json_object_is_refused_without_quoting_it(bad: s
     assert "{" not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # JS writes an unpaired surrogate as an escape; it must come back as the same escape, lowercase.
+        ('{"t":"\\ud83d"}', '{"t":"\\ud83d"}'),
+        ('{"t":"\\ude00"}', '{"t":"\\ude00"}'),
+        ('{"t":"a\\ud83db"}', '{"t":"a\\ud83db"}'),
+        # A valid pair is one character, which JS writes raw.
+        ('{"t":"\\ud83d\\ude00"}', '{"t":"😀"}'),
+        # Low then high is two lone ones, not a pair.
+        ('{"t":"\\ude00\\ud83d"}', '{"t":"\\ude00\\ud83d"}'),
+        # A pair followed by a lone one.
+        ('{"t":"\\ud83d\\ude00\\ude00"}', '{"t":"😀\\ude00"}'),
+        # In a key the user keeps local, and in a nested value.
+        ('{"k\\ud83d":1,"n":{"v":["\\ude00"]}}', '{"k\\ud83d":1,"n":{"v":["\\ude00"]}}'),
+        ('{"t":"é"}', '{"t":"é"}'),
+    ],
+)
+def test_a_lone_surrogate_round_trips_through_the_view_as_the_apps_own_escape(payload: str, expected: str) -> None:
+    # when
+    view = render_view(payload)
+    restored = compact_payload(view)
+
+    # then — the view is plain UTF-8, the row text is what JS writes, and the stored hash is of its UTF-8 bytes
+    assert (restored, content_hash(restored), view.decode("utf-8") != "") == (
+        expected,
+        hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+        True,
+    )
+
+
+@pytest.mark.parametrize("payload", ['{"t":"\\ud83d"}', '{"k\\ude00":"\\ud83d"}'])
+def test_a_lone_surrogate_is_never_a_raw_unicode_error(payload: str) -> None:
+    # when
+    results = (render_view(payload), compact_payload(payload.encode()), same_value(payload, payload))
+
+    # then
+    assert results[2] is True
+
+
+def test_what_utf8_cannot_encode_is_a_document_refusal_not_a_raw_error() -> None:
+    # when & then — the hash is the one entry point that sees a decoded string from outside
+    with pytest.raises(DocumentRefused):
+        content_hash("\ud83d")
+
+
+surrogate_fragments = st.lists(
+    st.sampled_from(["a", "é", "😀", "\\ud83d", "\\ude00", "\\ud83d\\ude00", "\\\\", " "]), max_size=8
+).map("".join)
+
+
+@given(surrogate_fragments, surrogate_fragments)
+def test_property_text_with_surrogates_round_trips_and_stays_encodable(value: str, key: str) -> None:
+    # given — text the way JSON spells it, so lone and paired surrogates both occur
+    payload = f'{{"{key}":"{value}"}}'
+
+    # when
+    once = compact_payload(render_view(payload))
+    twice = compact_payload(render_view(once))
+
+    # then
+    assert (once, content_hash(once) == hashlib.sha256(once.encode("utf-8")).hexdigest()) == (twice, True)
+
+
 def test_a_view_that_is_not_utf8_is_refused() -> None:
     # when & then
     with pytest.raises(DocumentRefused):

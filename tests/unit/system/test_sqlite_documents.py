@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource
+from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource, compact_payload, render_view
 from syncintosh.core.errors import DocumentRefused, DocumentStale
 from syncintosh.system.sqlite_documents import SqliteDocumentStore
 
@@ -374,6 +374,28 @@ def test_a_write_keeps_the_files_mode(tmp_path, profile_state_db) -> None:
 
     # then
     assert database.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("escape", ["\\ud83d", "\\ude00", "a\\ud83d\\ude00b"])
+def test_a_payload_with_a_surrogate_escape_reads_writes_and_keeps_a_valid_hash(
+    tmp_path, profile_state_db, escape: str
+) -> None:
+    # given — the app's own JSON, with the escape JS writes for an unpaired surrogate
+    payload = f'{{"t":"{escape}"}}'
+    database = profile_state_db(_database(tmp_path), settings=payload)
+    store = _store(tmp_path)
+    read = store.read(SOURCE)
+
+    # when — the row is read, viewed, compacted and written back as a different value
+    assert read is not None
+    new = compact_payload(render_view(read.payload).replace(b'"t"', b'"u"'))
+    store.write(SOURCE, new, expected_revision=read.revision)
+
+    # then
+    ((stored, stored_hash),) = _query(
+        database, "SELECT payload, content_hash FROM profile_state_documents WHERE domain='settings'"
+    )
+    assert (stored, stored_hash) == (new, hashlib.sha256(new.encode("utf-8")).hexdigest())
 
 
 def test_the_constructor_does_no_io(tmp_path) -> None:
