@@ -44,6 +44,9 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from syncintosh.adapters.edits import EDIT_OVERLAP_REFUSED
+from syncintosh.adapters.edits import apply_edits as _apply_edits
+from syncintosh.adapters.edits import settle as _settle
 from syncintosh.core.errors import ContentParseError, RenderRefused
 from syncintosh.core.keyed_array import ArrayRule, element_group, element_identity
 from syncintosh.core.ports import TextEdit
@@ -1406,10 +1409,6 @@ CHANGED_WITH_NOTE_REFUSED = (
     "this binding changed and has a comment inside it, so it cannot be written without losing that comment"
 )
 
-# Two edits to one file overlap (an array element or an object member), so one of them would be dropped; the text names
-# only the cause.
-EDIT_OVERLAP_REFUSED = "two edits to this file overlap, so it cannot be written without losing one of them"
-
 # A comma alone on its line stays behind when its member's line goes, so the object is rewritten whole, and a comment
 # inside it would be lost. The text names the cause and the way out, never a value.
 LONE_COMMA_REFUSED = (
@@ -1578,37 +1577,6 @@ def _array_unit(text: str, node: _ArrayNode, indent: str) -> str | None:
 
 def _has_trailing_comma(comments: _Comments, node: _ObjectNode) -> bool:
     return bool(node.members) and _comma_after(comments, node.members[-1]) is not None
-
-
-def _settle(edits: list[TextEdit]) -> list[TextEdit]:
-    """The edits in offset order, without the ones an earlier edit already covers.
-
-    An edit that starts inside an earlier one is skipped only when it takes nothing with it: it removes text the earlier
-    edit already removed. One that carries text, or reaches past the earlier edit, would be lost without a trace, so it
-    refuses the render instead.
-    """
-    settled: list[TextEdit] = []
-    cursor = 0
-    for edit in sorted(edits, key=lambda item: item.start):
-        if edit.start < cursor:
-            if edit.text or edit.end > cursor:
-                raise RenderRefused(EDIT_OVERLAP_REFUSED)
-            continue
-        settled.append(edit)
-        cursor = edit.end
-    return settled
-
-
-def _apply_edits(text: str, edits: list[TextEdit]) -> str:
-    """Apply the edits in offset order, as :func:`_settle` leaves them."""
-    pieces: list[str] = []
-    cursor = 0
-    for edit in _settle(edits):
-        pieces.append(text[cursor : edit.start])
-        pieces.append(edit.text)
-        cursor = edit.end
-    pieces.append(text[cursor:])
-    return "".join(pieces)
 
 
 __all__ = [
