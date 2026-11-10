@@ -234,7 +234,8 @@ class LivePaths:
             return Unresolved(entry.reason)
         if entry.memory_relocated and spec.holds_memory(parsed.relative):
             return Unresolved(_AGENT_MEMORY_MOVED)
-        directory = f"{spec.home}/{entry.directory}"
+        # A flat layout has no per-project folder: the record's own date tree sits directly under `home`.
+        directory = spec.home if spec.flat else f"{spec.home}/{entry.directory}"
         return Located(f"{directory}/{parsed.relative}", agent_directory=directory, agent_root=entry.root)
 
     def describe(self, path: str) -> str:

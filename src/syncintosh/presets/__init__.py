@@ -21,6 +21,7 @@ from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
 from syncintosh.presets.claude_memory import CLAUDE_MEMORY
 from syncintosh.presets.claude_sessions import CLAUDE_SESSIONS
+from syncintosh.presets.codex_sessions import CODEX_SESSIONS
 from syncintosh.presets.datagrip import DATAGRIP
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.ghostty import GHOSTTY
@@ -42,6 +43,7 @@ BUILTIN_PRESETS: tuple[Preset, ...] = (
     ORCA,
     CLAUDE_MEMORY,
     CLAUDE_SESSIONS,
+    CODEX_SESSIONS,
     GHOSTTY,
 )
 

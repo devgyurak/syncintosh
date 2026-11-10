@@ -42,7 +42,7 @@ AGENT_PROJECT_MARK: Final = "@"
 AGENT_PROJECT_TEMPLATE: Final = "@"
 
 # Which agent's directory naming a layout uses. A `Literal`, not an `Enum`: it is compared, never serialized.
-AgentKind = Literal["claude"]
+AgentKind = Literal["claude", "codex"]
 
 # The CLI cuts a longer name to this many characters and appends a hash of the path (`claude_project_dir_name`).
 _NAME_LIMIT: Final = 200
@@ -144,7 +144,9 @@ class AgentProjectSpec:
 
     * `home` — the directory that holds one folder per project (`.claude/projects`). The logical path and the real
       path share this prefix.
-    * `kind` — which agent's naming turns a project root into the real folder (`claude_project_dir_name`).
+    * `kind` — which agent's layout this is. Claude Code keeps a project's data in a folder named after the project's
+      real path (`claude_project_dir_name`); Codex keeps every session in one date tree and names the project only
+      inside the session's first record, so its layout is `flat`: the real directory is `home` itself.
     * `memory_prefix` — the part of a project's folder the agent lets the person relocate (`autoMemoryDirectory`),
       or `None`. A file under it is skipped for a project that relocated it (decision D3).
     """
@@ -161,7 +163,7 @@ class AgentProjectSpec:
             validated_prefix = None if memory_prefix is None else validate_path(memory_prefix.rstrip("/")) + "/"
         except ManifestCorrupt as exc:
             raise ConfigError(f"invalid agent project layout: {exc}") from exc
-        if kind != "claude":
+        if kind not in ("claude", "codex"):
             raise ConfigError(f"unknown agent project kind: {kind!r}")
         return cls(home=validated_home, kind=kind, memory_prefix=validated_prefix)
 
@@ -205,6 +207,11 @@ class AgentProjectSpec:
         """The part of a preset's template path below the project's element, or `None` when it is not one."""
         prefix = f"{self.home}/{AGENT_PROJECT_TEMPLATE}/"
         return template[len(prefix) :] if template.startswith(prefix) and len(template) > len(prefix) else None
+
+    @property
+    def flat(self) -> bool:
+        """True when the agent has no per-project folder: a project's files sit in `home`'s own tree."""
+        return self.kind == "codex"
 
     def holds_memory(self, relative: str) -> bool:
         """True when `relative` lies in the part the agent lets the person relocate."""
@@ -289,14 +296,17 @@ class AgentProjectEntry:
     directory: str | None
     reason: str = ""
     memory_relocated: bool = False
+    real_root: str = ""
 
     @classmethod
-    def resolved(cls, *, name: str, root: str, directory: str, memory_relocated: bool = False) -> AgentProjectEntry:
-        """The entry for a project whose real folder is `directory`."""
+    def resolved(
+        cls, *, name: str, root: str, directory: str, memory_relocated: bool = False, real_root: str = ""
+    ) -> AgentProjectEntry:
+        """The entry for a project whose real folder is `directory`; `real_root` is the project's resolved path."""
         if not isinstance(directory, str) or directory == "" or "/" in directory or directory in (".", ".."):
             # One element by construction, so a name derived from a path can only point inside `home`.
             raise ConfigError(f"a project directory must be one path element, got {directory!r}")
-        return cls(name=name, root=root, directory=directory, memory_relocated=memory_relocated)
+        return cls(name=name, root=root, directory=directory, memory_relocated=memory_relocated, real_root=real_root)
 
     @classmethod
     def unresolved(cls, *, name: str, root: str, reason: str) -> AgentProjectEntry:

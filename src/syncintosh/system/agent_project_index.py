@@ -41,7 +41,9 @@ OVERRIDE_VARIABLES: dict[str, tuple[str, ...]] = {
         # Both move where memory is kept, like `autoMemoryDirectory` does.
         "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
         "CLAUDE_CODE_REMOTE_MEMORY_DIR",
-    )
+    ),
+    # `CODEX_HOME` moves the whole `~/.codex` tree, so every path this tool derives from it would be wrong.
+    "codex": ("CODEX_HOME",),
 }
 
 # A settings file is a few KiB. A bound keeps a planted or runaway file from being read whole into memory.
@@ -70,17 +72,25 @@ class SystemAgentProjectIndex:
             return AgentProjectMap.create(
                 tuple(AgentProjectEntry.unresolved(name=each.name, root=each.path, reason=reason) for each in projects)
             )
-        user_moved = self._memory_relocated(_USER_SETTINGS)
-        return AgentProjectMap.create(tuple(self._entry(each, user_moved) for each in projects))
+        # Only Claude Code lets the memory directory be moved; Codex has no such setting to read.
+        user_moved = spec.kind == "claude" and self._memory_relocated(_USER_SETTINGS)
+        return AgentProjectMap.create(tuple(self._entry(each, spec, user_moved) for each in projects))
 
-    def _entry(self, project: AgentProject, user_moved: bool) -> AgentProjectEntry:
+    def _entry(self, project: AgentProject, spec: AgentProjectSpec, user_moved: bool) -> AgentProjectEntry:
         unsafe = self._unsafe(project.path)
         if unsafe is not None:
             return AgentProjectEntry.unresolved(name=project.name, root=project.path, reason=unsafe)
         real = os.path.realpath(Path(self._home) / project.path)
-        moved = user_moved or any(self._memory_relocated(f"{project.path}/{name}") for name in _PROJECT_SETTINGS)
+        moved = spec.kind == "claude" and (
+            user_moved or any(self._memory_relocated(f"{project.path}/{name}") for name in _PROJECT_SETTINGS)
+        )
+        # For a flat layout the directory is only the key that tells two projects apart; the files live in `home`.
         return AgentProjectEntry.resolved(
-            name=project.name, root=project.path, directory=claude_project_dir_name(real), memory_relocated=moved
+            name=project.name,
+            root=project.path,
+            directory=claude_project_dir_name(real),
+            memory_relocated=moved,
+            real_root=real,
         )
 
     def _unsafe(self, root: str) -> str | None:
