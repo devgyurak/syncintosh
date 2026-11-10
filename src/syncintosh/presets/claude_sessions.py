@@ -45,6 +45,12 @@ SESSION_FILES: tuple[str, ...] = (
     "{uuid}/subagents/agent-*.meta.json",
     "{uuid}/subagents/agent-*.forked-skill.json",
     "{uuid}/subagents/agent-*.forked-skill.marker.json",
+    # A workflow's sub-agents sit one level down, under a run id (UNVERIFIED: the run id's shape, and that these are the
+    # only file kinds there; the layout was read from the 2.1.308 binary, which names the `workflows` folder).
+    "{uuid}/subagents/workflows/*/agent-*.jsonl",
+    "{uuid}/subagents/workflows/*/agent-*.meta.json",
+    "{uuid}/subagents/workflows/*/agent-*.forked-skill.json",
+    "{uuid}/subagents/workflows/*/agent-*.forked-skill.marker.json",
     "{uuid}/tool-results/*",
 )
 
