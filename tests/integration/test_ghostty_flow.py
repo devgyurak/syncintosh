@@ -280,8 +280,12 @@ def test_a_merge_that_fails_validation_is_not_written_and_stays_a_conflict(tmp_p
     # when
     report = _run(b)
 
-    # then — the merge result is not applied: B's file is untouched and the cycle reports a conflict
-    assert (report.has_conflicts, _read(b, CONFIG)) == (True, broken)
+    # then — the merge result is not applied: B's file is untouched, and the conflict is the validator's, not a
+    # line clash (the two changes are far apart)
+    assert ([each.detail for each in report.conflicts], _read(b, CONFIG)) == (
+        ["the merged result would not pass its syntax check"],
+        broken,
+    )
 
 
 def test_a_config_ghostty_would_reject_is_refused_on_apply(tmp_path, memory_key_store) -> None:
@@ -348,3 +352,24 @@ def test_a_credential_on_an_env_line_is_stopped_by_the_scan(tmp_path, memory_key
 
     # then — nothing carrying the token reached an object
     assert [blob for blob in _decrypted_objects(a) if b"ghp_A1b2" in blob] == []
+
+
+HIDDEN_THEME_FILES = [
+    pytest.param(".DS_Store", b"\x00\x00\x00\x01Bud1\xff\xfe", id="finder-metadata"),
+    pytest.param(".fixture-dark.0123456789abcdef.syncintosh-check", b"background = #101010\n", id="killed-check-file"),
+]
+
+
+@pytest.mark.parametrize(("name", "data"), HIDDEN_THEME_FILES)
+def test_a_hidden_file_in_the_themes_folder_is_never_collected(tmp_path, memory_key_store, name, data) -> None:
+    # given — Finder (or a killed check) left a hidden file beside a real theme
+    a, _ = _pair(tmp_path, memory_key_store)
+    theme = THEMES.replace("*", "fixture-dark")
+    _write(a, theme, b"background = #101010\n")
+    _write(a, THEMES.replace("*", name), data)
+
+    # when
+    report = _run(a)
+
+    # then — only the theme is published; the hidden file is not a record, so it cannot reach another Mac
+    assert (report.created, report.refused) == ((theme,), ())

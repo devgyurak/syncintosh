@@ -79,13 +79,15 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   **repeat** (`keybind`, `font-family`) with its order meaningful, so the format is `text`: the line-level merge keeps
   every `keybind` line and its order, and a both-sides change to one line is a whole-file conflict.
 - **Load order.** `~/.config/ghostty/config`, then `config.ghostty` (the later file wins — verified with a temporary
-  `HOME`). The Application Support pair follows the same names; its order relative to the XDG pair could not be
-  reproduced (Ghostty reads the real home there, not `HOME`), so it is taken from the binary's own documentation.
-  Themes are `~/.config/ghostty/themes/*` only: Ghostty does not read a `themes` directory under Application Support.
+  `HOME`). Ghostty's own documentation says macOS reads the Application Support pair too; its order relative to
+  the XDG pair could **not** be verified (Ghostty uses the real home there, not `HOME`) and is not claimed. Which files
+  are tracked does not depend on it. Themes are `~/.config/ghostty/themes/*` only, without hidden files (Finder's
+  `.DS_Store` is not text): Ghostty does not read a `themes` directory under Application Support.
 - `XDG_CONFIG_HOME` is **not** honoured (the same stance as `ZDOTDIR` for `zsh`), and a file named by
-  `config-file = …` is **not** followed: a path this preset does not know is refused at collect and at apply.
+  `config-file = …` is **not** followed; to sync an include, add it as an entry of your own (see the machine-local note).
 - **Validator.** Every merge result and every write is checked with `<app>/Contents/MacOS/ghostty +validate-config`
-  (found by bundle ID through Spotlight, never `PATH`). Only the exit code is read — the checker's stderr echoes values
+  (found by bundle ID through Spotlight, never `PATH`, and only a bundle directly under `/Applications` or
+  `~/Applications` is run — Spotlight also lists a bundle in `~/Downloads` or on a disk image). Only the exit code is read — the checker's stderr echoes values
   — and a missing or unrunnable binary is a refusal, not a pass. The text is checked as a file **beside the target**, so
   a relative `config-file` include resolves as Ghostty resolves it.
 - **Machine-local values.** `text` cannot cut a line out, so a per-display value (`font-size`, `window-padding-*`,
@@ -97,8 +99,8 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 - **Credentials.** There is no strip list, so the secret scan is the only gate. `env`, `command` and `initial-command`
   lines are where a token passed to a launched program could sit. The scan recognises vendor-shaped tokens and bearer
   headers, not a generic `KEY=value` or `--password` argument — keep a credential out of those lines.
-- A hard kill during a check can leave a hidden `.<name>.<hex>.syncintosh-check` file beside the target; in `themes/` the
-  glob would collect it. It is junk, not a leak (the text is the config, scanned like any other), and removing it clears it.
+- A hard kill during a check can leave a hidden `.<name>.<hex>.syncintosh-check` file beside the target. The themes glob
+  skips hidden files, so it is never collected; removing it by hand clears it.
 
 ### `vscode` notes
 

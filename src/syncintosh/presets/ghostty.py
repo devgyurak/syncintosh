@@ -11,8 +11,9 @@ Paths:     ~/.config/ghostty/config                  (in use: 26 keys, keybind x
            ~/Library/Application Support/com.mitchellh.ghostty/config.ghostty    (present, empty)
            ~/.config/ghostty/themes/*                (absent here; the theme search path is confirmed)
 Order:     XDG `config`, then `config.ghostty` (the later file wins; verified with a temporary HOME).
-           The App Support files use the real home rather than HOME, so their order cannot be reproduced
-           and is taken from the binary's own documentation.
+           The App Support files use the real home rather than HOME, so their order could not be reproduced:
+           the binary's documentation says macOS reads that location too, and nothing more is claimed.
+           Which files are tracked does not depend on it.
 Format:    `key = value` lines + `#` comments; a key may repeat and its order is meaningful -> text
 Validator: <app>/Contents/MacOS/ghostty +validate-config --config-file=<path>   (rc 0 valid, 1 invalid)
 Download:  https://ghostty.org/download (200)        Cask: ghostty
@@ -25,9 +26,9 @@ refuses them for `text`): a validator, not a strip list, keeps a merged config G
 published or written (`system/ghostty_check.py`).
 
 `XDG_CONFIG_HOME` is not honoured (the same stance as `ZDOTDIR` for `zsh`), and a file pulled in by
-`config-file = ...` is not followed: a user who wants it synced names it as a path this preset knows or
-accepts it stays local. The themes glob is `~/.config/ghostty/themes/*` only — Ghostty does not read a
-`themes` directory under Application Support.
+`config-file = ...` is not followed: a user who wants it synced adds it as an entry of their own. The themes glob
+is `~/.config/ghostty/themes/*` only, and leaves out hidden files — Ghostty does not read a `themes` directory
+under Application Support.
 
 **Machine-local values.** `text` cannot cut a line out, so a per-display value (`font-size`, `window-padding-*`,
 `background-opacity`) is synced as written. To keep one local, put it in `config-file = ?local.ghostty` and do
@@ -63,7 +64,9 @@ GHOSTTY = Preset.create(
     name="ghostty",
     files=(
         *(PresetFile.create(path=path, format="text", validator="ghostty") for path in CONFIG_FILES),
-        # A theme is the user's own text in the same syntax, so it takes the same check.
+        # A theme is the user's own text in the same syntax, so it takes the same check. A glob leaves hidden
+        # files out (`PresetGlob`): Finder drops a `.DS_Store` (not text) into any folder it opens, and a validator
+        # check killed part-way leaves a hidden `.<name>.<hex>.syncintosh-check` beside its target.
         PresetFile.create(path=THEMES, format="text", validator="ghostty"),
     ),
     bundle_id="com.mitchellh.ghostty",

@@ -155,7 +155,13 @@ class PresetGlob:
 
     @classmethod
     def create(cls, path: str) -> PresetGlob:
-        """Validate and freeze one glob; never assign fields afterwards."""
+        """Validate and freeze one glob; never assign fields afterwards.
+
+        The shell's rule holds: a pattern that starts with `*` or `?` does not name a file whose own name starts
+        with a dot. A directory of user files otherwise collects Finder's `.DS_Store` (not text) and a tool's
+        hidden temporary files. The rule sits in the matcher, which is rebuilt from the path wherever a glob is
+        (the catalog, the machine's config), so every place that lists or checks a glob agrees.
+        """
         validated = validate_path(path)
         directory, _, name = validated.rpartition("/")
         if any(character in directory for character in GLOB_METACHARACTERS):
@@ -167,11 +173,12 @@ class PresetGlob:
             raise ConfigError(f"a preset glob must not be recursive: {validated!r}")
         if not _has_glob(validated):
             raise ConfigError(f"a preset glob must name a pattern: {validated!r}")
+        pattern = _glob_to_regex(collision_key(name))
         return cls(
             path=validated,
             directory=directory,
             name=name,
-            matcher=re.compile(_glob_to_regex(collision_key(name))),
+            matcher=re.compile(rf"(?!\.){pattern}" if name[0] in GLOB_METACHARACTERS else pattern),
         )
 
     def matches(self, path: str) -> bool:

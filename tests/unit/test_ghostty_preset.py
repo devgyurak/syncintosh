@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from syncintosh.adapters.text_merge import TextMergeDriver
+from syncintosh.core.presets import PresetGlob
 from syncintosh.presets import BUILTIN_PRESETS, BuiltinCatalog
 from syncintosh.presets.ghostty import CONFIG_FILES, GHOSTTY, THEMES
 
@@ -117,3 +118,46 @@ def test_the_fixture_carries_the_documented_keys() -> None:
 
     # then
     assert (sorted(expected - keys), len(_keybinds(FIXTURE.read_text(encoding="utf-8")))) == ([], 14)
+
+
+THEMES_GLOB = PresetGlob.create(THEMES)
+
+
+@pytest.mark.parametrize(
+    ("name", "named"),
+    [
+        ("fixture-dark", True),
+        ("Fixture Light", True),
+        (".DS_Store", False),
+        (".fixture-dark.0123456789abcdef.syncintosh-check", False),
+        (".hidden", False),
+    ],
+)
+def test_the_themes_glob_names_visible_files_only(name, named) -> None:
+    # when
+    expanded = THEMES_GLOB.expand((name,))
+    matched = THEMES_GLOB.matches(f".config/ghostty/themes/{name}")
+
+    # then — the listing and the apply-side check agree
+    assert (bool(expanded), matched) == (named, named)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "name", "named"),
+    [
+        ("snippets/*.json", ".draft.json", False),
+        ("snippets/*.json", "a.json", True),
+        ("snippets/?x.json", ".x.json", False),
+        ("snippets/.*.json", ".draft.json", True),
+        ("snippets/a*", "a.json", True),
+    ],
+)
+def test_a_glob_follows_the_shell_rule_for_a_leading_dot(pattern, name, named) -> None:
+    # given
+    glob = PresetGlob.create(pattern)
+
+    # when
+    expanded = glob.expand((name,))
+
+    # then — only a pattern that starts with a wildcard skips a hidden name; a literal dot or prefix still names it
+    assert bool(expanded) is named
