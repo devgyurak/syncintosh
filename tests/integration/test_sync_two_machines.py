@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
 from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import dumps_commitments, loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import (
@@ -43,7 +43,6 @@ from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path, wrap_path
 from syncintosh.core.resolution import Decide, Proposal
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
@@ -57,7 +56,7 @@ from syncintosh.services.keys import (
     rotate_repo,
 )
 from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
-from syncintosh.services.sync import RestorePoint, SyncPorts, SyncReport, sync
+from syncintosh.services.sync import RestorePoint, SyncReport
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -219,32 +218,16 @@ def _run(
     catalog: PresetCatalog | None = None,
     validators: Mapping[ValidatorName, SyntaxValidator] | None = None,
 ) -> SyncReport:
-    active = transport or GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
-            live=live or SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            rotation_marker=machine.marker,
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            source=SecureFileIdSource(),
-            config=load_config(machine.config_file),
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-            catalog=EMPTY_CATALOG if catalog is None else catalog,
-            validators={} if validators is None else validators,
-        ),
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        transport=GitCLITransport(machine.repo) if transport is None else transport,
+        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
+        live=live or SystemLiveFiles(),
+        rotation_marker=machine.marker,
+        catalog=EMPTY_CATALOG if catalog is None else catalog,
+        validators={} if validators is None else validators,
         adopt=adopt,
         resolving=resolving,
         decide=decide,

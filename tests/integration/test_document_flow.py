@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentSource
@@ -32,23 +32,19 @@ from syncintosh.core.ports import LiveFiles
 from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import SyncPorts, SyncReport, sync
+from syncintosh.services.sync import SyncReport
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.document_files import open_live_files
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
-from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
-from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -155,31 +151,17 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine, *, wrap: Callable[[LiveFiles], LiveFiles] = lambda live: live) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
+    GitCLITransport(machine.repo)
+    EnvelopeCipher(machine.store)
     config: SyncConfig = load_config(machine.config_file)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={},
-            catalog=CATALOG,
-            live=wrap(open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents())),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            source=SecureFileIdSource(),
-            config=config,
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-        )
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        config=config,
+        adapters={},
+        catalog=CATALOG,
+        live=wrap(open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents())),
     )
 
 

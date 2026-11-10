@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 from test_datagrip_preset import (
     FIXTURES,
     HOME,
@@ -27,21 +28,11 @@ from test_datagrip_preset import (
     _write,
 )
 
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.adapters.xml import XmlAdapter
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.services.sync import SyncPorts, SyncReport, sync
+from syncintosh.services.sync import SyncReport
 from syncintosh.system.app_config_dir import ProductInfoConfigDir
-from syncintosh.system.config import load_config
-from syncintosh.system.deny_list import SystemDenyList
-from syncintosh.system.ledger import JsonLedgerStore
-from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
-from syncintosh.system.pending import DirectoryPendingStore
-from syncintosh.system.repo_files import FileRepo
-from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -82,33 +73,17 @@ def _machine(
 
 
 def _run(machine: Machine) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={"xml": XmlAdapter()},
-            catalog=CATALOG,
-            live=SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            apps=FakeApps(),
-            running=FakeRunning(False),
-            source=SecureFileIdSource(),
-            config=load_config(machine.config_file),
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-            config_dirs=ProductInfoConfigDir(lambda _bundle: (str(machine.app),), home=machine.home),
-        )
+    GitCLITransport(machine.repo)
+    EnvelopeCipher(machine.store)
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        adapters={"xml": XmlAdapter()},
+        catalog=CATALOG,
+        apps=FakeApps(),
+        running=FakeRunning(False),
+        config_dirs=ProductInfoConfigDir(lambda _bundle: (str(machine.app),), home=machine.home),
     )
 
 

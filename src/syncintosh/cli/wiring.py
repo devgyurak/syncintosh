@@ -9,14 +9,27 @@ module does not pay for `cryptography`, `lxml`, or `openai` (``AGENTS.md`` §4).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from syncintosh.services import SyncPorts
 
 if TYPE_CHECKING:  # these names appear only in annotations
+    from collections.abc import Mapping
+
     from syncintosh.core.config import SyncConfig
     from syncintosh.core.manifest import FileFormat
-    from syncintosh.core.ports import ContentAdapter, SyntaxValidator
+    from syncintosh.core.ports import (
+        AgentProjectIndex,
+        AppConfigDir,
+        ContentAdapter,
+        DenyList,
+        DocumentSkips,
+        LiveFiles,
+        PresetCatalog,
+        ProfileIndex,
+        SyntaxValidator,
+    )
     from syncintosh.core.presets import ValidatorName
     from syncintosh.system.paths import MachinePaths
 
@@ -60,6 +73,83 @@ def validators() -> dict[ValidatorName, SyntaxValidator]:
     return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator(), "ghostty": GhosttySyntaxValidator()}
 
 
+@dataclass(frozen=True)
+class MachineReads:
+    """The ports that only read this machine: what `diff` and `doctor` need, and what `machine_ports` builds on.
+
+    Kept apart from `SyncPorts` because assembling them never touches the key store, the scan allowlist, the lock, or
+    the clone, so a read-only command can have them on a machine that has not been set up.
+    """
+
+    catalog: PresetCatalog
+    deny: DenyList
+    live: LiveFiles
+    adapters: Mapping[FileFormat, ContentAdapter]
+    validators: Mapping[ValidatorName, SyntaxValidator]
+    profiles: ProfileIndex
+    config_dirs: AppConfigDir
+    agent_projects: AgentProjectIndex
+    documents: DocumentSkips | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        catalog: PresetCatalog,
+        deny: DenyList,
+        live: LiveFiles,
+        adapters: Mapping[FileFormat, ContentAdapter],
+        validators: Mapping[ValidatorName, SyntaxValidator],
+        profiles: ProfileIndex,
+        config_dirs: AppConfigDir,
+        agent_projects: AgentProjectIndex,
+        documents: DocumentSkips | None,
+    ) -> MachineReads:
+        """Hold the read-side ports; they are assembled once, by `machine_reads`."""
+        return cls(
+            catalog=catalog,
+            deny=deny,
+            live=live,
+            adapters=adapters,
+            validators=validators,
+            profiles=profiles,
+            config_dirs=config_dirs,
+            agent_projects=agent_projects,
+            documents=documents,
+        )
+
+
+def machine_reads(paths: MachinePaths) -> MachineReads:
+    """The read-side ports for this machine. The deny list, catalog and agent project index are built once here."""
+    from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
+    from syncintosh.system.app_config_dir import ProductInfoConfigDir
+    from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.document_files import open_document_skips, open_live_files
+    from syncintosh.system.live_files import SystemLiveFiles
+    from syncintosh.system.profile_index import SystemProfileIndex
+
+    home = str(paths.home)
+    deny = SystemDenyList()
+    catalog = BuiltinCatalog.default()
+    return MachineReads.create(
+        catalog=catalog,
+        deny=deny,
+        # A settings document kept in a database row is shown to the sync as a virtual file (`core/documents.py`).
+        live=open_live_files(SystemLiveFiles(), home, catalog.documents()),
+        adapters=adapters(),
+        validators=validators(),
+        # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
+        profiles=SystemProfileIndex(home, deny, vscode.read_profiles),
+        # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
+        config_dirs=ProductInfoConfigDir(home=paths.home),
+        # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
+        agent_projects=SystemAgentProjectIndex(home, deny),
+        # A document the app manages itself (iTerm2 loading its prefs from a custom folder) is left alone this cycle.
+        documents=open_document_skips(home, catalog.documents()),
+    )
+
+
 def machine_ports(config: SyncConfig, paths: MachinePaths) -> SyncPorts:
     """Every port one `sync` cycle needs, from this machine's paths and config.
 
@@ -70,22 +160,15 @@ def machine_ports(config: SyncConfig, paths: MachinePaths) -> SyncPorts:
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.crypto.file_ids import SecureFileIdSource
     from syncintosh.crypto.key_material import KeyMaterial
-    from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.presets.orca import BUNDLE_ID as ORCA_BUNDLE_ID
-    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
     from syncintosh.system.agent_sessions import CombinedSessionActivity, CombinedSessionStore
-    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.claude_sessions import ClaudeSessionActivity, ClaudeSessionStore
     from syncintosh.system.codex_sessions import CodexSessionActivity, CodexSessionStore
-    from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_document_skips, open_live_files
     from syncintosh.system.ledger import JsonLedgerStore
-    from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
     from syncintosh.system.orca_daemon import OrcaDaemonRunningApps
     from syncintosh.system.pending import DirectoryPendingStore
-    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.system.repo_files import FileRepo
     from syncintosh.system.rotation_marker import FileRotationMarker
     from syncintosh.system.running_apps import LsappinfoRunningApps
@@ -94,11 +177,9 @@ def machine_ports(config: SyncConfig, paths: MachinePaths) -> SyncPorts:
     from syncintosh.vcs.git import GitCLITransport
 
     home = str(paths.home)
+    reads = machine_reads(paths)
     store = key_store(config.remote)
     transport = GitCLITransport(paths.repo_dir)
-    deny = SystemDenyList()
-    catalog = BuiltinCatalog.default()
-    agent_index = SystemAgentProjectIndex(home, deny)
     # One object is both the `Cipher` and the `GenerationWrap`: the fetch absorbs a distributed
     # generation through the same ring the objects are opened with.
     cipher = EnvelopeCipher(store)
@@ -108,8 +189,8 @@ def machine_ports(config: SyncConfig, paths: MachinePaths) -> SyncPorts:
     # Both agents' sessions in one store; the activity probe asks the agent that owns a session.
     combined_sessions = CombinedSessionStore(
         (
-            ClaudeSessionStore(home, config.agent_projects, agent_index, deny, catalog),
-            CodexSessionStore(home, config.agent_projects, agent_index, deny, catalog),
+            ClaudeSessionStore(home, config.agent_projects, reads.agent_projects, reads.deny, reads.catalog),
+            CodexSessionStore(home, config.agent_projects, reads.agent_projects, reads.deny, reads.catalog),
         )
     )
     return SyncPorts.create(
@@ -123,32 +204,27 @@ def machine_ports(config: SyncConfig, paths: MachinePaths) -> SyncPorts:
         store=store,
         codec=KeyMaterial(),
         driver=TextMergeDriver(),
-        adapters=adapters(),
-        catalog=catalog,
-        validators=validators(),
-        # A settings document kept in a database row is shown to the sync as a virtual file (`core/documents.py`).
-        live=open_live_files(SystemLiveFiles(), home, catalog.documents()),
+        adapters=reads.adapters,
+        catalog=reads.catalog,
+        validators=reads.validators,
+        live=reads.live,
         ledger_store=JsonLedgerStore(paths.ledger_file),
         pending_store=DirectoryPendingStore(paths.pending_dir),
         # A rotation whose push outcome is unknown: the evidence `sync` needs to settle it (never holds a key).
         rotation_marker=FileRotationMarker(paths.rotation_marker_file),
         lock=FileLock(paths.lock_file),
-        deny=deny,
+        deny=reads.deny,
         apps=MdfindAppDetector(),
         # Whether a preset's app is open right now: a file of a preset that defers while running waits for it to quit.
         # Orca's terminal host outlives its window, so for Orca that process counts as the app running too.
         running=OrcaDaemonRunningApps(LsappinfoRunningApps(), home=home, bundle_id=ORCA_BUNDLE_ID),
-        # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
-        config_dirs=ProductInfoConfigDir(home=paths.home),
-        # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
-        agent_projects=agent_index,
-        # A document the app manages itself (iTerm2 loading its prefs from a custom folder) is left alone this cycle.
-        documents=open_document_skips(home, catalog.documents()),
+        config_dirs=reads.config_dirs,
+        agent_projects=reads.agent_projects,
+        documents=reads.documents,
         # Claude Code's sessions for the projects mapped with `claude-sessions`, and its own open-session signal.
         sessions=combined_sessions,
         activity=CombinedSessionActivity(combined_sessions, (ClaudeSessionActivity(home), CodexSessionActivity(home))),
-        # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
-        profiles=SystemProfileIndex(home, deny, vscode.read_profiles),
+        profiles=reads.profiles,
         source=SecureFileIdSource(),
         config=config,
         home=home,
