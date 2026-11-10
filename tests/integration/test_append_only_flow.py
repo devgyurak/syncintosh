@@ -85,7 +85,7 @@ class FakeStore:
         self._home = home
         self._sizes = {} if sizes is None else sizes
 
-    def sessions(self) -> SessionListing:
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
         units = []
         for sid, paths in FILES.items():
             held = [
@@ -106,8 +106,11 @@ class FakeStore:
         found = SESSION_PATH.fullmatch(path)
         return None if found is None else found.group("id")
 
-    def note_for(self, path: str, data: bytes) -> str | None:
+    def note_for(self, path: str, data: bytes, *, created: bool) -> str | None:
         return None
+
+    def retired(self, path: str) -> bool:
+        return False
 
 
 class FakeActivity:
@@ -536,8 +539,8 @@ def test_a_session_file_is_never_collected_through_the_plain_item_path(tmp_path,
 class _MisplacingStore(FakeStore):
     """A store that reports every file living somewhere other than where the resolver says."""
 
-    def sessions(self) -> SessionListing:
-        listing = super().sessions()
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
+        listing = super().sessions(published)
         moved = tuple(
             SessionUnit.create(
                 session_id=unit.session_id,

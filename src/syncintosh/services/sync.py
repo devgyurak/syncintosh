@@ -182,14 +182,17 @@ NO_RUNNING_INFO: RunningApps = _UnknownRunning()
 class _NoSessions:
     """A `SessionStore` that lists nothing and owns no path: the store a caller with no agent sessions passes."""
 
-    def sessions(self) -> SessionListing:
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
         return SessionListing()
 
     def session_of(self, path: str) -> str | None:
         return None
 
-    def note_for(self, path: str, data: bytes) -> str | None:
+    def note_for(self, path: str, data: bytes, *, created: bool) -> str | None:
         return None
+
+    def retired(self, path: str) -> bool:
+        return False
 
 
 class _UnknownSessionActivity:
@@ -1503,7 +1506,9 @@ def _collect_sessions(
     session, file and the scanner's own location text (decision D6) — the rest of the cycle goes on, and nothing of
     the session reaches `write_repo`, whose scan stays as the second wall (``AGENTS.md`` §3.4).
     """
-    listing = presets.sessions.sessions()
+    listing = presets.sessions.sessions(
+        frozenset(() if head is None else (record.path for record in head.records.values()))
+    )
     state.session_skipped.extend(listing.skipped)
     published = frozenset(
         found
@@ -2692,7 +2697,8 @@ def _apply(
     unprojectable: list[Refusal] = []
     invalid: list[Refusal] = []
     session_skipped: list[SessionSkipped] = []
-    notes: list[str] = []
+    # The session files this cycle wrote, noted once the loop is done so an ancestor written later is there to find.
+    written: list[tuple[str, bytes, bool]] = []
     # One `mdfind` per app per cycle, however many files that app owns (§2.6).
     installed_cache: dict[str, bool | None] = {}
     running_cache: dict[str, bool | None] = {}
@@ -2791,11 +2797,13 @@ def _apply(
             if presets.activity.is_open(session) is not False:
                 session_skipped.append(SessionSkipped.create(session_id=session, reason="open", path=record.path))
                 continue
+            if presets.sessions.retired(record.path):
+                session_skipped.append(SessionSkipped.create(session_id=session, reason="archived", path=record.path))
+                continue
             # A conversation, not a setting: a file created here is owner-only, as a person's own transcripts should be.
             live.write(live_path, data, private=True)
             applied.append(record.path)
-            if (note := presets.sessions.note_for(record.path, data)) is not None:
-                notes.append(note)
+            written.append((record.path, data, live_bytes is None))
             continue
         # Collect's projection stands in for this one only when the file is byte-for-byte the one it was made from.
         # A record whose format is not the catalog's never gets here (refused above), so the two agree on the format.
@@ -2941,7 +2949,13 @@ def _apply(
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
         session_skipped=tuple(session_skipped),
-        notes=tuple(dict.fromkeys(notes)),
+        notes=tuple(
+            dict.fromkeys(
+                note
+                for path, data, created in written
+                if (note := presets.sessions.note_for(path, data, created=created)) is not None
+            )
+        ),
     )
 
 

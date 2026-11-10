@@ -25,7 +25,7 @@ from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import validate_path
 
 # Why a session was left out. Serialized nowhere; a `Literal`, not an `Enum` (``AGENTS.md`` §4).
-SkipReason = Literal["secret", "cap", "forked", "open", "unknown"]
+SkipReason = Literal["secret", "cap", "forked", "open", "unknown", "archived"]
 
 # A session whose newest file is younger than this may still be written to.
 IDLE_SECONDS: Final = 30 * 60
@@ -42,6 +42,7 @@ _PHRASES: Final[dict[str, str]] = {
     "forked": "continued on both Macs; the repository's copy is kept and the local one is not collected",
     "open": "the agent may have it open, or that could not be told; it is left alone",
     "unknown": "it could not be read safely; the session is left out",
+    "archived": "the agent archived or compressed it here; writing it would bring it back, so it is left alone",
 }
 
 

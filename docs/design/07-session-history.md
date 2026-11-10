@@ -66,7 +66,22 @@ the person removed here (the suppressed rule). A file edited between collect and
 `SyncReport.session_skipped` carries one row per session and reason (`secret`, `cap`, `forked`, `open`, `unknown`), each
 with a fixed phrase. None blocks the cycle, and none carries a transcript value.
 
-## What this note does not decide
+## Per agent
 
-Where a transcript lives, how a project is identified across Macs, and how a session's open state is read are per agent
-(PR C for Claude Code, PR D for Codex). `core` and `services` see only `SessionStore` and `SessionActivity`.
+Where a transcript lives, how a project is identified across Macs, and how a session's open state is read are per agent;
+`core` and `services` see only `SessionStore` and `SessionActivity` (`system/claude_sessions.py`,
+`system/codex_sessions.py`, combined by `system/agent_sessions.py`).
+
+| | Claude Code | Codex |
+|---|---|---|
+| Layout | `~/.claude/projects/<dir>/<uuid>.jsonl` + `<uuid>/subagents/`, `tool-results/` | `~/.codex/sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl` |
+| Project | the folder name, derived from the project's real path | the first record's `cwd`, or an already-published record |
+| Logical path | `.claude/projects/@<name>/…` | `.codex/sessions/@<name>/YYYY/MM/DD/…` (the `@<name>` is dropped on disk) |
+| Open | `~/.claude/sessions/<pid>.json` + `procStart` | flock on `thread-writer-locks/<thread>.lock` |
+| Not written over | — | a rollout archived or compressed here |
+| Said after a write | a CLI version difference | `codex resume <id>`, a missing `history_base`, a CLI version difference |
+
+`cwd` inside a record is never rewritten. Relocation is enough for Claude Code (`--resume` searches every project folder;
+the picker hides a session only when its recorded `cwd` exists here, differs and encodes to the same folder name) and for
+`codex resume <id>` (it finds a rollout by file name). Codex's `creator_user_id` and `creator_account_id` are kept: they
+are account identifiers, not credentials, and removing them would change line 1, which the database has already indexed.
