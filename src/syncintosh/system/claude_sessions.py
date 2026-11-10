@@ -46,6 +46,7 @@ _VERSION: Final = re.compile(r"\d+\.\d+\.\d+")
 # The directories beside a transcript that hold its files, and nothing else is listed.
 _SESSION_DIRECTORIES: Final = ("subagents", "tool-results")
 _WORKFLOWS: Final = "workflows"
+_RUN_ID: Final = re.compile(r"wf_[a-z0-9-]{6,}")
 
 # A real session holds a handful of files; a bound keeps a runaway folder from being walked whole.
 MAX_SESSION_FILES: Final = 2_000
@@ -216,6 +217,9 @@ class ClaudeSessionStore:
         for run in runs:
             if run.is_symlink() or not run.is_dir(follow_symlinks=False):
                 raise _UnsafeError
+            if _RUN_ID.fullmatch(run.name) is None:
+                # Not a run folder the agent makes: not part of the session this tool carries.
+                continue
             try:
                 entries = sorted(os.scandir(run.path), key=lambda each: each.name)
                 modes = [(entry.name, entry.stat(follow_symlinks=False).st_mode) for entry in entries]
@@ -334,6 +338,14 @@ class ClaudeSessionActivity:
             return None
         unreadable = False
         for name in names:
+            stem = name.removesuffix(".json")
+            if not stem.isascii() or not stem.isdigit():
+                # Claude Code names the file after the pid; anything else beside it is not a session's own file.
+                continue
+            if not self._alive(int(stem)):
+                # A file left by a crash for a process that is gone says nothing about any session, so a broken or
+                # oversized one cannot hold the others back; only a file whose process is alive has to be understood.
+                continue
             record = self._read(self._directory / name)
             if record is None:
                 unreadable = True

@@ -433,10 +433,11 @@ A secret-scan hit in a memory file stops the cycle like any other file (there is
 Session history (issue #56) rides on `docs/design/07-session-history.md`: append-only text, one unit per session, idle and
 caps, a whole-session refusal on a secret-scan hit, prefix-only apply with a fresh mtime. Claude Code specifics:
 
-* **Workflows** (UNVERIFIED shape): 2.1.308 also keeps a workflow's sub-agents under
-  `<uuid>/subagents/workflows/<run>/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}`. They are listed with
-  the session (one run level, regular files only; a link or an odd entry leaves the session out). Only the folder name was
-  read from the binary; the run id's shape and the file kinds there are assumed to match `subagents/`.
+* **Workflows**: 2.1.308 also keeps a workflow's sub-agents under
+  `<uuid>/subagents/workflows/wf_<id>/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}`. They are listed
+  with the session (one run level, regular files only; a link or an odd entry leaves the session out; a folder whose name is
+  not a run id, `/^wf_[a-z0-9-]{6,}$/` as the binary spells it, is not part of the session). UNVERIFIED: that those are the
+  only file kinds there; they are assumed to match `subagents/`.
 * **Layout** (2.1.308): `<uuid>.jsonl` plus `<uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,
   forked-skill.marker.json}` and `<uuid>/tool-results/*`. `{uuid}` in a preset path is exactly one UUID, so a record cannot
   name another folder under a project; every other name beside a transcript is left alone.
