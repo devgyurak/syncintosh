@@ -128,6 +128,34 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/options/mac/recentConnections.xml",
     "Library/Application Support/JetBrains/*/options/mac/trusted-paths.xml",
     _ORCA_ROOT,
+    # Coding agents' own state (issue #56). Only a project's `memory/` and, later, its transcripts are ever synced, and
+    # those are reached through a logical `@<name>` path; everything else the CLIs keep beside them is account metadata,
+    # environment dumps, file backups or live process state. A wildcard covers the names the CLIs add and rotate
+    # (`.claude.json.backup`, `daemon.sock`, `state_5.sqlite-wal`), so the next one fails closed.
+    ".claude.json*",
+    # The plaintext OAuth file Claude Code falls back to when it cannot use the keychain.
+    ".claude/.credentials.json",
+    ".claude/session-env",
+    ".claude/shell-snapshots",
+    ".claude/file-history",
+    ".claude/paste-cache",
+    ".claude/history.jsonl",
+    ".claude/cache",
+    ".claude/daemon*",
+    # One `<pid>.json` per open session: a live-process signal, read by the activity probe and never collected.
+    ".claude/sessions",
+    ".codex/auth.json",
+    ".codex/installation_id",
+    ".codex/history.jsonl",
+    ".codex/shell_snapshots",
+    ".codex/sqlite",
+    ".codex/logs_*.sqlite*",
+    # Codex's thread database and its write-ahead files: syncintosh never writes it (decision D13), and it holds the
+    # absolute rollout paths and account identifiers.
+    ".codex/*.sqlite*",
+    ".codex/thread-writer-locks",
+    ".codex/app-server-*",
+    ".codex/ipc",
 )
 
 

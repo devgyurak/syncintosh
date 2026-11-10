@@ -19,6 +19,7 @@ from syncintosh.core.documents import DocumentSource
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
+from syncintosh.presets.claude_memory import CLAUDE_MEMORY
 from syncintosh.presets.datagrip import DATAGRIP
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.history import POLICY_HISTORY
@@ -29,7 +30,7 @@ from syncintosh.presets.zed import ZED
 from syncintosh.presets.zsh import ZSH
 
 # Every built-in preset, in the order a catalog lists them.
-BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, VSCODE, DOCKER, ZED, DATAGRIP, *JETBRAINS_IDES, ORCA)
+BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, VSCODE, DOCKER, ZED, DATAGRIP, *JETBRAINS_IDES, ORCA, CLAUDE_MEMORY)
 
 
 @dataclass(frozen=True)
@@ -146,12 +147,19 @@ class BuiltinCatalog:
     @staticmethod
     def _policy_path(preset: Preset, path: str) -> str:
         """The path whose policy `path` takes: its default-profile counterpart for a profile path, else itself."""
+        if preset.agent_projects is not None:
+            template = preset.agent_projects.template_of(path)
+            return path if template is None else template
         parsed = preset.profiles.parse(path) if preset.profiles is not None else None
         return path if parsed is None else parsed.default_path
 
     @staticmethod
     def _owns(preset: Preset, path: str) -> bool:
         """True when `preset` owns `path`, directly or as a logical profile path of its own layout."""
+        if preset.agent_projects is not None:
+            # Only a well-formed logical path (`@<name>`) is ever ours; the template and a raw folder are not.
+            template = preset.agent_projects.template_of(path)
+            return template is not None and any(file.matches(template) for file in preset.files)
         if any(file.matches(path) for file in preset.files):
             # A logical path is matched **exactly** under its root: files compare folded, but a differently cased
             # `@` element is not ours, and owning it would let a record choose the case `apply` creates.
@@ -165,7 +173,7 @@ class BuiltinCatalog:
         allowlist alone decides; a built-in name must own the path, so a record that arrived
         claiming `zsh` cannot be applied to an arbitrary file.
         """
-        if any(self._reserved(each, path) for each in self.presets):
+        if any(self._reserved(each, path) for each in self.presets) or self._agent_reserved(path):
             # Under a profiles home only a logical path is a path at all. A raw id there would be collected
             # with no policy, whatever the record's preset name claims (a non-built-in name makes no claim).
             return False
@@ -198,6 +206,18 @@ class BuiltinCatalog:
             [collision_key(p) for p in spec.home.split("/")],
         )
         return parts[: len(home)] == home and len(parts) > len(home) and spec.parse(path) is None
+
+    def _agent_reserved(self, path: str) -> bool:
+        """True when `path` is under an agent project home that **no** preset of that home owns.
+
+        A raw project folder (`.claude/projects/-Users-a-src-x/…`), the template, or a logical element no file names
+        would be collected or written verbatim with no policy. Presets may share one home (memory and transcripts
+        both live under `.claude/projects`), so the question is asked of all of them, not of one.
+        """
+        layouts = [preset.agent_projects for preset in self.presets if preset.agent_projects is not None]
+        return any(spec.contains_home(path) for spec in layouts) and not any(
+            self._owns(preset, path) for preset in self.presets if preset.agent_projects is not None
+        )
 
     def preset_for(self, path: str) -> Preset | None:
         """The built-in preset that owns `path`, or `None` when none does.

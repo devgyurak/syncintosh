@@ -27,10 +27,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from syncintosh.core.agent_projects import AgentProjectMap, AgentProjectPath, AgentProjectSpec
 from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
 from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
 from syncintosh.core.paths import collision_key
-from syncintosh.core.ports import AppConfigDir, PresetCatalog, ProfileIndex
+from syncintosh.core.ports import AgentProjectIndex, AppConfigDir, PresetCatalog, ProfileIndex
 from syncintosh.core.presets import PresetGlob
 from syncintosh.core.profiles import ProfileMap, ProfilePath, ProfileSpec
 from syncintosh.core.watch import ProfileTargets, WatchFilter
@@ -43,6 +44,10 @@ _UNREADABLE = "the app's profile list could not be read, so profile files are le
 _CONFIG_NOT_TRACKED = "this machine does not track this app's settings folder"
 _CONFIG_BAD_NAME = "the app named a settings folder this layout does not allow"
 _SYNC_UNREADABLE = "could not read settingsSync.xml; leaving files alone"
+_AGENT_NOT_TRACKED = "this machine does not enable this app's project data"
+_AGENT_MEMORY_MOVED = (
+    "the project's memory directory is set elsewhere (autoMemoryDirectory), so its files are left alone"
+)
 _OWN_SYNC_ON = "the app's own settings sync is on, so this tool leaves its settings folder alone"
 
 
@@ -55,6 +60,9 @@ def profile_directory(spec: ProfileSpec, directory: str) -> str:
 class Located:
     """A path resolved to a real `$HOME`-relative one.
 
+    `agent_directory` is the real per-project folder of an agent's data (`.claude/projects/<dir>`) and `agent_root` the
+    project it belongs to: the root must already exist for a write, and the folder itself may be created (the agent
+    makes it on its first run in the project, which a second Mac may not have had yet).
     `profile_directory` is set for a profile file: the profile's own directory, which must already
     exist for a write (this module never creates one). `config_directory` is the same for a file in an app's
     versioned config directory: the release folder, which an IDE's first run populates and which this code never
@@ -64,11 +72,13 @@ class Located:
     path: str
     profile_directory: str | None = None
     config_directory: str | None = None
+    agent_directory: str | None = None
+    agent_root: str | None = None
 
     @property
     def owner_directory(self) -> str | None:
-        """The directory that must already exist for a write, whichever kind of logical path this was."""
-        return self.profile_directory or self.config_directory
+        """The directory every symlink check starts from, whichever kind of logical path this was."""
+        return self.profile_directory or self.config_directory or self.agent_directory
 
 
 @dataclass(frozen=True)
@@ -96,12 +106,28 @@ class ConfigDirView:
 
 
 @dataclass(frozen=True)
+class AgentProjectView:
+    """One agent layout and the projects this machine maps under it, read once for the cycle."""
+
+    spec: AgentProjectSpec
+    projects: AgentProjectMap
+
+
+@dataclass(frozen=True)
 class LivePaths:
     """The resolver for one cycle. Build it with `open_live_paths`; the empty value resolves nothing logical."""
 
     catalog: PresetCatalog
     views: tuple[ProfileView, ...] = ()
     config_views: tuple[ConfigDirView, ...] = ()
+    agent_views: tuple[AgentProjectView, ...] = ()
+
+    def agent(self, path: str) -> tuple[AgentProjectSpec, AgentProjectPath] | None:
+        """The layout and parts when `path` is a logical project path of a preset the catalog knows."""
+        preset = self.catalog.preset_for(path)
+        spec = None if preset is None else preset.agent_projects
+        parsed = None if spec is None else spec.parse(path)
+        return None if spec is None or parsed is None else (spec, parsed)
 
     def config_dir(self, path: str) -> tuple[ConfigDirSpec, str] | None:
         """The layout and relative file when `path` is a logical config-directory path of a preset the catalog has."""
@@ -162,6 +188,9 @@ class LivePaths:
             if isinstance(real, Unresolved):
                 return real
             return Located(f"{real}/{relative}", config_directory=real)
+        project = self.agent(path)
+        if project is not None:
+            return self._resolve_agent(*project)
         found = self.logical(path)
         if found is None:
             if not self.catalog.knows(_NO_PRESET, path):
@@ -184,6 +213,30 @@ class LivePaths:
         directory = profile_directory(spec, entry.directory)
         return Located(f"{directory}/{parsed.relative}", profile_directory=directory)
 
+    def resolve_project(self, spec: AgentProjectSpec, name: str, relative: str) -> Located | Unresolved:
+        """Where `relative` of the project `name` lives on this machine, `relative` being a path or a glob pattern.
+
+        A glob listing goes through here with the pattern as its last element, and takes the directory from the
+        result; `resolve` is this over a logical record path, which `AgentProjectSpec.parse` has already vetted.
+        """
+        return self._resolve_agent(spec, AgentProjectPath(name=name, relative=relative))
+
+    def _resolve_agent(self, spec: AgentProjectSpec, parsed: AgentProjectPath) -> Located | Unresolved:
+        """The real folder of a project's data on this machine, or why a name has none (decision D3)."""
+        view = next((candidate for candidate in self.agent_views if candidate.spec == spec), None)
+        if view is None:
+            return Unresolved(_AGENT_NOT_TRACKED)
+        entry = view.projects.lookup(parsed.name)
+        if entry is None:
+            # A name this machine's config does not map is never written: the record came from the remote alone.
+            return Unresolved(f'map the project "{parsed.name}" under agent_projects to sync it here')
+        if entry.directory is None:
+            return Unresolved(entry.reason)
+        if entry.memory_relocated and spec.holds_memory(parsed.relative):
+            return Unresolved(_AGENT_MEMORY_MOVED)
+        directory = f"{spec.home}/{entry.directory}"
+        return Located(f"{directory}/{parsed.relative}", agent_directory=directory, agent_root=entry.root)
+
     def describe(self, path: str) -> str:
         """How a person should see `path`: `vscode profile "Work": settings.json` for a logical one.
 
@@ -196,6 +249,9 @@ class LivePaths:
             view = next((candidate for candidate in self.config_views if candidate.spec == config[0]), None)
             release = None if view is None else view.directory.directory
             return f"{preset.name}: {config[1]}" + ("" if release is None else f" ({release})")
+        project = self.agent(path)
+        if project is not None and preset is not None:
+            return f'{preset.name} project "{project[1].name}": {project[1].relative}'
         found = self.logical(path)
         if found is None or preset is None:
             return path
@@ -207,6 +263,7 @@ def open_live_paths(
     catalog: PresetCatalog,
     index: ProfileIndex | None,
     config_dirs: AppConfigDir | None = None,
+    agent_projects: AgentProjectIndex | None = None,
 ) -> LivePaths:
     """Read each configured layout's profile list and config directory once and bind the resolver for this cycle.
 
@@ -217,7 +274,33 @@ def open_live_paths(
     if index is not None:
         specs = {entry.spec.index: entry.spec for entry in config.profiles}
         profile_views = tuple(ProfileView(spec=spec, profiles=index.read(spec)) for spec in specs.values())
-    return LivePaths(catalog=catalog, views=profile_views, config_views=_read_config_dirs(config, catalog, config_dirs))
+    return LivePaths(
+        catalog=catalog,
+        views=profile_views,
+        config_views=_read_config_dirs(config, catalog, config_dirs),
+        agent_views=_read_agent_projects(config, agent_projects),
+    )
+
+
+def _read_agent_projects(config: SyncConfig, index: AgentProjectIndex | None) -> tuple[AgentProjectView, ...]:
+    """One view per agent layout a mapped project enables, each read once with the projects that use it."""
+    if index is None:
+        return ()
+    specs = dict.fromkeys(layout.spec for project in config.agent_projects for layout in project.layouts)
+    return tuple(
+        AgentProjectView(
+            spec=spec,
+            projects=index.read(
+                spec,
+                tuple(
+                    project
+                    for project in config.agent_projects
+                    if any(layout.spec == spec for layout in project.layouts)
+                ),
+            ),
+        )
+        for spec in specs
+    )
 
 
 def _read_config_dirs(
@@ -284,6 +367,26 @@ def config_dir_summary(config: SyncConfig, paths: LivePaths) -> Check | None:
         for view in paths.config_views
     )
     return Check("config folders", not held, "; ".join(parts))
+
+
+def agent_project_summary(config: SyncConfig, paths: LivePaths) -> Check | None:
+    """The doctor row about agent projects, or `None` when this machine maps none.
+
+    Informational, like the profiles row. A project that cannot be used says why (a missing root, an environment
+    override that moves the agent's data) so the person can fix it; names and counts only, never a path's content.
+    """
+    if not config.agent_projects:
+        return None
+    parts: list[str] = []
+    for view in paths.agent_views:
+        for entry in view.projects.entries:
+            parts.append(
+                f'"{entry.name}": ready'
+                if entry.directory is not None
+                else f'"{entry.name}": {entry.reason}; its records are kept as they are'
+            )
+        parts.extend(view.projects.problems)
+    return Check("agent projects", True, "; ".join(dict.fromkeys(parts)) or "no project data is read yet")
 
 
 def profile_targets(config: SyncConfig, paths: LivePaths) -> ProfileTargets:
@@ -372,11 +475,13 @@ def describe_with(catalog: PresetCatalog, path: str) -> str:
 
 
 __all__ = [
+    "AgentProjectView",
     "ConfigDirView",
     "LivePaths",
     "Located",
     "ProfileView",
     "Unresolved",
+    "agent_project_summary",
     "config_dir_summary",
     "config_dir_targets",
     "describe_with",
