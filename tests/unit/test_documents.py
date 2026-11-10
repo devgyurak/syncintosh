@@ -14,8 +14,10 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from syncintosh.core.documents import (
+    CFPREFS_DOMAIN,
     ORCA_PROFILE_STATE,
     DocumentSource,
+    codec_for,
     compact_payload,
     content_hash,
     render_view,
@@ -292,3 +294,93 @@ def test_a_document_that_is_not_an_exact_file_of_its_preset_is_refused(build) ->
     # when & then
     with pytest.raises(ConfigError):
         build()
+
+
+# --------------------------------------------------------------------------- the codec per kind
+
+PLIST_HEAD = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">'
+
+
+def _plist(body: str) -> str:
+    return f"{PLIST_HEAD}<dict>{body}</dict></plist>"
+
+
+def test_the_orca_kind_uses_the_json_codec() -> None:
+    # when
+    codec = codec_for(ORCA_PROFILE_STATE)
+
+    # then
+    assert (codec.render('{"a":1}'), codec.compact(b'{\n  "a": 1\n}\n'), codec.same('{"a":1}', '{"a": 1}')) == (
+        b'{\n  "a": 1\n}\n',
+        '{"a":1}',
+        True,
+    )
+
+
+def test_a_kind_no_codec_understands_is_refused() -> None:
+    # when & then
+    with pytest.raises(DocumentRefused):
+        codec_for("nope")
+
+
+def test_the_preferences_kind_views_a_domain_as_canonical_xml_in_either_key_order() -> None:
+    # given
+    codec = codec_for(CFPREFS_DOMAIN)
+    one = _plist("<key>b</key><integer>2</integer><key>a</key><integer>1</integer>")
+    other = _plist("<key>a</key><integer>1</integer><key>b</key><integer>2</integer>")
+
+    # when
+    views = (codec.render(one), codec.render(other))
+
+    # then
+    assert views[0] == views[1]
+    assert views[0].index(b"<key>a</key>") < views[0].index(b"<key>b</key>")
+
+
+def test_the_view_of_a_domain_survives_view_then_compact_byte_for_byte() -> None:
+    # given
+    codec = codec_for(CFPREFS_DOMAIN)
+    view = codec.render(_plist("<key>d</key><data>AQID</data><key>r</key><real>1.0</real>"))
+
+    # when
+    again = codec.render(codec.compact(view))
+
+    # then
+    assert again == view
+
+
+@pytest.mark.parametrize(
+    ("current", "proposed", "same"),
+    [
+        ("<key>a</key><integer>1</integer>", "<key>a</key><integer>1</integer>", True),
+        ("<key>a</key><integer>1</integer>", "<key>a</key><real>1.0</real>", False),
+        ("<key>a</key><true/>", "<key>a</key><integer>1</integer>", False),
+        ("<key>a</key><integer>1</integer>", "<key>b</key><integer>1</integer>", False),
+        ("<key>a</key><data>AQID</data>", "<key>a</key><data>AQIE</data>", False),
+    ],
+)
+def test_two_domains_are_the_same_only_when_every_type_and_value_agree(current: str, proposed: str, same: bool) -> None:
+    # when & then
+    assert codec_for(CFPREFS_DOMAIN).same(_plist(current), _plist(proposed)) is same
+
+
+@pytest.mark.parametrize("bad", ["", "not a plist", PLIST_HEAD + "<array/></plist>", "\x00bplist00"])
+def test_a_domain_that_is_not_an_accepted_plist_is_refused_without_quoting_it(bad: str) -> None:
+    # when & then
+    with pytest.raises(DocumentRefused) as raised:
+        codec_for(CFPREFS_DOMAIN).render(bad)
+    assert bad not in str(raised.value) or bad == ""
+
+
+@pytest.mark.parametrize(
+    "database", ["Library/Preferences/com.other.app.plist", "Library/Preferences/x/com.example.app.plist"]
+)
+def test_a_preferences_domain_whose_plist_is_not_its_own_is_refused(database: str) -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        DocumentSource.create(
+            kind=CFPREFS_DOMAIN,
+            database=database,
+            domain="com.example.app",
+            view="Library/Preferences/@defaults/com.example.app.plist",
+        )

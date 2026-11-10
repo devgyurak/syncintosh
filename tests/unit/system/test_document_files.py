@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 
 import pytest
 
-from syncintosh.core.documents import ORCA_PROFILE_STATE, DocumentRead, DocumentSource
+from syncintosh.core.documents import CFPREFS_DOMAIN, ORCA_PROFILE_STATE, DocumentRead, DocumentSource
 from syncintosh.core.errors import DocumentRefused, DocumentStale, DocumentWrittenUnverified
 from syncintosh.system.document_files import DocumentLiveFiles, open_live_files
 from syncintosh.system.live_files import SystemLiveFiles
@@ -28,7 +29,7 @@ class FakeStore:
     def __init__(
         self,
         payload: str | None = '{"a":1}',
-        revision: int = 4,
+        revision: str = "4",
         *,
         symlink: bool = False,
         write_error: Exception | None = None,
@@ -37,7 +38,7 @@ class FakeStore:
         self.payload = payload
         self.revision = revision
         self.symlink = symlink
-        self.writes: list[tuple[str, int]] = []
+        self.writes: list[tuple[str, str]] = []
 
     def present(self, source: DocumentSource) -> bool:
         return self.payload is not None
@@ -48,14 +49,14 @@ class FakeStore:
     def read(self, source: DocumentSource) -> DocumentRead | None:
         return None if self.payload is None else DocumentRead(payload=self.payload, revision=self.revision)
 
-    def write(self, source: DocumentSource, payload: str, *, expected_revision: int) -> None:
+    def write(self, source: DocumentSource, payload: str, *, expected_revision: str) -> None:
         self.writes.append((payload, expected_revision))
         if self.write_error is not None:
             raise self.write_error
 
 
 def _router(tmp_path: Path, store: FakeStore) -> DocumentLiveFiles:
-    return DocumentLiveFiles(SystemLiveFiles(), store, str(tmp_path), (SOURCE,))
+    return DocumentLiveFiles(SystemLiveFiles(), {ORCA_PROFILE_STATE: store}, str(tmp_path), (SOURCE,))
 
 
 def _view(tmp_path: Path) -> str:
@@ -83,7 +84,7 @@ def test_a_missing_database_reads_as_no_file(tmp_path) -> None:
 
 def test_a_write_goes_to_the_store_compacted_with_the_revision_read_before_it(tmp_path) -> None:
     # given
-    store = FakeStore(revision=9)
+    store = FakeStore(revision="9")
     live = _router(tmp_path, store)
     live.read(_view(tmp_path))
 
@@ -91,7 +92,7 @@ def test_a_write_goes_to_the_store_compacted_with_the_revision_read_before_it(tm
     live.write(_view(tmp_path), b'{\n  "a": 2\n}\n')
 
     # then
-    assert store.writes == [('{"a":2}', 9)]
+    assert store.writes == [('{"a":2}', "9")]
 
 
 def test_a_write_with_no_read_before_it_is_refused(tmp_path) -> None:
@@ -229,3 +230,69 @@ def test_open_live_files_routes_through_the_sqlite_store_when_a_preset_has_one(t
     read = SqliteDocumentStore(str(tmp_path)).read(SOURCE)
     assert read is not None
     assert read.payload == '{"a":2}'
+
+
+DOMAIN_SOURCE = DocumentSource.create(
+    kind=CFPREFS_DOMAIN,
+    database="Library/Preferences/com.example.app.plist",
+    domain="com.example.app",
+    view="Library/Preferences/@defaults/com.example.app.plist",
+)
+
+
+def test_each_source_is_served_by_the_store_of_its_kind(tmp_path) -> None:
+    # given
+    orca, prefs = FakeStore('{"a":1}', "1"), FakeStore(plistlib.dumps({"b": 2}).decode(), "2")
+    live = DocumentLiveFiles(
+        SystemLiveFiles(), {ORCA_PROFILE_STATE: orca, CFPREFS_DOMAIN: prefs}, str(tmp_path), (SOURCE, DOMAIN_SOURCE)
+    )
+
+    # when
+    views = (live.read(_view(tmp_path)), live.read(str(tmp_path / DOMAIN_SOURCE.view)))
+    live.write(str(tmp_path / DOMAIN_SOURCE.view), views[1] or b"")
+
+    # then — JSON for the row, canonical plist XML for the domain, and the write went to the domain's store only
+    assert views[0] == b'{\n  "a": 1\n}\n'
+    assert (b"<key>b</key>" in (views[1] or b""), len(prefs.writes), orca.writes) == (True, 1, [])
+    assert prefs.writes[0][1] == "2"
+
+
+def test_a_source_whose_kind_has_no_store_is_refused(tmp_path) -> None:
+    # given
+    live = DocumentLiveFiles(SystemLiveFiles(), {}, str(tmp_path), (SOURCE,))
+
+    # when & then
+    with pytest.raises(DocumentRefused):
+        live.read(_view(tmp_path))
+
+
+def test_open_live_files_builds_only_the_stores_the_sources_need(tmp_path, monkeypatch, fake_defaults) -> None:
+    # given — the fake stands in for the real tool, and the domain's plist is the temp home's
+    monkeypatch.setattr("syncintosh.system.defaults_domains.DEFAULTS_EXECUTABLE", fake_defaults.path)
+    home = tmp_path / "home"
+    fake_defaults.seed(home, "com.example.app", {"a": 1})
+    live = open_live_files(SystemLiveFiles(), str(home), (DOMAIN_SOURCE,))
+    view = str(home / DOMAIN_SOURCE.view)
+
+    # when
+    before = live.read(view)
+    live.write(view, (before or b"").replace(b"<integer>1</integer>", b"<integer>2</integer>"))
+
+    # then — read, check, import, verify through the real subprocess path, and the plist itself is never opened by us
+    assert (live.exists(view), fake_defaults.values(home, "com.example.app")) == (True, {"a": 2})
+    assert [call["argv"][0] for call in fake_defaults.calls(home)] == ["export", "export", "import", "export"]
+
+
+def test_a_domain_that_is_not_there_is_absent_and_its_folder_with_it(tmp_path) -> None:
+    # given
+    live = open_live_files(SystemLiveFiles(), str(tmp_path / "home"), (DOMAIN_SOURCE,))
+
+    # when
+    answers = (
+        live.read(str(tmp_path / "home" / DOMAIN_SOURCE.view)),
+        live.exists(str(tmp_path / "home" / DOMAIN_SOURCE.view)),
+        live.exists(str(tmp_path / "home" / DOMAIN_SOURCE.view_directory)),
+    )
+
+    # then — no tool is run to find out: the plist file is what is asked
+    assert answers == (None, False, False)

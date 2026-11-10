@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A settings **document** that lives in a database row, seen as one virtual file.
+"""A settings **document** that lives in a database row or a preferences domain, seen as one virtual file.
 
 Some apps keep their settings as one JSON value in a database row instead of a file (Orca's
-`profile-state.db`). `services` only moves bytes between a live path and an object, so such a row is
+`profile-state.db`), others in a macOS preferences domain that `cfprefsd` owns (iTerm2's
+`com.googlecode.iterm2`). `services` only moves bytes between a live path and an object, so such a document is
 presented to it as a file at a **logical path** that no real folder holds:
 
 ```
@@ -20,6 +21,8 @@ Library/Application Support/orca/profiles/local-default/@profile-state/settings.
   own compact form (`compact_payload`), with key order kept.
 * Writing a value equal to the current one is a no-op (`same_value`): the app counts revisions, and a
   needless bump is a change someone else has to read.
+* What the three functions above do is one **codec** per `kind` (`codec_for`): a preferences domain is a plist, not
+  JSON, so it is rendered as the canonical XML plist (`core/plist_xml.py`) and compared by that form.
 
 Standard library only (``AGENTS.md`` §2.1).
 """
@@ -29,16 +32,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
 from syncintosh.core.config_dirs import CONFIG_DIR_MARK
 from syncintosh.core.errors import ConfigError, DocumentRefused, ManifestCorrupt
 from syncintosh.core.manifest import validate_path
+from syncintosh.core.plist_xml import canonical_plist
 
 # The one kind a store ships with. A `Final` string and not an `Enum`: it is serialized verbatim
 # (``AGENTS.md`` §4).
 ORCA_PROFILE_STATE: Final = "orca-profile-state"
+# A macOS preferences domain, read and written through `defaults` (`system/defaults_domains.py`).
+CFPREFS_DOMAIN: Final = "cfprefs-domain"
 
 # JS prints a whole-number double without a fraction and switches to an exponent at 1e21.
 _JS_INTEGER_LIMIT: Final = 1e21
@@ -81,6 +88,10 @@ class DocumentSource:
             raise ConfigError(f"a document's view path cannot be a glob: {validated_view!r}")
         if validated_view == validated_database:
             raise ConfigError("a document's view path cannot be its database")
+        if kind == CFPREFS_DOMAIN and validated_database != f"Library/Preferences/{domain}.plist":
+            # The store asks the plist file whether the domain is here and `defaults` for its content; two names for
+            # one domain would test one file and write another.
+            raise ConfigError(f"a preferences domain's database must be Library/Preferences/{domain}.plist")
         return cls(kind=kind, database=validated_database, domain=domain, view=validated_view)
 
     @property
@@ -91,13 +102,15 @@ class DocumentSource:
 
 @dataclass(frozen=True)
 class DocumentRead:
-    """A row as read: its payload text and the revision it was read at.
+    """A document as read: its payload text and the revision it was read at.
 
-    `revision` is what a later write is checked against, so a write never lands on a row that moved.
+    `revision` is what a later write is checked against, so a write never lands on a document that moved. It is an
+    **opaque token**: a database's own counter for a row, a digest of the export for a preferences domain. Only the
+    store that issued it compares it, and only for equality.
     """
 
     payload: str
-    revision: int
+    revision: str
 
 
 def _utf8(text: str) -> bytes:
@@ -182,10 +195,55 @@ def _canonical(value: dict[str, Any]) -> str:
     return _dump(value, sort_keys=True, separators=(",", ":"))
 
 
+def _plist_view(payload: str) -> bytes:
+    return _plist(payload.encode("utf-8"))
+
+
+def _plist_payload(view: bytes) -> str:
+    return _plist(view).decode("utf-8")
+
+
+def _plist_same(current: str, proposed: str) -> bool:
+    return _plist_view(current) == _plist_view(proposed)
+
+
+def _plist(data: bytes) -> bytes:
+    try:
+        return canonical_plist(data)
+    except ValueError:
+        raise DocumentRefused("the document is not a property list this build accepts") from None
+
+
+@dataclass(frozen=True)
+class DocumentCodec:
+    """How one `kind` of document turns a stored payload into a view, back, and compares two payloads."""
+
+    render: Callable[[str], bytes]
+    compact: Callable[[bytes], str]
+    same: Callable[[str, str], bool]
+
+
+_CODECS: Final = {
+    ORCA_PROFILE_STATE: DocumentCodec(render=render_view, compact=compact_payload, same=same_value),
+    CFPREFS_DOMAIN: DocumentCodec(render=_plist_view, compact=_plist_payload, same=_plist_same),
+}
+
+
+def codec_for(kind: str) -> DocumentCodec:
+    """The codec for a source's `kind`, or `DocumentRefused` for a kind no codec understands."""
+    codec = _CODECS.get(kind)
+    if codec is None:
+        raise DocumentRefused("no document codec understands this kind of source")
+    return codec
+
+
 __all__ = [
+    "CFPREFS_DOMAIN",
     "ORCA_PROFILE_STATE",
+    "DocumentCodec",
     "DocumentRead",
     "DocumentSource",
+    "codec_for",
     "compact_payload",
     "content_hash",
     "render_view",

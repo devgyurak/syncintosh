@@ -633,7 +633,7 @@ class LiveFiles(Protocol):
 
 @runtime_checkable
 class DocumentStore(Protocol):
-    """A settings document kept in a database row, which `LiveFiles` shows `services` as one virtual file.
+    """A settings document in a database row or a preferences domain, shown to `services` as one virtual file.
 
     The implementation opens the database only when asked (never in its constructor, ``AGENTS.md`` §2.6),
     and never creates it: a database that is not there is the app not having run, which is a deferral and
@@ -642,7 +642,7 @@ class DocumentStore(Protocol):
     """
 
     def present(self, source: DocumentSource) -> bool:
-        """True when the database file exists here (a symlink counts as existing)."""
+        """True when the document's database or plist file exists here (a symlink counts as existing)."""
         ...
 
     def is_symlink(self, source: DocumentSource) -> bool:
@@ -650,10 +650,10 @@ class DocumentStore(Protocol):
         ...
 
     def read(self, source: DocumentSource) -> DocumentRead | None:
-        """The row's payload and revision, or `None` when the database does not exist. Raises `DocumentRefused`."""
+        """The document's payload and revision, or `None` when it does not exist here. Raises `DocumentRefused`."""
         ...
 
-    def write(self, source: DocumentSource, payload: str, *, expected_revision: int) -> None:
+    def write(self, source: DocumentSource, payload: str, *, expected_revision: str) -> None:
         """Replace the row's payload if it still holds `expected_revision`; a payload equal in value writes nothing.
 
         Raises `DocumentStale` when the row moved and `DocumentRefused` for anything else it will not do.
