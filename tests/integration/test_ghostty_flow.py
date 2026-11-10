@@ -8,7 +8,6 @@ carries real Ghostty key names with invented values. The catalog is the one the 
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +22,7 @@ from syncintosh.core.config import LocalGlob, SyncConfig
 from syncintosh.core.errors import SecretScanError, SyntaxInvalid
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
+from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.core.resolution import Decide
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -120,14 +120,14 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str) -> Machine:
     )
 
 
-def _config(machine: Machine, catalog: BuiltinCatalog | None = None) -> SyncConfig:
+def _config(machine: Machine) -> SyncConfig:
     # The shipped preset, so the config carries the four exact files and the glob — the
     # same thing `init` writes.
     return new_machine_config(
         remote=machine.remote,
         machine_id=machine.machine_id,
         preset_names=("ghostty",),
-        catalog=catalog or BuiltinCatalog.default(),
+        catalog=BuiltinCatalog.default(),
     )
 
 
@@ -382,32 +382,39 @@ OLD_HIDDEN = ".config/ghostty/themes/.old-theme"
 
 
 class OlderGlobRule:
-    """Switches this process between the glob rule an older build had (a hidden name matches) and the current one.
+    """Switches the glob rule between the one an older build had (a hidden name matches) and the current one.
 
-    The catalog's preset globs are built at import and a machine's config rebuilds its own from the path, so both are
-    switched: the compiled matcher of the shipped themes glob, and the helper every new glob is built through.
+    While `on`, every glob built from here on — a machine's config rebuilds its own from the path, and `catalog` is
+    a fresh copy of the shipped preset — is built without the hidden-name rule. Nothing shared is modified, so the
+    shipped catalog the rest of the suite uses is untouched.
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._monkeypatch = monkeypatch
-        self._glob = next(each.glob for each in GHOSTTY.files if each.glob is not None)
-        self._current = self._glob.matcher
-        self._older = re.compile(self._current.pattern.removeprefix("(?!\\.)"))
+        self.catalog = BuiltinCatalog.default()
 
     def on(self) -> None:
         self._monkeypatch.setattr(presets_core, "_skip_hidden", lambda name, pattern: pattern)
-        object.__setattr__(self._glob, "matcher", self._older)
+        files = tuple(
+            PresetFile.create(path=each.path, format=each.format, validator=each.validator) for each in GHOSTTY.files
+        )
+        older = Preset.create(
+            name=GHOSTTY.name,
+            files=files,
+            bundle_id=GHOSTTY.bundle_id,
+            download_url=GHOSTTY.download_url,
+            cask=GHOSTTY.cask,
+        )
+        self.catalog = BuiltinCatalog.create((older,))
 
     def off(self) -> None:
         self._monkeypatch.undo()
-        object.__setattr__(self._glob, "matcher", self._current)
+        self.catalog = BuiltinCatalog.default()
 
 
 @pytest.fixture
-def older_glob_rule(monkeypatch: pytest.MonkeyPatch):
-    switch = OlderGlobRule(monkeypatch)
-    yield switch
-    switch.off()
+def older_glob_rule(monkeypatch: pytest.MonkeyPatch) -> OlderGlobRule:
+    return OlderGlobRule(monkeypatch)
 
 
 def test_a_hidden_record_an_older_build_published_is_refused_not_deleted(
@@ -417,7 +424,7 @@ def test_a_hidden_record_an_older_build_published_is_refused_not_deleted(
     older_glob_rule.on()
     a, _ = _pair(tmp_path, memory_key_store)
     _write(a, OLD_HIDDEN, b"background = #101010\n")
-    _run(a)
+    _run(a, catalog=older_glob_rule.catalog)
     older_glob_rule.off()
     save_config(_config(a), a.config_file)
     b = _machine(tmp_path, memory_key_store, "machine-b2", a.remote)
