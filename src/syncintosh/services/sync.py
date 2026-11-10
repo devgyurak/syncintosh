@@ -2791,7 +2791,8 @@ def _apply(
             if presets.activity.is_open(session) is not False:
                 session_skipped.append(SessionSkipped.create(session_id=session, reason="open", path=record.path))
                 continue
-            live.write(live_path, data)
+            # A conversation, not a setting: a file created here is owner-only, as a person's own transcripts should be.
+            live.write(live_path, data, private=True)
             applied.append(record.path)
             if (note := presets.sessions.note_for(record.path, data)) is not None:
                 notes.append(note)

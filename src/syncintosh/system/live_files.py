@@ -34,12 +34,19 @@ def _default_mode() -> int:
     return 0o666 & ~current
 
 
-def _target_mode(target: Path) -> int:
-    """The mode to give the replacement: the file's own, or the umask default when it is new."""
+def _target_mode(target: Path, *, private: bool = False) -> int:
+    """The mode to give the replacement: the file's own, or the umask default (owner-only when `private`) when new."""
     try:
         return stat.S_IMODE(target.stat().st_mode)
     except FileNotFoundError:
-        return _default_mode()
+        return 0o600 if private else _default_mode()
+
+
+def _make_private_directories(directory: Path) -> None:
+    """Create `directory` and any missing parents owner-only; a directory that exists is left as it is."""
+    missing = [each for each in (directory, *directory.parents) if not each.exists()]
+    for each in reversed(missing):
+        each.mkdir(mode=0o700, exist_ok=True)
 
 
 class SystemLiveFiles:
@@ -52,11 +59,14 @@ class SystemLiveFiles:
         except FileNotFoundError:
             return None
 
-    def write(self, path: str, data: bytes) -> None:
-        """Write `data` to `path` atomically, creating parent directories."""
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
+        """Write `data` to `path` atomically, creating parent directories (owner-only ones when `private`)."""
         target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        mode = _target_mode(target)
+        if private:
+            _make_private_directories(target.parent)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        mode = _target_mode(target, private=private)
         descriptor, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
         try:
             with os.fdopen(descriptor, "wb") as handle:
