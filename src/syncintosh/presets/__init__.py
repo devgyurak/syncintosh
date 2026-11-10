@@ -26,6 +26,7 @@ from syncintosh.presets.datagrip import DATAGRIP
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.ghostty import GHOSTTY
 from syncintosh.presets.history import POLICY_HISTORY
+from syncintosh.presets.iterm2 import ITERM2
 from syncintosh.presets.jetbrains_ides import JETBRAINS_IDES
 from syncintosh.presets.orca import ORCA
 from syncintosh.presets.vscode import VSCODE
@@ -45,6 +46,7 @@ BUILTIN_PRESETS: tuple[Preset, ...] = (
     CLAUDE_SESSIONS,
     CODEX_SESSIONS,
     GHOSTTY,
+    ITERM2,
 )
 
 

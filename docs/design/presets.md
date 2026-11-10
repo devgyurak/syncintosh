@@ -31,6 +31,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
 | `codex-sessions` | `.codex/sessions/@<name>/YYYY/MM/DD/rollout-<stamp>-<thread>[_<rollout>].jsonl` (logical; on disk there is no project folder, so `@<name>` is dropped: the real path is `~/.codex/sessions/YYYY/MM/DD/<file>`). Listed per session by `CodexSessionStore`; the project is the one whose root equals the first `session_meta` record's `cwd`. Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**; `creator_user_id`/`creator_account_id` are kept) | — (a CLI) | — | — |
 | `ghostty` | `.config/ghostty/config` · `…/config.ghostty` · `…/themes/*` · `Library/Application Support/com.mitchellh.ghostty/config` · `…/config.ghostty` | `text` (a key repeats and its order matters) | — (a text file has no key paths) | — (the secret scan is the backstop) | `com.mitchellh.ghostty` | <https://ghostty.org/download> | `ghostty` |
+| `iterm2` | `Library/Application Support/iTerm2/DynamicProfiles/*.json` (Dynamic Profiles only; the preferences domain is a later change) | `jsonc` | — | — (the secret scan is the backstop) | `com.googlecode.iterm2` | <https://iterm2.com/downloads.html> | `iterm2` |
 
 ### `docker` notes
 
@@ -103,6 +104,22 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   headers, not a generic `KEY=value` or `--password` argument — keep a credential out of those lines.
 - A hard kill during a check can leave a hidden `.<name>.<hex>.syncintosh-check` file beside the target. The themes glob
   skips hidden files, so it is never collected; removing it by hand clears it.
+
+### `iterm2` notes
+
+- Verified on a Mac (iTerm2 3.7.7, source read at tag `v3.7.7`, 2026-11-10; write-up on issue #58). This first part
+  tracks **Dynamic Profiles** only; the main preferences domain (`com.googlecode.iterm2`) arrives separately.
+- iTerm2 reads **every** file in `DynamicProfiles/` except a name starting with `.` or ending with `~`, trying a plist
+  first and JSON second, so the extension means nothing to it. The preset tracks `*.json`; a Dynamic Profile written
+  as a plist is out of scope. Because `*.json` has a literal part, a dot-leading `.x.json` is synced too, although iTerm2
+  itself never loads it.
+- `Profiles` is merged **one profile at a time**, by `Guid` (the rule VS Code keybindings use): a profile only one side
+  has is kept, and a profile both sides changed differently is a conflict on that profile alone. iTerm2 refuses an entry
+  without a `Guid` or a name, and a `Guid` repeated across files.
+- A path watcher reloads the directory live, so apply is **not** held back while iTerm2 runs. iTerm2 may rewrite a
+  Dynamic Profile file itself. `dynamicProfilesPath` (an advanced setting that moves the directory) is not followed.
+- No strip list: a profile is the user's own text, and a `Command`, `Initial Text` or trigger parameter could carry a
+  credential, so the secret scan is the only gate.
 
 ### `vscode` notes
 
