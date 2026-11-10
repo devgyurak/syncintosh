@@ -140,6 +140,13 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
+class _NotRunning:
+    """iTerm2 is closed: the preset waits for that before it writes (`defer_while_running`)."""
+
+    def running(self, bundle_id: str) -> bool | None:
+        return False
+
+
 def _run(
     machine: Machine,
     *,
@@ -167,6 +174,7 @@ def _run(
         lock=FileLock(machine.lock, timeout_seconds=5),
         deny=SystemDenyList(),
         apps=NO_APP_INFO if apps is None else apps,
+        running=_NotRunning(),
         source=SecureFileIdSource(),
         config=load_config(machine.config_file),
         home=str(machine.home),
@@ -285,7 +293,7 @@ def test_a_machine_without_iterm2_defers_with_the_download_page(tmp_path, memory
     report = _run(b, apps=apps)
 
     # then
-    assert [(each.path, each.download_url, each.cask) for each in report.deferred] == [
+    assert [(each.path, each.download_url, each.cask) for each in report.deferred if each.path == PROFILES_FILE] == [
         (PROFILES_FILE, "https://iterm2.com/downloads.html", "iterm2")
     ]
     assert ((b.home / PROFILES_DIR).exists(), apps.queried) == (False, ["com.googlecode.iterm2"])
@@ -303,7 +311,10 @@ def test_a_machine_whose_profile_directory_is_missing_defers_when_the_app_cannot
     report = _run(b, apps=_StubApps(None))
 
     # then — nothing is created, and the row carries no download suggestion
-    assert ([(each.path, each.download_url) for each in report.deferred], (b.home / PROFILES_DIR).exists()) == (
+    assert (
+        [(each.path, each.download_url) for each in report.deferred if each.path == PROFILES_FILE],
+        (b.home / PROFILES_DIR).exists(),
+    ) == (
         [(PROFILES_FILE, None)],
         False,
     )

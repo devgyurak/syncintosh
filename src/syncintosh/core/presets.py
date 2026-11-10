@@ -521,6 +521,11 @@ class Preset:
             if any(file.ignore_list and file.path in {source.view for source in documents} for file in files):
                 # The ignore list is read from the file's own path, which here is virtual.
                 raise ConfigError(f"preset {name!r}: a document cannot be an ignore-list file")
+        views = {source.view for source in documents}
+        if any(file.format == "plist" and file.path not in views for file in files):
+            # The adapter writes canonical XML with sorted keys, which only a document (re-rendered on every read) can
+            # take; a plain `.plist` file would be re-ordered on its first merge and lose its own key order.
+            raise ConfigError(f"preset {name!r}: a plist file must be a document's view")
         if agent_projects is not None:
             if profiles is not None or config_dir is not None or documents:
                 # Each of the four owns a logical `@` element, and which resolver a path took would depend on order.

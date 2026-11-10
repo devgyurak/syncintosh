@@ -48,17 +48,17 @@ def test_the_preset_names_the_verified_app_and_download() -> None:
     )
 
 
-def test_the_only_tracked_path_is_the_json_glob_with_no_strip_list() -> None:
+def test_the_json_glob_strips_nothing() -> None:
     # when
-    shapes = [(each.path, each.format, each.noise, each.excluded) for each in ITERM2.files]
+    glob = next(each for each in ITERM2.files if each.path == DYNAMIC_PROFILES)
 
-    # then — and a live-reloaded file never holds apply back while iTerm2 runs
-    assert (shapes, ITERM2.defer_while_running) == ([(DYNAMIC_PROFILES, "jsonc", frozenset(), frozenset())], False)
+    # then — a Dynamic Profile is the user's own text, merged whole and never cut down
+    assert (glob.format, glob.noise, glob.excluded, glob.synced) == ("jsonc", frozenset(), frozenset(), None)
 
 
 def test_profiles_are_identified_by_guid() -> None:
     # when
-    rules = ITERM2.files[0].array_rules
+    rules = next(each for each in ITERM2.files if each.path == DYNAMIC_PROFILES).array_rules
 
     # then
     assert rules == {("Profiles",): RULE}

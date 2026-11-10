@@ -39,7 +39,7 @@ from typing import Any, Final
 from syncintosh.core.config_dirs import CONFIG_DIR_MARK
 from syncintosh.core.errors import ConfigError, DocumentRefused, ManifestCorrupt
 from syncintosh.core.manifest import validate_path
-from syncintosh.core.plist_xml import canonical_plist
+from syncintosh.core.plist_xml import canonical_plist, parse_plist
 
 # The one kind a store ships with. A `Final` string and not an `Enum`: it is serialized verbatim
 # (``AGENTS.md`` §4).
@@ -61,15 +61,24 @@ class DocumentSource:
 
     `database` and `view` are `$HOME`-relative. `view` carries an ``@`` element, so it names no real
     path, and it is the path a manifest record holds. `domain` is the row's key in the database.
+
+    `skip_when` names a top-level boolean key of the document: when it is on, the app manages these settings by
+    itself (iTerm2's `LoadPrefsFromCustomFolder` makes it load and save its own copy), so this machine leaves the
+    document alone, in collect and apply alike (`skip_reason`). `skip_because` is the sentence shown then. Both are
+    local behaviour and not part of the object bytes, so neither is in the policy digest.
     """
 
     kind: str
     database: str
     domain: str
     view: str
+    skip_when: str = ""
+    skip_because: str = ""
 
     @classmethod
-    def create(cls, *, kind: str, database: str, domain: str, view: str) -> DocumentSource:
+    def create(
+        cls, *, kind: str, database: str, domain: str, view: str, skip_when: str = "", skip_because: str = ""
+    ) -> DocumentSource:
         """Validate and freeze one source; never assign fields afterwards."""
         if not isinstance(kind, str) or kind == "":
             raise ConfigError(f"a document source needs a kind, got {kind!r}")
@@ -92,7 +101,19 @@ class DocumentSource:
             # The store asks the plist file whether the domain is here and `defaults` for its content; two names for
             # one domain would test one file and write another.
             raise ConfigError(f"a preferences domain's database must be Library/Preferences/{domain}.plist")
-        return cls(kind=kind, database=validated_database, domain=domain, view=validated_view)
+        if (skip_when == "") != (skip_because == ""):
+            raise ConfigError("a document that can be skipped needs both the key and the sentence that says why")
+        if skip_when != "" and kind != CFPREFS_DOMAIN:
+            # The rule reads a plist's top-level key; a JSON row has no such decision to read.
+            raise ConfigError(f"only a preferences domain can be skipped by a key, not kind {kind!r}")
+        return cls(
+            kind=kind,
+            database=validated_database,
+            domain=domain,
+            view=validated_view,
+            skip_when=skip_when,
+            skip_because=skip_because,
+        )
 
     @property
     def view_directory(self) -> str:
@@ -195,6 +216,28 @@ def _canonical(value: dict[str, Any]) -> str:
     return _dump(value, sort_keys=True, separators=(",", ":"))
 
 
+CANNOT_TELL: Final = "the document could not be read to tell whether the app manages it itself, so it is left alone"
+
+
+def skip_reason(source: DocumentSource, payload: str) -> str | None:
+    """Why this machine must leave `source` alone given its current `payload`, or `None` to go on.
+
+    Only an unambiguous *off* lets the document be handled: an absent key is the app's default (off), `False` is off,
+    and everything else — `True`, a value of another type, a payload that is not a property list — is on or cannot be
+    told, which is skipped. Two writers on one document is the harm; a skipped cycle costs nothing.
+    """
+    if source.skip_when == "":
+        return None
+    try:
+        document = parse_plist(payload.encode("utf-8"))
+    except ValueError:
+        return CANNOT_TELL
+    value = document.get(source.skip_when, False)
+    if value is False:
+        return None
+    return source.skip_because if value is True else CANNOT_TELL
+
+
 def _plist_view(payload: str) -> bytes:
     return _plist(payload.encode("utf-8"))
 
@@ -238,6 +281,7 @@ def codec_for(kind: str) -> DocumentCodec:
 
 
 __all__ = [
+    "CANNOT_TELL",
     "CFPREFS_DOMAIN",
     "ORCA_PROFILE_STATE",
     "DocumentCodec",
@@ -248,4 +292,5 @@ __all__ = [
     "content_hash",
     "render_view",
     "same_value",
+    "skip_reason",
 ]
