@@ -256,11 +256,13 @@ def test_a_domain_that_is_not_a_domain_name_never_reaches_the_tool(tmp_path, fak
     # given
     source = DocumentSource.create(
         kind=CFPREFS_DOMAIN,
-        database="Library/Preferences/x.plist",
+        database=f"Library/Preferences/{domain}.plist",
         domain=domain,
         view="Library/Preferences/@defaults/x.plist",
     )
     fake_defaults.seed(_home(tmp_path), "x", {"a": 1})
+    (_home(tmp_path) / source.database).parent.mkdir(parents=True, exist_ok=True)
+    (_home(tmp_path) / source.database).write_bytes(plistlib.dumps({"a": 1}))
 
     # when & then
     with pytest.raises(DocumentRefused):
