@@ -10,6 +10,7 @@ from syncintosh.system.deny_list import SystemDenyList
 AGENT_STATE = [
     ".claude.json",
     ".claude.json.backup",
+    ".claude/.credentials.json",
     ".claude/session-env/abc/env",
     ".claude/shell-snapshots/snapshot-zsh.sh",
     ".claude/file-history/abc/file",
