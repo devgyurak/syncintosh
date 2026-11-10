@@ -219,7 +219,9 @@ def _pair(tmp_path: Path, make_store, fake, *, b_domain: dict | None = None):
     a = _machine(tmp_path, make_store, "machine-a", remote)
     _initialize(a)
     fake.seed(a.home, DOMAIN, _domain())
-    _run(a)
+    first = _run(a)
+    # A skip or a refusal hides its reason (it is fail-closed), so name it here instead of failing later on a missing record.
+    assert ([d.reason for d in first.deferred], [r.reason for r in first.refused]) == ([], [])
     b = _machine(tmp_path, make_store, "machine-b", remote)
     _initialize(b, import_from=a.recovery)
     if b_domain is not None:

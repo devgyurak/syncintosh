@@ -288,8 +288,16 @@ def open_live_paths(
         views=profile_views,
         config_views=_read_config_dirs(config, catalog, config_dirs),
         agent_views=_read_agent_projects(config, agent_projects),
-        document_skips=() if documents is None else tuple(sorted(documents.reasons().items())),
+        document_skips=_read_document_skips(config, documents),
     )
+
+
+def _read_document_skips(config: SyncConfig, documents: DocumentSkips | None) -> tuple[tuple[str, str], ...]:
+    """The `(view, why)` pairs for the documents this machine tracks and must leave alone, read once per cycle."""
+    if documents is None:
+        return ()
+    tracked = frozenset(item.path for item in config.items)
+    return tuple(sorted(documents.reasons(tracked).items()))
 
 
 def _read_agent_projects(config: SyncConfig, index: AgentProjectIndex | None) -> tuple[AgentProjectView, ...]:

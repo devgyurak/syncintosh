@@ -20,6 +20,7 @@ from syncintosh.core.documents import (
     skip_reason,
 )
 from syncintosh.core.errors import ConfigError, DocumentRefused
+from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.iterm2 import (
     DATABASE,
@@ -254,12 +255,12 @@ def test_the_skip_check_names_each_document_it_must_leave_alone(store: _Store, e
     check = DocumentSkipCheck({CFPREFS_DOMAIN: store}, (SOURCE,))
 
     # when & then
-    assert dict(check.reasons()) == expected
+    assert dict(check.reasons(frozenset({VIEW}))) == expected
 
 
 def test_a_kind_with_no_store_is_left_alone() -> None:
     # when & then
-    assert dict(DocumentSkipCheck({}, (SOURCE,)).reasons()) == {VIEW: CANNOT_TELL}
+    assert dict(DocumentSkipCheck({}, (SOURCE,)).reasons(frozenset({VIEW}))) == {VIEW: CANNOT_TELL}
 
 
 def test_a_document_with_no_skip_rule_costs_no_check_and_no_store(tmp_path) -> None:
@@ -276,3 +277,37 @@ def test_a_skipped_document_resolves_to_why_and_any_other_path_resolves_as_befor
 
     # then
     assert (skipped, type(other).__name__) == (Unresolved("the app manages it"), "Located")
+
+
+class _Raises(_Store):
+    def present(self, source: DocumentSource) -> bool:
+        raise PermissionError("no")
+
+
+def test_an_unreadable_folder_leaves_only_that_document_alone() -> None:
+    # when & then — a `PermissionError` is one skipped document, not an aborted cycle
+    assert dict(DocumentSkipCheck({CFPREFS_DOMAIN: _Raises(None)}, (SOURCE,)).reasons(frozenset({VIEW}))) == {
+        VIEW: CANNOT_TELL
+    }
+
+
+def test_a_document_this_machine_does_not_track_is_never_asked() -> None:
+    # given — a store that would fail the test if it were touched
+    class _Never(_Store):
+        def present(self, source: DocumentSource) -> bool:
+            raise AssertionError("an untracked app must not be queried")
+
+    # when & then
+    assert dict(DocumentSkipCheck({CFPREFS_DOMAIN: _Never(None)}, (SOURCE,)).reasons(frozenset())) == {}
+
+
+def test_a_plist_file_that_is_not_a_documents_view_is_refused() -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        Preset.create(name="x", files=(PresetFile.create(path=".x.plist", format="plist"),), bundle_id="com.example.x")
+
+
+@pytest.mark.parametrize("key", ["HotkeyMigratedFromSingleToMulti", "TmuxSyncClipboard"])
+def test_a_migration_marker_and_a_clipboard_mirror_stay_local(key: str) -> None:
+    # when & then
+    assert (key in LOCAL_NAMES, key in SYNCED_NAMES) == (True, False)

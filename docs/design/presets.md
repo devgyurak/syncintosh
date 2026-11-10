@@ -31,7 +31,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
 | `codex-sessions` | `.codex/sessions/@<name>/YYYY/MM/DD/rollout-<stamp>-<thread>[_<rollout>].jsonl` (logical; on disk there is no project folder, so `@<name>` is dropped: the real path is `~/.codex/sessions/YYYY/MM/DD/<file>`). Listed per session by `CodexSessionStore`; the project is the one whose root equals the first `session_meta` record's `cwd`. Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**; `creator_user_id`/`creator_account_id` are kept) | — (a CLI) | — | — |
 | `ghostty` | `.config/ghostty/config` · `…/config.ghostty` · `…/themes/*` · `Library/Application Support/com.mitchellh.ghostty/config` · `…/config.ghostty` | `text` (a key repeats and its order matters) | — (a text file has no key paths) | — (the secret scan is the backstop) | `com.mitchellh.ghostty` | <https://ghostty.org/download> | `ghostty` |
-| `iterm2` | `Library/Preferences/@defaults/com.googlecode.iterm2.plist` (virtual: the `com.googlecode.iterm2` preferences domain, served by `defaults`; an **allowlist**) · `Library/Application Support/iTerm2/DynamicProfiles/*.json` | `plist` (the domain) · `jsonc` | — (an allowlist: only the 141 registered preference keys plus `New Bookmarks`, `Default Bookmark Guid`, `GlobalKeyMap` travel) | `NoSyncOpenAIAPIKey` · `NoUserDefaultAIAPIKey` · `AICustomHeaders`; the secret scan is the backstop for profile text | `com.googlecode.iterm2` | <https://iterm2.com/downloads.html> | `iterm2` |
+| `iterm2` | `Library/Preferences/@defaults/com.googlecode.iterm2.plist` (virtual: the `com.googlecode.iterm2` preferences domain, served by `defaults`; an **allowlist**) · `Library/Application Support/iTerm2/DynamicProfiles/*.json` | `plist` (the domain) · `jsonc` | — (an allowlist: only the 139 registered preference keys plus `New Bookmarks`, `Default Bookmark Guid`, `GlobalKeyMap` travel) | `NoSyncOpenAIAPIKey` · `NoUserDefaultAIAPIKey` · `AICustomHeaders`; the secret scan is the backstop for profile text | `com.googlecode.iterm2` | <https://iterm2.com/downloads.html> | `iterm2` |
 
 ### `docker` notes
 
@@ -133,8 +133,9 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   part, a dot-leading `.x.json` is synced too, although iTerm2 itself never loads it. `Profiles` is merged by `Guid`.
 - **Default profile.** A fresh install gives its default profile a `Guid` of its own, so two Macs that never shared
   settings keep two "Default" profiles and `Default Bookmark Guid` is a both-sides change: a one-time choice.
-- The policy history entry was **replaced**, not appended, because no `v*` tag has shipped an `iterm2` policy yet (the
-  `orca` precedent, #115).
+- The policy history entry was **appended** (`b42de256…` from the Dynamic-Profiles-only build, then this one), so a
+  build that ran the first stays a known stamp. Only plist files that are documents are allowed: the adapter writes
+  canonical (sorted) XML, so a plain `.plist` file would be re-ordered on its first merge.
 
 ### `vscode` notes
 

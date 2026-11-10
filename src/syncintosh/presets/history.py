@@ -70,6 +70,9 @@ POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "claude-sessions": ("d33cbc67ca56056a31fb785ec3d98d42d173ca23c07ec7d68c9e00f06bcfcefd",),
         "codex-sessions": ("1c179038e2d2317296aff07bf494e2591a0f8d99ca238bb3a7e1afc7006e5556",),
         "ghostty": ("c2f1c1e25831d5f3e43e2e59090870138a23ec592f0ebca49f89e56fdcb39b90",),
-        "iterm2": ("22e1a60032ca1bb682159760080a6b533dd2a89ec09c0c59950ce5938ca7bc46",),
+        "iterm2": (
+            "b42de256170ba36a7db815e15b476915e351a8ada69f216f2576230af761de07",
+            "f90ae0e77816dccaf5c4e407dfe1485dea8bb8623b5a9320023d18e666592db7",
+        ),
     }
 )

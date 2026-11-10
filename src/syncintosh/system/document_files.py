@@ -148,9 +148,11 @@ class DocumentSkipCheck:
         self._stores = stores
         self._sources = tuple(source for source in sources if source.skip_when != "")
 
-    def reasons(self) -> Mapping[str, str]:
+    def reasons(self, tracked: frozenset[str]) -> Mapping[str, str]:
         found: dict[str, str] = {}
         for source in self._sources:
+            if source.view not in tracked:
+                continue
             reason = self._reason(source)
             if reason is not None:
                 found[source.view] = reason
@@ -164,7 +166,8 @@ class DocumentSkipCheck:
             if not store.present(source):
                 return None
             read = store.read(source)
-        except DocumentRefused:
+        except (DocumentRefused, OSError):
+            # An unreadable folder is one document left alone, not a reason to stop every other preset's cycle.
             return CANNOT_TELL
         return None if read is None else skip_reason(source, read.payload)
 

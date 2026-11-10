@@ -49,10 +49,11 @@ honoured in full, and a test pins that every key seen on the inspected machine i
 the Keychain or the 1Password and LastPass tools; none of that is in the domain. The three keys in `EXCLUDED_NAMES`
 are the ones that could hold a secret in the domain itself (the deprecated plaintext `NoSyncOpenAIAPIKey`, the
 `NoUserDefaultAIAPIKey` placeholder, `AICustomHeaders` which can carry a bearer token); the AI keys are local as a
-whole. A profile is the user's own text: `Command`, `Custom Command`, `Initial Text`, trigger parameters, `Keyboard
-Map` send-text actions and snippets are where a credential could be typed, and **the secret scan is the only gate for
-them** (a heuristic, not a guarantee). `Working Directory` and `Custom Directory` are synced as written, so a path under
-a home folder that differs between Macs is a profile edit to make once.
+whole. A profile is the user's own text: `Command`, `Custom Command`, `Initial Text`, trigger parameters and `Keyboard
+Map` send-text actions are where a credential could be typed, and **the secret scan is the only gate for
+them** (a heuristic, not a guarantee). `Working Directory`, `Custom Directory` and `Background Image Location` are synced as
+written, so a path under a home folder that differs between Macs is a profile edit to make once. Snippets are not in
+the domain's allowlist at all (iTerm2 syncs them through their own file).
 
 **Open design points.** A fresh install gives its default profile a `Guid` of its own, so two Macs that never shared
 settings hold two "Default" profiles and a `Default Bookmark Guid` that differ: the merge keeps both profiles and the
@@ -143,7 +144,6 @@ SYNCED_NAMES: tuple[str, ...] = (
     "HotkeyAutoHides",
     "HotkeyChar",
     "HotkeyCode",
-    "HotkeyMigratedFromSingleToMulti",
     "HotkeyModifiers",
     "IRMemory",
     "JobName",
@@ -217,7 +217,6 @@ SYNCED_NAMES: tuple[str, ...] = (
     "ThreeFingerEmulates",
     "TmuxDashboardLimit",
     "TmuxPauseModeAgeLimit",
-    "TmuxSyncClipboard",
     "TmuxUnpauseAutomatically",
     "TmuxUsesDedicatedProfile",
     "TmuxWarnBeforePausing",
@@ -298,8 +297,14 @@ LOCAL: Mapping[str, frozenset[str]] = MappingProxyType(
                 "UseRecommendedAIModel",
             }
         ),
+        "a migration marker: this Mac's own history decides it, and a copied one skips the migration": frozenset(
+            {
+                "HotkeyMigratedFromSingleToMulti",
+            }
+        ),
         "a permission: widening what a program may do is not synced as a side effect": frozenset(
             {
+                "TmuxSyncClipboard",
                 "AllowClipboardAccess",
                 "EnableAPIServer",
                 "PhonyAllowSendingClipboardContents",

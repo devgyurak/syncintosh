@@ -670,8 +670,11 @@ class DocumentSkips(Protocol):
     to tell, is (`core/documents.py`, `skip_reason`).
     """
 
-    def reasons(self) -> Mapping[str, str]:
-        """`$HOME`-relative view path → why that document is skipped; documents that are not skipped are absent."""
+    def reasons(self, tracked: frozenset[str]) -> Mapping[str, str]:
+        """`$HOME`-relative view path → why that document is skipped; documents that are not skipped are absent.
+
+        Only a document whose view is in `tracked` is looked at, so an app this machine does not sync is never asked.
+        """
         ...
 
 
