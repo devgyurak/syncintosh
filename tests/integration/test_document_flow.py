@@ -309,7 +309,7 @@ class _StaleOnWrite:
     def read(self, path: str) -> bytes | None:
         return self._inner.read(path)
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         if path.endswith("@state/settings.json"):
             raise DocumentStale("the document changed since it was read, so it was not written")
         self._inner.write(path, data)
@@ -394,7 +394,7 @@ def test_the_refused_document_arrives_once_the_database_is_supported_again(
 class _CommitsThenFailsToVerify(_StaleOnWrite):
     """A `LiveFiles` whose document write really happens, then reports that the read-back did not confirm it."""
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         self._inner.write(path, data)
         if path.endswith("@state/settings.json"):
             raise DocumentWrittenUnverified("the document was written but reading it back did not confirm it")

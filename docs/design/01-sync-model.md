@@ -151,6 +151,17 @@ directory passes the symlink/deny/escape checks. `syncintosh watch` follows the 
 profile list, and looks again after each sync, so a profile created in the app is picked up
 (``docs/design/03-manifest.md``, "Profile paths in the local allowlist").
 
+## Append-only files
+
+A file a preset marks `append_only` (an agent's session transcript, issue #56, `docs/design/07-session-history.md`) is
+not three-way merged and is **not** written by the ordinary apply rules. It is compared with HEAD's copy by prefix
+(`core/append.py`): collect takes the local file only when it extends HEAD's, a diverged merge keeps the repository's
+copy, and apply writes it only when it is missing or HEAD's copy **strictly extends** the local one. That is the one
+exception to "an overwrite must replace only bytes some commit holds": the old bytes are a prefix of the new, so nothing
+is lost and no restore point is made. The write is a temp-and-rename, so the file gets a fresh mtime. A local file that
+is longer, or has forked, is never shortened or replaced, and a file removed here is never recreated (the suppressed
+rule). A session the agent has open, or whose state cannot be told, is neither collected nor written.
+
 ## Change detection is against the apply ledger
 
 Step 4 must not compare the live files with `HEAD`. Apply runs *after* the push, so between

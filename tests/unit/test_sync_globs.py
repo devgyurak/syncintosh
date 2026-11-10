@@ -125,7 +125,7 @@ class _ListingLive:
     def read(self, path: str) -> bytes | None:
         return None
 
-    def write(self, path: str, data: bytes) -> None: ...
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None: ...
 
     def exists(self, path: str) -> bool:
         return False

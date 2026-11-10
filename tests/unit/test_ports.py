@@ -392,7 +392,7 @@ def test_live_files_port_is_structural() -> None:
         def read(self, path: str) -> bytes | None:
             return None
 
-        def write(self, path: str, data: bytes) -> None: ...
+        def write(self, path: str, data: bytes, *, private: bool = False) -> None: ...
 
         def exists(self, path: str) -> bool:
             return False

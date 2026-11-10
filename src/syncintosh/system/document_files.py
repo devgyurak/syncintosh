@@ -46,10 +46,10 @@ class DocumentLiveFiles:
         self._seen[source.view] = read.revision
         return render_view(read.payload)
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         source = self._views.get(self._key(path))
         if source is None:
-            self._inner.write(path, data)
+            self._inner.write(path, data, private=private)
             return
         revision = self._seen.get(source.view)
         if revision is None:
