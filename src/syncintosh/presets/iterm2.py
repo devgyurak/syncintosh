@@ -51,9 +51,9 @@ are the ones that could hold a secret in the domain itself (the deprecated plain
 `NoUserDefaultAIAPIKey` placeholder, `AICustomHeaders` which can carry a bearer token); the AI keys are local as a
 whole. A profile is the user's own text: `Command`, `Custom Command`, `Initial Text`, trigger parameters and `Keyboard
 Map` send-text actions are where a credential could be typed, and **the secret scan is the only gate for
-them** (a heuristic, not a guarantee). `Working Directory`, `Custom Directory` and `Background Image Location` are synced as
-written, so a path under a home folder that differs between Macs is a profile edit to make once. Snippets are not in
-the domain's allowlist at all (iTerm2 syncs them through their own file).
+them** (a heuristic, not a guarantee). `Working Directory`, `Custom Directory` and `Background Image Location`
+are synced as written, so a path under a home folder that differs between Macs is a profile edit to make once.
+Snippets are not in the allowlist at all (iTerm2 syncs them through their own file).
 
 **Open design points.** A fresh install gives its default profile a `Guid` of its own, so two Macs that never shared
 settings hold two "Default" profiles and a `Default Bookmark Guid` that differ: the merge keeps both profiles and the
