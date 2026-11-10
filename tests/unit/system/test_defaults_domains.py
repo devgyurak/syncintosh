@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import plistlib
 import stat
+import subprocess
 
 import pytest
 
@@ -340,12 +341,14 @@ def test_a_document_that_is_not_a_plist_dictionary_is_refused_before_any_change(
     assert fake_defaults.values(_home(tmp_path), DOMAIN) == {"a": 1}
 
 
+def _times_out(command, **options):
+    raise subprocess.TimeoutExpired(command, 10.0)
+
+
 def test_an_import_that_outlives_the_timeout_is_the_unverified_signal_not_a_refusal(
     tmp_path, fake_defaults, monkeypatch
 ) -> None:
     # given — exports answer; the import times out (the wrapper raises what `subprocess.run` raises, with no wait)
-    import subprocess
-
     fake_defaults.seed(_home(tmp_path), DOMAIN, {"a": 1})
     store = _store(tmp_path, fake_defaults)
     read = store.read(SOURCE)
@@ -353,9 +356,7 @@ def test_an_import_that_outlives_the_timeout_is_the_unverified_signal_not_a_refu
     real_run = subprocess.run
 
     def run(command, **options):
-        if command[1] == "import":
-            raise subprocess.TimeoutExpired(command, 10.0)
-        return real_run(command, **options)
+        return (_times_out if command[1] == "import" else real_run)(command, **options)
 
     monkeypatch.setattr("syncintosh.system.defaults_domains.subprocess.run", run)
 
