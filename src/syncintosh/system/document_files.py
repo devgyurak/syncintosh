@@ -31,6 +31,7 @@ from syncintosh.core.documents import (
     skip_reason,
 )
 from syncintosh.core.errors import DocumentRefused
+from syncintosh.core.paths import collision_key
 from syncintosh.core.ports import DocumentSkips, DocumentStore, LiveFiles
 
 
@@ -150,8 +151,10 @@ class DocumentSkipCheck:
 
     def reasons(self, tracked: frozenset[str]) -> Mapping[str, str]:
         found: dict[str, str] = {}
+        # Compared the way `LivePaths.resolve` compares, so a hand-typed path in another case still counts as tracked.
+        tracked_keys = {collision_key(path) for path in tracked}
         for source in self._sources:
-            if source.view not in tracked:
+            if collision_key(source.view) not in tracked_keys:
                 continue
             reason = self._reason(source)
             if reason is not None:

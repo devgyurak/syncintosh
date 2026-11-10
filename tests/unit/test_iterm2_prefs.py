@@ -311,3 +311,13 @@ def test_a_plist_file_that_is_not_a_documents_view_is_refused() -> None:
 def test_a_migration_marker_and_a_clipboard_mirror_stay_local(key: str) -> None:
     # when & then
     assert (key in LOCAL_NAMES, key in SYNCED_NAMES) == (True, False)
+
+
+def test_a_tracked_path_typed_in_another_case_is_still_checked() -> None:
+    # given
+    check = DocumentSkipCheck(
+        {CFPREFS_DOMAIN: _Store(_plist("<key>LoadPrefsFromCustomFolder</key><true/>"))}, (SOURCE,)
+    )
+
+    # when & then — APFS is case-insensitive, and `resolve` folds the same way
+    assert dict(check.reasons(frozenset({VIEW.upper()}))) == {VIEW: SOURCE.skip_because}
