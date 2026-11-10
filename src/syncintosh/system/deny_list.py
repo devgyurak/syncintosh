@@ -133,6 +133,8 @@ DENIED_PATHS: tuple[str, ...] = (
     # environment dumps, file backups or live process state. A wildcard covers the names the CLIs add and rotate
     # (`.claude.json.backup`, `daemon.sock`, `state_5.sqlite-wal`), so the next one fails closed.
     ".claude.json*",
+    # The plaintext OAuth file Claude Code falls back to when it cannot use the keychain.
+    ".claude/.credentials.json",
     ".claude/session-env",
     ".claude/shell-snapshots",
     ".claude/file-history",

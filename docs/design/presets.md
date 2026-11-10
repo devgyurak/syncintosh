@@ -412,8 +412,11 @@ collected until a project is listed, and a record is written only under a name t
 * `presets` lists what travels for the project; `init --preset claude-memory` is refused, because it would track nothing.
 * The root must exist on this Mac (apply defers until the project is cloned) and must not be a symlink, a dangerous path,
   or leave `$HOME`. The agent's own folder is created on apply if the agent has not run in the project yet.
-* **Refused, and shown in `syncintosh doctor`:** `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_PROJECT_DIR_NAME` set (the derived folder
-  would be wrong). **Skipped for the project:** `autoMemoryDirectory` in `~/.claude/settings.json` or the project's
+* **Refused, and shown in `syncintosh doctor`:** `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_PROJECT_DIR_NAME`, `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` or
+  `CLAUDE_CODE_REMOTE_MEMORY_DIR` set. The check reads the environment of the process that runs the sync: the launchd daemon
+  gets only `PATH`, so a variable exported in `.zshrc` is seen by `sync` and `doctor` but **not** by the daemon. Do not
+  relocate Claude's data and run the daemon without telling it (not detected, a documented limit). A layout is refused
+  because its derived folder would be wrong. **Skipped for the project:** `autoMemoryDirectory` in `~/.claude/settings.json` or the project's
   `.claude/settings{,.local}.json` (only that key is read; a file that cannot be read counts as set).
 * v1 maps the root the person names, which for memory is the repository's canonical git root (memory is shared by its
   worktrees). A worktree is not mapped separately.

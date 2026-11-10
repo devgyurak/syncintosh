@@ -208,7 +208,8 @@ class AgentProjectSpec:
 
     def holds_memory(self, relative: str) -> bool:
         """True when `relative` lies in the part the agent lets the person relocate."""
-        return self.memory_prefix is not None and relative.startswith(self.memory_prefix)
+        # Folded, so `MEMORY/` on a case-insensitive volume is still the relocatable directory.
+        return self.memory_prefix is not None and collision_key(relative).startswith(collision_key(self.memory_prefix))
 
     def contains_home(self, path: str) -> bool:
         """True when `path` lies under this layout's home, whatever it names (a raw folder or a logical one)."""

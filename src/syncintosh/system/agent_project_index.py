@@ -34,7 +34,15 @@ from syncintosh.core.agent_projects import (
 from syncintosh.core.ports import DenyList
 
 # The environment variables that move or rename the agent's data, by agent kind.
-OVERRIDE_VARIABLES: dict[str, tuple[str, ...]] = {"claude": ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PROJECT_DIR_NAME")}
+OVERRIDE_VARIABLES: dict[str, tuple[str, ...]] = {
+    "claude": (
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_PROJECT_DIR_NAME",
+        # Both move where memory is kept, like `autoMemoryDirectory` does.
+        "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
+        "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+    )
+}
 
 # A settings file is a few KiB. A bound keeps a planted or runaway file from being read whole into memory.
 MAX_SETTINGS_BYTES = 1024 * 1024
@@ -95,15 +103,21 @@ class SystemAgentProjectIndex:
         """True when the settings file at `relative` sets the memory directory, or cannot be read to say it does not."""
         path = Path(self._home) / relative
         try:
-            status = path.lstat()
+            # A settings file kept in a dotfiles repo is a link to a regular file, and that is the file Claude reads:
+            # follow it, but read at most the bound whatever the target turns out to be.
+            status = path.stat()
         except FileNotFoundError:
             return False
         except OSError:
             return True
-        if not stat.S_ISREG(status.st_mode) or status.st_size > MAX_SETTINGS_BYTES:
+        if not stat.S_ISREG(status.st_mode):
             return True
         try:
-            document = json.loads(path.read_text(encoding="utf-8"))
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_SETTINGS_BYTES + 1)
+            if len(raw) > MAX_SETTINGS_BYTES:
+                return True
+            document = json.loads(raw.decode("utf-8"))
         except (OSError, UnicodeDecodeError, ValueError, RecursionError):
             return True
         return isinstance(document, dict) and document.get(_MEMORY_KEY) not in (None, "")
