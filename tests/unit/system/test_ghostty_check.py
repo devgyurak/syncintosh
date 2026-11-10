@@ -7,6 +7,7 @@ CI has no Ghostty and a real app must never be run: every case drives a fake `gh
 from __future__ import annotations
 
 import contextlib
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -37,9 +38,9 @@ exit 0
 """
 
 
-def _fake_app(root: Path, *, script: str | None = None) -> tuple[Path, Path, Path]:
-    """A `Ghostty.app` bundle whose binary is the fake; returns (app, call log, copy of the checked text)."""
-    app = root / "Ghostty.app"
+def _fake_app(root: Path, *, script: str | None = None, home: str = "home") -> tuple[Path, Path, Path]:
+    """A `Ghostty.app` bundle in `<home>/Applications` whose binary is the fake; returns (app, call log, text copy)."""
+    app = root / home / "Applications" / "Ghostty.app"
     binary = app / "Contents" / "MacOS" / "ghostty"
     binary.parent.mkdir(parents=True)
     log, seen = root / "calls.log", root / "seen.txt"
@@ -177,39 +178,71 @@ exit 0
 
 def test_a_missing_directory_falls_back_to_a_private_one_that_is_removed(tmp_path) -> None:
     # given — the target's directory does not exist yet (a first apply)
-    app, log, _ = _fake_app(tmp_path)
+    app, log, _ = _fake_app(tmp_path, home="bare-home")
     home = tmp_path / "bare-home"
-    home.mkdir()
 
     # when
     _validator(app, home).check(VALID, subject=SUBJECT)
 
     # then — checked somewhere else, that place is gone, and no directory was made under the home
     checked = Path(log.read_text(encoding="utf-8").splitlines()[0])
-    assert (checked.parent.exists(), checked.parent.parent != home, list(home.iterdir())) == (False, True, [])
+    assert (checked.parent.exists(), checked.parent.parent != home, [each.name for each in home.iterdir()]) == (
+        False,
+        True,
+        ["Applications"],
+    )
 
 
 @pytest.mark.parametrize(
-    ("include_present", "expected"),
-    [(True, "passes"), (False, "refused")],
-    ids=["include-beside-target", "include-missing"],
+    ("includes", "expectation"),
+    [([], pytest.raises(SyntaxInvalid)), (["needed"], contextlib.nullcontext())],
+    ids=["include-missing", "include-beside-target"],
 )
-def test_a_relative_include_is_resolved_beside_the_target(tmp_path, include_present, expected) -> None:
+def test_a_relative_include_is_resolved_beside_the_target(tmp_path, includes, expectation) -> None:
     # given — a required include, present in the target's directory or not
     app, _, _ = _fake_app(tmp_path)
     home = _home(tmp_path)
-    (home / ".config" / "ghostty" / "needed").write_text("", encoding="utf-8") if include_present else None
+    [(home / ".config" / "ghostty" / name).write_text("", encoding="utf-8") for name in includes]
+
+    # when & then
+    with expectation:
+        _validator(app, home).check("config-file = needed\n", subject=SUBJECT)
+
+
+@pytest.mark.parametrize("place", ["Downloads", "Volumes/Ghostty-Installer", "build"])
+def test_a_bundle_outside_an_install_location_is_never_run(tmp_path, place) -> None:
+    # given — Spotlight lists a bundle that is not where an install puts one
+    elsewhere = tmp_path / place
+    app, log, _ = _fake_app(tmp_path)
+    moved = elsewhere / "Ghostty.app"
+    moved.parent.mkdir(parents=True)
+    app.rename(moved)
 
     # when
-    outcomes: list[str] = []
-    try:
-        _validator(app, home).check("config-file = needed\n", subject=SUBJECT)
-        outcomes.append("passes")
-    except SyntaxInvalid:
-        outcomes.append("refused")
+    with pytest.raises(SyntaxInvalid, match="no ghostty to validate against"):
+        _validator(moved, _home(tmp_path)).check(VALID, subject=SUBJECT)
+
+    # then — and it was never started
+    assert log.exists() is False
+
+
+def test_a_write_that_fails_part_way_leaves_no_fragment_behind(tmp_path, monkeypatch) -> None:
+    # given — the disk fills up after the file is created
+    app, _, _ = _fake_app(tmp_path)
+    home = _home(tmp_path)
+
+    def _full(descriptor: int, data: bytes) -> None:
+        os.close(descriptor)
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(ghostty_check, "_write_all", _full)
+
+    # when
+    with pytest.raises(SyntaxInvalid, match="could not run"):
+        _validator(app, home).check(VALID, subject=SUBJECT)
 
     # then
-    assert outcomes == [expected]
+    assert list((home / ".config" / "ghostty").iterdir()) == []
 
 
 def test_an_optional_include_may_be_absent(tmp_path) -> None:

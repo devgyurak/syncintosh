@@ -31,9 +31,9 @@ from syncintosh.system.app_detector import find_app_paths
 
 BUNDLE_ID = "com.mitchellh.ghostty"
 
-# A config is small; a check that hangs is a bug, not a slow file. Looser than the shell check's bound because
-# this one starts a whole GUI application's binary, whose first launch after a login can be slow.
-TIMEOUT_SECONDS = 10
+# A config is small and `+validate-config` answers in tens of milliseconds, so a check that hangs is a bug, not a
+# slow file; this is the upper bound a sync cycle holds its lock for.
+TIMEOUT_SECONDS = 5
 
 # `theme = X` is looked up under `$HOME/.config/ghostty/themes`, so the check needs the real HOME; nothing
 # else of the caller's environment is passed on.
@@ -42,21 +42,22 @@ _PATH = "/usr/bin:/bin"
 AppFinder = Callable[[str], tuple[str, ...] | None]
 
 
-def _binary(find: AppFinder) -> str | None:
-    """The first installed Ghostty's executable, or `None` when there is none to run."""
-    apps = find(BUNDLE_ID)
-    candidates = (Path(app) / "Contents" / "MacOS" / "ghostty" for app in apps or ())
+def _binary(find: AppFinder, home: str) -> str | None:
+    """The executable of an installed Ghostty, or `None` when there is none to run.
+
+    Spotlight also lists a bundle sitting in `~/Downloads`, on a mounted disk image or in a build folder, in no
+    particular order. This runs the binary on the user's whole config, so only a bundle in a place an install
+    puts one (`/Applications`, `~/Applications`, which is where a cask installs it) is trusted.
+    """
+    roots = (Path("/Applications"), Path(home) / "Applications")
+    apps = [Path(app) for app in find(BUNDLE_ID) or ()]
+    candidates = (app / "Contents" / "MacOS" / "ghostty" for app in apps if app.parent in roots)
     return next((str(each) for each in candidates if each.is_file() and os.access(each, os.X_OK)), None)
 
 
-def _write_beside(target: Path, data: bytes) -> Path:
-    """A hidden `0600` file next to `target` holding `data`, created exclusively; the caller removes it."""
-    name = f".{target.name}.{os.urandom(8).hex()}.syncintosh-check"
-    path = target.parent / name
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+def _write_all(descriptor: int, data: bytes) -> None:
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(data)
-    return path
 
 
 class GhosttySyntaxValidator:
@@ -72,39 +73,38 @@ class GhosttySyntaxValidator:
 
     def check(self, text: str, *, subject: str) -> None:
         """Raise `SyntaxInvalid` when `text` is not a config Ghostty accepts; return `None` when it is."""
-        binary = _binary(self._find)
+        home = self._home if self._home is not None else str(Path.home())
+        binary = _binary(self._find, home)
         if binary is None:
             raise SyntaxInvalid(f"{subject}: no ghostty to validate against")
-        home = self._home if self._home is not None else str(Path.home())
         target = Path(home) / (subject[2:] if subject.startswith("~/") else subject)
         data = text.encode("utf-8")
         try:
             if target.parent.is_dir():
-                self._run(binary, home, _write_beside(target, data), subject)
+                self._check_file(binary, home, target.parent, target.name, data, subject)
             else:
-                self._run_in_private_directory(binary, home, target.name, data, subject)
+                with tempfile.TemporaryDirectory(prefix="syncintosh-ghostty-") as directory:
+                    self._check_file(binary, home, Path(directory), target.name, data, subject)
         except SyntaxInvalid:
             raise
         except (OSError, subprocess.SubprocessError) as exc:
             raise SyntaxInvalid(f"{subject}: the ghostty syntax check could not run") from exc
 
-    def _run_in_private_directory(self, binary: str, home: str, name: str, data: bytes, subject: str) -> None:
-        with tempfile.TemporaryDirectory(prefix="syncintosh-ghostty-") as directory:
-            path = Path(directory) / name
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(data)
-            self._run(binary, home, path, subject)
+    def _check_file(self, binary: str, home: str, directory: Path, name: str, data: bytes, subject: str) -> None:
+        """Check `data` as a hidden `0600` file in `directory`, created exclusively and removed however this ends.
 
-    def _run(self, binary: str, home: str, path: Path, subject: str) -> None:
-        """Run the check on `path`, then remove it; only the exit code is read."""
-        env = {"HOME": home, "PATH": _PATH, "LC_ALL": "C"}
+        Creating and writing sit inside the `try` with the removal: a write that fails part-way (a full disk) must
+        not leave a fragment of the user's config behind.
+        """
+        path = directory / f".{name}.{os.urandom(8).hex()}.syncintosh-check"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
+            _write_all(descriptor, data)
             result = subprocess.run(
                 [binary, "+validate-config", f"--config-file={path}"],
                 capture_output=True,
                 timeout=self._timeout,
-                env=env,
+                env={"HOME": home, "PATH": _PATH, "LC_ALL": "C"},
                 check=False,
             )
         finally:
