@@ -197,18 +197,49 @@ def test_a_settings_file_that_cannot_be_read_counts_as_relocated(tmp_path: Path,
     assert entry.memory_relocated is True
 
 
-def test_a_settings_file_that_is_a_symlink_counts_as_relocated(tmp_path: Path) -> None:
-    # given
+@pytest.mark.parametrize(
+    ("content", "expected"), [('{"autoMemoryDirectory": "x"}', True), ('{"theme": "dark"}', False)]
+)
+def test_a_settings_file_that_is_a_link_to_a_regular_file_is_read_through(
+    tmp_path: Path, content: str, expected: bool
+) -> None:
+    # given — dotfiles keep the real file elsewhere and link it in
     home = _home(tmp_path)
     (home / ".claude").mkdir()
-    (tmp_path / "real.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "real.json").write_text(content, encoding="utf-8")
     (home / ".claude" / "settings.json").symlink_to(tmp_path / "real.json")
 
     # when
     entry = _read(home, _project()).lookup("work")
 
     # then
+    assert entry.memory_relocated is expected
+
+
+def test_a_settings_file_that_is_a_link_to_a_directory_counts_as_relocated(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    (home / ".claude").mkdir()
+    (tmp_path / "dir").mkdir()
+    (home / ".claude" / "settings.json").symlink_to(tmp_path / "dir")
+
+    # when
+    entry = _read(home, _project()).lookup("work")
+
+    # then
     assert entry.memory_relocated is True
+
+
+@pytest.mark.parametrize("variable", ["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_REMOTE_MEMORY_DIR"])
+def test_the_memory_overrides_refuse_the_layout_too(tmp_path: Path, variable: str) -> None:
+    # given
+    home = _home(tmp_path)
+
+    # when
+    entry = _read(home, _project(), environ={variable: "/x"}).lookup("work")
+
+    # then
+    assert (entry.directory, variable in entry.reason) == (None, True)
 
 
 def test_the_environment_is_read_when_the_index_reads_not_when_it_is_built(tmp_path: Path, monkeypatch) -> None:

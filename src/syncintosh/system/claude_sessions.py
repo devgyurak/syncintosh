@@ -45,6 +45,7 @@ _SESSION_OF: Final = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 _VERSION: Final = re.compile(r"\d+\.\d+\.\d+")
 # The directories beside a transcript that hold its files, and nothing else is listed.
 _SESSION_DIRECTORIES: Final = ("subagents", "tool-results")
+_WORKFLOWS: Final = "workflows"
 
 # A real session holds a handful of files; a bound keeps a runaway folder from being walked whole.
 MAX_SESSION_FILES: Final = 2_000
@@ -168,7 +169,11 @@ class ClaudeSessionStore:
             if policy is None or not policy.append_only:
                 # A file the preset does not list is not part of the session this tool carries.
                 continue
-            status = (Path(self._home) / folder / relative).lstat()
+            try:
+                status = (Path(self._home) / folder / relative).lstat()
+            except OSError:
+                # Claude's own cleanup removed it between the listing and now: the session is not whole, so it waits.
+                return None, SessionSkipped.create(session_id=session, reason="unknown")
             files.append(
                 SessionFile.create(
                     path=logical, live=f"{folder}/{relative}", size=status.st_size, mtime=status.st_mtime
@@ -189,7 +194,14 @@ class ClaudeSessionStore:
         except OSError as exc:
             raise _UnsafeError from exc
         for entry in sorted(entries, key=lambda each: each.name):
-            mode = entry.stat(follow_symlinks=False).st_mode
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError as exc:
+                raise _UnsafeError from exc
+            if name == "subagents" and entry.name == _WORKFLOWS and stat.S_ISDIR(mode):
+                # Claude Code 2.1.308 keeps a workflow's sub-agents one level down: `workflows/<run>/agent-*`.
+                found.extend(ClaudeSessionStore._workflow_files(session_directory, name))
+                continue
             if not stat.S_ISREG(mode):
                 raise _UnsafeError
             found.append(f"{session_directory.name}/{name}/{entry.name}")
@@ -198,6 +210,28 @@ class ClaudeSessionStore:
     def retired(self, path: str) -> bool:
         """Claude Code does not move or compress a session away, so nothing is ever retired."""
         return False
+
+    @staticmethod
+    def _workflow_files(session_directory: Path, name: str) -> list[str]:
+        """`<uuid>/subagents/workflows/<run>/<file>` for every regular file; a link or an odd entry is unsafe."""
+        root = session_directory / name / _WORKFLOWS
+        found: list[str] = []
+        try:
+            runs = sorted(os.scandir(root), key=lambda each: each.name)
+        except OSError as exc:
+            raise _UnsafeError from exc
+        for run in runs:
+            if run.is_symlink() or not run.is_dir(follow_symlinks=False):
+                raise _UnsafeError
+            try:
+                entries = sorted(os.scandir(run.path), key=lambda each: each.name)
+                modes = [(entry.name, entry.stat(follow_symlinks=False).st_mode) for entry in entries]
+            except OSError as exc:
+                raise _UnsafeError from exc
+            if any(not stat.S_ISREG(mode) for _, mode in modes):
+                raise _UnsafeError
+            found.extend(f"{session_directory.name}/{name}/{_WORKFLOWS}/{run.name}/{file}" for file, _ in modes)
+        return found
 
     def session_of(self, path: str) -> str | None:
         """The session id of a record path under a project this machine enabled, else `None`."""
@@ -273,7 +307,8 @@ def process_alive(pid: int) -> bool:
     """True when a process with `pid` exists (a process we may not signal still exists)."""
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
+        # No such process, or a pid no process can have (a file with a huge number must not abort the cycle).
         return False
     except PermissionError:
         return True

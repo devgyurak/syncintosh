@@ -652,3 +652,133 @@ def test_claude_version_output_that_is_not_text_is_unknown_not_a_crash(monkeypat
 
     # then
     assert version is None
+
+
+# --------------------------------------------------------------------------- workflows (review of #125)
+
+RUN = "wf-0001"
+
+
+def test_a_workflows_sub_agent_files_are_part_of_the_session(tmp_path: Path) -> None:
+    # given — Claude Code 2.1.308 keeps a workflow's sub-agents one level down, under a run folder
+    home = _home(tmp_path)
+    folder = _folder(home)
+    _files(
+        folder,
+        f"{SESSION}.jsonl",
+        f"{SESSION}/subagents/agent-a1.jsonl",
+        f"{SESSION}/subagents/workflows/{RUN}/agent-b1.jsonl",
+        f"{SESSION}/subagents/workflows/{RUN}/agent-b1.meta.json",
+    )
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert (sorted(f.path for f in listing.units[0].files), listing.skipped) == (
+        sorted(
+            _logical(relative)
+            for relative in (
+                f"{SESSION}.jsonl",
+                f"{SESSION}/subagents/agent-a1.jsonl",
+                f"{SESSION}/subagents/workflows/{RUN}/agent-b1.jsonl",
+                f"{SESSION}/subagents/workflows/{RUN}/agent-b1.meta.json",
+            )
+        ),
+        (),
+    )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{SESSION}/subagents/workflows/{RUN}/agent-b1.jsonl",
+        f"{SESSION}/subagents/workflows/{RUN}/agent-b1.forked-skill.marker.json",
+    ],
+)
+def test_a_workflow_file_is_owned_by_the_preset(relative: str) -> None:
+    # when
+    owned = CATALOG.policy_for(_logical(relative))
+
+    # then
+    assert owned is not None and owned.append_only
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"{SESSION}/subagents/workflows/{RUN}/notes.md",
+        f"{SESSION}/subagents/workflows/agent-b1.jsonl",
+        f"{SESSION}/subagents/workflows/{RUN}/deeper/agent-b1.jsonl",
+        f"{SESSION}/workflows/{RUN}/agent-b1.jsonl",
+    ],
+)
+def test_other_names_under_workflows_are_not_owned(relative: str) -> None:
+    # when
+    owned = CATALOG.policy_for(_logical(relative))
+
+    # then
+    assert owned is None
+
+
+@pytest.mark.parametrize("odd", ["link", "directory"])
+def test_a_link_or_directory_inside_a_workflow_run_leaves_the_session_out(tmp_path: Path, odd: str) -> None:
+    # given
+    home = _home(tmp_path)
+    folder = _folder(home)
+    _files(folder, f"{SESSION}.jsonl", f"{SESSION}/subagents/workflows/{RUN}/agent-b1.jsonl")
+    target = folder / SESSION / "subagents" / "workflows" / RUN / "agent-b2.jsonl"
+    (tmp_path / "x").write_bytes(b"x")
+    {"link": lambda: target.symlink_to(tmp_path / "x"), "directory": lambda: target.mkdir()}[odd]()
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert (listing.units, [s.reason for s in listing.skipped]) == ((), ["unknown"])
+
+
+def test_a_linked_workflow_run_folder_leaves_the_session_out(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    folder = _folder(home)
+    _file(folder / f"{SESSION}.jsonl")
+    _file(tmp_path / "elsewhere" / "agent-b1.jsonl")
+    (folder / SESSION / "subagents" / "workflows").mkdir(parents=True)
+    (folder / SESSION / "subagents" / "workflows" / RUN).symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert [s.reason for s in listing.skipped] == ["unknown"]
+
+
+def test_a_file_removed_after_it_was_listed_leaves_the_session_out_instead_of_aborting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # given — the agent's own cleanup removes the transcript after the session's folders were read, before its `lstat`
+    home = _home(tmp_path)
+    target = _file(_folder(home) / f"{SESSION}.jsonl")
+    original = ClaudeSessionStore._regular_files
+
+    def read_then_remove(session_directory: Path, name: str) -> list[str]:
+        found = original(session_directory, name)
+        target.unlink(missing_ok=True)
+        return found
+
+    monkeypatch.setattr(ClaudeSessionStore, "_regular_files", staticmethod(read_then_remove))
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert (listing.units, [s.reason for s in listing.skipped]) == ((), ["unknown"])
+
+
+def test_a_pid_no_process_can_have_does_not_abort_the_probe() -> None:
+    # when
+    alive = module.process_alive(2**80)
+
+    # then
+    assert alive is False

@@ -132,7 +132,13 @@ def test_the_template_of_a_logical_path_names_the_bare_marker() -> None:
 
 @pytest.mark.parametrize(
     ("relative", "held"),
-    [("memory/MEMORY.md", True), ("memory/sub/a.md", True), ("abc.jsonl", False), ("memoryx/a.md", False)],
+    [
+        ("memory/MEMORY.md", True),
+        ("memory/sub/a.md", True),
+        ("MEMORY/a.md", True),
+        ("abc.jsonl", False),
+        ("memoryx/a.md", False),
+    ],
 )
 def test_only_the_relocatable_part_counts_as_memory(relative: str, held: bool) -> None:
     # when

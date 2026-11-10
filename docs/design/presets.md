@@ -414,8 +414,11 @@ collected until a project is listed, and a record is written only under a name t
 * `presets` lists what travels for the project; `init --preset claude-memory` is refused, because it would track nothing.
 * The root must exist on this Mac (apply defers until the project is cloned) and must not be a symlink, a dangerous path,
   or leave `$HOME`. The agent's own folder is created on apply if the agent has not run in the project yet.
-* **Refused, and shown in `syncintosh doctor`:** `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_PROJECT_DIR_NAME` set (the derived folder
-  would be wrong). **Skipped for the project:** `autoMemoryDirectory` in `~/.claude/settings.json` or the project's
+* **Refused, and shown in `syncintosh doctor`:** `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_PROJECT_DIR_NAME`, `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` or
+  `CLAUDE_CODE_REMOTE_MEMORY_DIR` set. The check reads the environment of the process that runs the sync: the launchd daemon
+  gets only `PATH`, so a variable exported in `.zshrc` is seen by `sync` and `doctor` but **not** by the daemon. Do not
+  relocate Claude's data and run the daemon without telling it (not detected, a documented limit). A layout is refused
+  because its derived folder would be wrong. **Skipped for the project:** `autoMemoryDirectory` in `~/.claude/settings.json` or the project's
   `.claude/settings{,.local}.json` (only that key is read; a file that cannot be read counts as set).
 * v1 maps the root the person names, which for memory is the repository's canonical git root (memory is shared by its
   worktrees). A worktree is not mapped separately.
@@ -431,6 +434,10 @@ A secret-scan hit in a memory file stops the cycle like any other file (there is
 Session history (issue #56) rides on `docs/design/07-session-history.md`: append-only text, one unit per session, idle and
 caps, a whole-session refusal on a secret-scan hit, prefix-only apply with a fresh mtime. Claude Code specifics:
 
+* **Workflows** (UNVERIFIED shape): 2.1.308 also keeps a workflow's sub-agents under
+  `<uuid>/subagents/workflows/<run>/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}`. They are listed with
+  the session (one run level, regular files only; a link or an odd entry leaves the session out). Only the folder name was
+  read from the binary; the run id's shape and the file kinds there are assumed to match `subagents/`.
 * **Layout** (2.1.308): `<uuid>.jsonl` plus `<uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,
   forked-skill.marker.json}` and `<uuid>/tool-results/*`. `{uuid}` in a preset path is exactly one UUID, so a record cannot
   name another folder under a project; every other name beside a transcript is left alone.
