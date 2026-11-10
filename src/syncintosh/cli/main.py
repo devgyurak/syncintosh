@@ -149,10 +149,11 @@ def validators() -> dict[ValidatorName, SyntaxValidator]:
     machine. `tests/unit/test_cli.py` compares this map against the literal, so adding a name without
     wiring it fails in CI rather than on a user's machine.
     """
+    from syncintosh.system.ghostty_check import GhosttySyntaxValidator
     from syncintosh.system.json_check import JsonSyntaxValidator
     from syncintosh.system.zsh_check import ZshSyntaxValidator
 
-    return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator()}
+    return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator(), "ghostty": GhosttySyntaxValidator()}
 
 
 # The allowlist's own command group. `scan` itself does nothing; `allow` is the whole surface, kept

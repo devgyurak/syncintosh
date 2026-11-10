@@ -43,7 +43,7 @@ from syncintosh.core.tree import AnyKey, KeyPath, KeyPattern, matches_pattern, p
 # the `cli` fills in, so `core` never names `system`. `json` is the strict JSONC one: a file whose
 # reader is a strict JSON parser (Docker's `config.json`) must not be written when a render left it
 # with, say, a trailing comma — refusing is what ``AGENTS.md`` §3.5 asks for.
-ValidatorName = Literal["json", "zsh"]
+ValidatorName = Literal["json", "zsh", "ghostty"]
 
 # The formats whose parse produces a key-path tree. `noise`/`excluded` are only expressible for
 # these; `text` and `binary` are compared as a whole file and have no keys to strip.
