@@ -224,12 +224,12 @@ def test_every_validator_name_is_wired_to_an_implementation() -> None:
     assert sorted(wired) == sorted(declared)
 
 
-def test_the_cli_wires_the_jsonc_and_xml_adapters() -> None:
+def test_the_cli_wires_the_jsonc_xml_and_plist_adapters() -> None:
     # when — a format with no adapter falls back to a line-level merge, which can break XML syntax
     wired = main_module._adapters()
 
     # then
-    assert {"jsonc", "xml"} == set(wired)
+    assert {"jsonc", "xml", "plist"} == set(wired)
 
 
 def test_every_preset_validator_is_wired() -> None:
