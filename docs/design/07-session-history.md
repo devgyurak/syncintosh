@@ -54,7 +54,8 @@ session: it is sealed, skipped, or refused together, because a session with a fi
 
 A session file is written only when it is missing, or when the repo's copy **strictly extends** the local one. The old
 bytes are then a prefix of the new, so no restore point is made (the exception to the overwrite rule, noted in
-`01-sync-model.md`). The write gets a fresh mtime, which matters: Claude Code's cleanup deletes a `.jsonl` older than
+`01-sync-model.md`). A file created here is owner-only (`0600`, and `0700` for the folders made for it), because a transcript is a conversation and not a
+setting; a file that exists keeps its own mode (`LiveFiles.write(private=True)`). The write gets a fresh mtime, which matters: Claude Code's cleanup deletes a `.jsonl` older than
 `cleanupPeriodDays` by mtime, so a copy that kept the source's mtime could be reaped on the next start.
 
 Never written: a session the agent has open or that cannot be told, a local file that is longer or has forked, and a file

@@ -656,7 +656,7 @@ def test_claude_version_output_that_is_not_text_is_unknown_not_a_crash(monkeypat
 
 # --------------------------------------------------------------------------- workflows (review of #125)
 
-RUN = "wf-0001"
+RUN = "wf_0001ab"
 
 
 def test_a_workflows_sub_agent_files_are_part_of_the_session(tmp_path: Path) -> None:
@@ -782,3 +782,64 @@ def test_a_pid_no_process_can_have_does_not_abort_the_probe() -> None:
 
     # then
     assert alive is False
+
+
+# --------------------------------------------------------------------------- run ids and stale pid files (#125 round 2)
+
+
+@pytest.mark.parametrize("run", ["workflow-1", "wf_abc", "WF_0001AB", "run_0001ab"])
+def test_a_folder_under_workflows_that_is_not_a_run_id_is_not_part_of_the_session(tmp_path: Path, run: str) -> None:
+    # given
+    home = _home(tmp_path)
+    folder = _folder(home)
+    _files(folder, f"{SESSION}.jsonl", f"{SESSION}/subagents/workflows/{run}/agent-b1.jsonl")
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert ([f.path for f in listing.units[0].files], listing.skipped) == ([_logical(f"{SESSION}.jsonl")], ())
+
+
+@pytest.mark.parametrize("run", ["workflow-1", "wf_abc", "WF_0001AB"])
+def test_a_workflow_path_with_a_bad_run_id_is_not_owned(run: str) -> None:
+    # when
+    owned = CATALOG.policy_for(_logical(f"{SESSION}/subagents/workflows/{run}/agent-b1.jsonl"))
+
+    # then
+    assert owned is None
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"x" * 70_000, b"[]"])
+def test_a_broken_file_for_a_dead_process_does_not_hold_the_sessions_back(tmp_path: Path, content: bytes) -> None:
+    # given — a crash left it; the process is gone
+    _file(tmp_path / ".claude" / "sessions" / "4242.json", content)
+
+    # when
+    answer = _activity(tmp_path, alive=False).is_open(SESSION)
+
+    # then
+    assert answer is False
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"x" * 70_000])
+def test_a_broken_file_for_a_live_process_still_leaves_the_answer_unknown(tmp_path: Path, content: bytes) -> None:
+    # given
+    _file(tmp_path / ".claude" / "sessions" / "4242.json", content)
+
+    # when
+    answer = _activity(tmp_path, alive=True).is_open(SESSION)
+
+    # then
+    assert answer is None
+
+
+def test_a_file_that_is_not_named_after_a_pid_is_not_a_session_file(tmp_path: Path) -> None:
+    # given
+    _file(tmp_path / ".claude" / "sessions" / "notes.json", b"{not json")
+
+    # when
+    answer = _activity(tmp_path).is_open(SESSION)
+
+    # then
+    assert answer is False

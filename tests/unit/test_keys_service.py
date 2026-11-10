@@ -75,7 +75,7 @@ class InMemoryLive:
     def read(self, path: str) -> bytes | None:
         return self.files.get(path)
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         self.files[path] = data
 
     def exists(self, path: str) -> bool:
@@ -113,14 +113,14 @@ class SubstitutingLive(InMemoryLive):
         super().__init__()
         self._codec = codec
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         super().write(path, self._codec.wrap(((1, KEY_OTHER),), PASSPHRASE))
 
 
 class FailingLive(InMemoryLive):
     """A live store on which the write itself fails."""
 
-    def write(self, path: str, data: bytes) -> None:
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
         raise OSError("disk full")
 
 

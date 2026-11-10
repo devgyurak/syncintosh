@@ -859,3 +859,95 @@ def test_a_rollout_two_projects_could_claim_goes_to_one_of_them(tmp_path: Path) 
 
     # then — one record for one file, under the project it was published under
     assert [(u.session_id, u.project) for u in units] == [(THREAD, "work")]
+
+
+# --------------------------------------------------------------------------- a published record claims its rollout
+
+
+def test_a_rollout_already_published_under_the_project_is_listed_whatever_its_cwd_says(tmp_path: Path) -> None:
+    # given — started on another Mac, so its first record names a path that is not this project's root
+    home = _home(tmp_path)
+    _rollout(home, _meta("/Users/someone/src/x"))
+    published = frozenset({_logical(f"2026/11/09/{_name()}")})
+
+    # when
+    claimed, unclaimed = _store(home).sessions(published), _store(home).sessions()
+
+    # then
+    assert ([u.session_id for u in claimed.units], unclaimed.units) == ([THREAD], ())
+
+
+def test_a_published_rollout_is_listed_even_when_its_head_cannot_be_read(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    _rollout(home, b"not a record\n")
+    published = frozenset({_logical(f"2026/11/09/{_name()}")})
+
+    # when
+    listing = _store(home).sessions(published)
+
+    # then
+    assert ([u.session_id for u in listing.units], listing.skipped) == ([THREAD], ())
+
+
+def test_a_record_published_under_another_name_does_not_claim_the_rollout(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    _rollout(home, _meta("/Users/someone/src/x"))
+    published = frozenset({f".codex/sessions/@other/2026/11/09/{_name()}"})
+
+    # when
+    listing = _store(home).sessions(published)
+
+    # then
+    assert listing.units == ()
+
+
+def test_the_codex_layout_is_flat_and_the_claude_one_is_not() -> None:
+    # given
+    from syncintosh.core.agent_projects import AgentProjectSpec
+
+    claude = AgentProjectSpec.create(home=".claude/projects", kind="claude")
+
+    # when & then
+    assert (CODEX_PROJECTS.flat, claude.flat) == (True, False)
+
+
+def test_version_output_that_is_not_text_is_unknown_not_a_crash(monkeypatch) -> None:
+    # given
+    def fail(*a, **k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(module.subprocess, "run", fail)
+
+    # when
+    version = module.installed_version()
+
+    # then
+    assert version is None
+
+
+def test_a_name_with_non_ascii_digits_is_not_a_rollout_of_this_store(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    _rollout(home, _meta(_root(home)), day="٢٠٢٦/١١/٠٩")
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert listing.units == ()
+
+
+def test_a_rollout_that_is_a_fifo_is_not_read(tmp_path: Path) -> None:
+    # given
+    home = _home(tmp_path)
+    target = home / ".codex" / "sessions" / "2026" / "11" / "09" / _name()
+    target.parent.mkdir(parents=True)
+    os.mkfifo(target)
+
+    # when
+    listing = _store(home).sessions()
+
+    # then
+    assert (listing.units, [s.reason for s in listing.skipped]) == ((), ["unknown"])

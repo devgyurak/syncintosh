@@ -71,7 +71,14 @@ _UUID_REGEX: Final = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 # A date or a clock reading in a path: four digits, or two. Like the UUID token, only an append-only path may use them.
 YEAR_TOKEN: Final = "{year}"
 TWO_DIGITS_TOKEN: Final = "{2d}"
-_TOKENS: Final = {UUID_TOKEN: _UUID_REGEX, YEAR_TOKEN: r"[0-9]{4}", TWO_DIGITS_TOKEN: r"[0-9]{2}"}
+# Claude Code's workflow run id (2.1.308: `/^wf_[a-z0-9-]{6,}$/`, next to the `workflows` folder name in the binary).
+WORKFLOW_RUN_TOKEN: Final = "{wf}"
+_TOKENS: Final = {
+    UUID_TOKEN: _UUID_REGEX,
+    YEAR_TOKEN: r"[0-9]{4}",
+    TWO_DIGITS_TOKEN: r"[0-9]{2}",
+    WORKFLOW_RUN_TOKEN: r"wf_[a-z0-9-]{6,}",
+}
 
 
 def _has_glob(path: str) -> bool:
