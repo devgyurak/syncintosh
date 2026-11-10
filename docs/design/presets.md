@@ -29,6 +29,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `orca` | `Library/Application Support/orca/profiles/local-default/@profile-state/settings.json` (virtual: the `settings` row of `profile-state.db`, shown as an indented JSON file; `local-default` only) | `jsonc` (the row's JSON) | `notifications.customSoundPath`; every key outside the allowlist stays local | an exact allowlist of top-level preference keys (`presets/orca.py` `SYNCED`); each credential-shaped key is also named as excluded: `opencodeSessionCookie` · `opencodeGoApiKey` · `codexManagedAccounts` · `claudeManagedAccounts` · `agentDefaultEnv` · `agentCmdOverrides` · `httpProxyUrl` · `mobilePairingCustomAddress(es)` · … | `com.stablyai.orca` | <https://github.com/stablyai/orca/releases> | — (Homebrew's `orca` is another app) |
 | `claude-memory` | `.claude/projects/@<name>/memory/*.md` (logical; the real folder is the project's real path with every non-alphanumeric turned into `-`). Per project this machine maps in `agent_projects`; never by default | `text` | — (a memory file has no key paths) | — (the secret scan is the backstop) | — (a CLI) | — | — |
 | `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
+| `ghostty` | `.config/ghostty/config` · `…/config.ghostty` · `…/themes/*` · `Library/Application Support/com.mitchellh.ghostty/config` · `…/config.ghostty` | `text` (a key repeats and its order matters) | — (a text file has no key paths) | — (the secret scan is the backstop) | `com.mitchellh.ghostty` | <https://ghostty.org/download> | `ghostty` |
 
 ### `docker` notes
 
@@ -71,6 +72,33 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   write are checked with `zsh -fn` (parse only, `-f` so no rc file runs).
 - A `~/.zshrc` that is a symlink is reported, never written through
   ([03-manifest.md](03-manifest.md), "`~/.zshrc` that is a symlink").
+
+### `ghostty` notes
+
+- Verified on a Mac (Ghostty 1.3.1, 2026-11-10). A config is `key = value` lines with `#` comments, and a key may
+  **repeat** (`keybind`, `font-family`) with its order meaningful, so the format is `text`: the line-level merge keeps
+  every `keybind` line and its order, and a both-sides change to one line is a whole-file conflict.
+- **Load order.** `~/.config/ghostty/config`, then `config.ghostty` (the later file wins — verified with a temporary
+  `HOME`). The Application Support pair follows the same names; its order relative to the XDG pair could not be
+  reproduced (Ghostty reads the real home there, not `HOME`), so it is taken from the binary's own documentation.
+  Themes are `~/.config/ghostty/themes/*` only: Ghostty does not read a `themes` directory under Application Support.
+- `XDG_CONFIG_HOME` is **not** honoured (the same stance as `ZDOTDIR` for `zsh`), and a file named by
+  `config-file = …` is **not** followed: a path this preset does not know is refused at collect and at apply.
+- **Validator.** Every merge result and every write is checked with `<app>/Contents/MacOS/ghostty +validate-config`
+  (found by bundle ID through Spotlight, never `PATH`). Only the exit code is read — the checker's stderr echoes values
+  — and a missing or unrunnable binary is a refusal, not a pass. The text is checked as a file **beside the target**, so
+  a relative `config-file` include resolves as Ghostty resolves it.
+- **Machine-local values.** `text` cannot cut a line out, so a per-display value (`font-size`, `window-padding-*`,
+  `background-opacity`) is synced as written. To keep one local, put it in `config-file = ?local.ghostty` and do not
+  track that file (or track it with `scope = "machine"`); the `?` makes the include optional, so a machine without the
+  file still validates.
+- **Running Ghostty is not a reason to defer** — it never rewrites its own config. A theme and a config that names it
+  can arrive in one cycle and the config be refused once; the next cycle applies it, so no ordering code exists.
+- **Credentials.** There is no strip list, so the secret scan is the only gate. `env`, `command` and `initial-command`
+  lines are where a token passed to a launched program could sit. The scan recognises vendor-shaped tokens and bearer
+  headers, not a generic `KEY=value` or `--password` argument — keep a credential out of those lines.
+- A hard kill during a check can leave a hidden `.<name>.<hex>.syncintosh-check` file beside the target; in `themes/` the
+  glob would collect it. It is junk, not a leak (the text is the config, scanned like any other), and removing it clears it.
 
 ### `vscode` notes
 
