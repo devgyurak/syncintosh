@@ -29,6 +29,7 @@ from syncintosh.core.ports import (
     Cipher,
     ContentAdapter,
     DenyList,
+    DocumentSkips,
     GitTransport,
     LiveFiles,
     PresetCatalog,
@@ -108,6 +109,7 @@ def diff_repo(
     profiles: ProfileIndex | None = None,
     config_dirs: AppConfigDir | None = None,
     agent_projects: AgentProjectIndex | None = None,
+    documents: DocumentSkips | None = None,
 ) -> DiffReport:
     """Compare every tracked path's live file with the repo side. Never writes anything."""
     presets = _Presets(
@@ -116,7 +118,7 @@ def diff_repo(
         validators=validators,
         ignores=_read_ignores(catalog, adapters, live, deny, home),
     )
-    paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects)
+    paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects, documents)
     head = transport.head()
     remote = transport.resolve(remote_ref(branch))
     repo_commit = remote or head

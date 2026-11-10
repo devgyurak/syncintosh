@@ -384,6 +384,7 @@ def doctor() -> None:
     from syncintosh.system.config import load_config
     from syncintosh.system.daemon import entry_point
     from syncintosh.system.deny_list import SystemDenyList
+    from syncintosh.system.document_files import open_document_skips
     from syncintosh.system.lock import FileLock
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.pending import DirectoryPendingStore
@@ -402,6 +403,7 @@ def doctor() -> None:
             index,
             ProductInfoConfigDir(home=paths.home),
             SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+            open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
         )
         summaries = tuple(
             row
@@ -447,7 +449,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_live_files
+    from syncintosh.system.document_files import open_document_skips, open_live_files
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.profile_index import SystemProfileIndex
@@ -473,6 +475,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
             config_dirs=ProductInfoConfigDir(home=paths.home),
             agent_projects=SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+            documents=open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
         )
     except DomainError as exc:
         _fail(exc)
@@ -918,7 +921,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.system.claude_sessions import ClaudeSessionActivity, ClaudeSessionStore
     from syncintosh.system.codex_sessions import CodexSessionActivity, CodexSessionStore
     from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_live_files
+    from syncintosh.system.document_files import open_document_skips, open_live_files
     from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.lock import FileLock
@@ -989,6 +992,8 @@ def _sync_ports(config, paths) -> dict:
         "config_dirs": ProductInfoConfigDir(home=paths.home),
         # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
         "agent_projects": SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+        # A document the app manages itself (iTerm2 loading its prefs from a custom folder) is left alone this cycle.
+        "documents": open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
         # Claude Code's sessions for the projects mapped with `claude-sessions`, and its own open-session signal.
         "sessions": combined_sessions,
         "activity": CombinedSessionActivity(

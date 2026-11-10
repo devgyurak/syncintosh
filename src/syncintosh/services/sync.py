@@ -69,6 +69,7 @@ from syncintosh.core.ports import (
     Cipher,
     ContentAdapter,
     DenyList,
+    DocumentSkips,
     FileIdSource,
     GenerationWrap,
     GitTransport,
@@ -3201,6 +3202,7 @@ def sync(
     profiles: ProfileIndex | None = None,
     config_dirs: AppConfigDir | None = None,
     agent_projects: AgentProjectIndex | None = None,
+    documents: DocumentSkips | None = None,
     rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
     sessions: SessionStore = NO_SESSION_STORE,
     activity: SessionActivity = NO_SESSION_ACTIVITY,
@@ -3230,7 +3232,7 @@ def sync(
             activity=activity,
             now=clock(),
         )
-        paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects)
+        paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects, documents)
         view = PolicyView(
             transport,
             cipher=cipher,

@@ -31,7 +31,7 @@ from syncintosh.core.agent_projects import AgentProjectMap, AgentProjectPath, Ag
 from syncintosh.core.config import LocalGlob, LocalItem, SyncConfig
 from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
 from syncintosh.core.paths import collision_key
-from syncintosh.core.ports import AgentProjectIndex, AppConfigDir, PresetCatalog, ProfileIndex
+from syncintosh.core.ports import AgentProjectIndex, AppConfigDir, DocumentSkips, PresetCatalog, ProfileIndex
 from syncintosh.core.presets import PresetGlob
 from syncintosh.core.profiles import ProfileMap, ProfilePath, ProfileSpec
 from syncintosh.core.watch import ProfileTargets, WatchFilter
@@ -121,6 +121,8 @@ class LivePaths:
     views: tuple[ProfileView, ...] = ()
     config_views: tuple[ConfigDirView, ...] = ()
     agent_views: tuple[AgentProjectView, ...] = ()
+    # `(view path, why)` for each document left alone this cycle (`skip_reason` in `core/documents.py`).
+    document_skips: tuple[tuple[str, str], ...] = ()
 
     def agent(self, path: str) -> tuple[AgentProjectSpec, AgentProjectPath] | None:
         """The layout and parts when `path` is a logical project path of a preset the catalog knows."""
@@ -191,6 +193,11 @@ class LivePaths:
         project = self.agent(path)
         if project is not None:
             return self._resolve_agent(*project)
+        skipped = next((why for view, why in self.document_skips if collision_key(view) == collision_key(path)), None)
+        if skipped is not None:
+            # The app manages this document itself (or it cannot be told): collect and apply both resolve through
+            # here, so neither touches it, and its record is kept as it is.
+            return Unresolved(skipped)
         found = self.logical(path)
         if found is None:
             if not self.catalog.knows(_NO_PRESET, path):
@@ -265,6 +272,7 @@ def open_live_paths(
     index: ProfileIndex | None,
     config_dirs: AppConfigDir | None = None,
     agent_projects: AgentProjectIndex | None = None,
+    documents: DocumentSkips | None = None,
 ) -> LivePaths:
     """Read each configured layout's profile list and config directory once and bind the resolver for this cycle.
 
@@ -280,6 +288,7 @@ def open_live_paths(
         views=profile_views,
         config_views=_read_config_dirs(config, catalog, config_dirs),
         agent_views=_read_agent_projects(config, agent_projects),
+        document_skips=() if documents is None else tuple(sorted(documents.reasons().items())),
     )
 
 

@@ -31,7 +31,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
 | `codex-sessions` | `.codex/sessions/@<name>/YYYY/MM/DD/rollout-<stamp>-<thread>[_<rollout>].jsonl` (logical; on disk there is no project folder, so `@<name>` is dropped: the real path is `~/.codex/sessions/YYYY/MM/DD/<file>`). Listed per session by `CodexSessionStore`; the project is the one whose root equals the first `session_meta` record's `cwd`. Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**; `creator_user_id`/`creator_account_id` are kept) | — (a CLI) | — | — |
 | `ghostty` | `.config/ghostty/config` · `…/config.ghostty` · `…/themes/*` · `Library/Application Support/com.mitchellh.ghostty/config` · `…/config.ghostty` | `text` (a key repeats and its order matters) | — (a text file has no key paths) | — (the secret scan is the backstop) | `com.mitchellh.ghostty` | <https://ghostty.org/download> | `ghostty` |
-| `iterm2` | `Library/Application Support/iTerm2/DynamicProfiles/*.json` (Dynamic Profiles only; the preferences domain is a later change) | `jsonc` | — | — (the secret scan is the backstop) | `com.googlecode.iterm2` | <https://iterm2.com/downloads.html> | `iterm2` |
+| `iterm2` | `Library/Preferences/@defaults/com.googlecode.iterm2.plist` (virtual: the `com.googlecode.iterm2` preferences domain, served by `defaults`; an **allowlist**) · `Library/Application Support/iTerm2/DynamicProfiles/*.json` | `plist` (the domain) · `jsonc` | — (an allowlist: only the 141 registered preference keys plus `New Bookmarks`, `Default Bookmark Guid`, `GlobalKeyMap` travel) | `NoSyncOpenAIAPIKey` · `NoUserDefaultAIAPIKey` · `AICustomHeaders`; the secret scan is the backstop for profile text | `com.googlecode.iterm2` | <https://iterm2.com/downloads.html> | `iterm2` |
 
 ### `docker` notes
 
@@ -107,19 +107,34 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 
 ### `iterm2` notes
 
-- Verified on a Mac (iTerm2 3.7.7, source read at tag `v3.7.7`, 2026-11-10; write-up on issue #58). This first part
-  tracks **Dynamic Profiles** only; the main preferences domain (`com.googlecode.iterm2`) arrives separately.
-- iTerm2 reads **every** file in `DynamicProfiles/` except a name starting with `.` or ending with `~`, trying a plist
-  first and JSON second, so the extension means nothing to it. The preset tracks `*.json`; a Dynamic Profile written
-  as a plist is out of scope. Because `*.json` has a literal part, a dot-leading `.x.json` is synced too, although iTerm2
-  itself never loads it.
-- `Profiles` is merged **one profile at a time**, by `Guid` (the rule VS Code keybindings use): a profile only one side
-  has is kept, and a profile both sides changed differently is a conflict on that profile alone. iTerm2 refuses an entry
-  without a `Guid` or a name, and a `Guid` repeated across files.
-- A path watcher reloads the directory live, so apply is **not** held back while iTerm2 runs. iTerm2 may rewrite a
-  Dynamic Profile file itself. `dynamicProfilesPath` (an advanced setting that moves the directory) is not followed.
-- No strip list: a profile is the user's own text, and a `Command`, `Initial Text` or trigger parameter could carry a
-  credential, so the secret scan is the only gate.
+- Verified on a Mac (iTerm2 3.7.7, source read at tag `v3.7.7`, 2026-11-10; write-up on issue #58).
+- **The preferences domain** is owned by `cfprefsd`, which caches it and rewrites the plist itself, so the plist is
+  denied and never read or written. The domain is shown to the sync as the virtual file
+  `Library/Preferences/@defaults/com.googlecode.iterm2.plist`: a read is `defaults export com.googlecode.iterm2 -`, a
+  write is `defaults import … -` (which **merges per top-level key**) plus `defaults delete` for each key the new
+  document lacks, then a re-export that must match. The view is canonical XML (`core/plist_xml.py`) and merged by the
+  `plist` adapter, so keys come out sorted. `New Bookmarks` is merged **one profile at a time**, by `Guid`.
+- **An allowlist.** Only the preferences iTerm2 registers (`iTermPreferences.m`), minus the ones with a stated reason
+  (`LOCAL` in `presets/iterm2.py`), plus `New Bookmarks`, `Default Bookmark Guid` and `GlobalKeyMap`, travel. Window
+  frames (`NSWindow Frame …`), `NoSync*`, Sparkle (`SU*`) and AppKit's `Apple*` keys stay on each Mac; so does all AI
+  provider setup (its key is in the Keychain), the GPU switches, the custom scripts folder, and the permissions
+  `AllowClipboardAccess`, `EnableAPIServer`. A test pins that every registered and every observed key is synced,
+  excluded or local.
+- **Credentials.** The AI API keys and the password manager use the Keychain, not the domain. A profile is the user's
+  own text, so `Command`, `Custom Command`, `Initial Text`, trigger parameters and `Keyboard Map` send-text actions
+  could carry one: **the secret scan is the only gate** for them.
+- **Open iTerm2.** The whole preset waits for iTerm2 to quit, also when that cannot be told (`defer_while_running`);
+  Dynamic Profiles, though reloaded live by iTerm2, wait with it because the preset is one unit. Collect still runs.
+- **Custom folder.** With `LoadPrefsFromCustomFolder` on, iTerm2 loads and saves its own copy, so the domain is skipped
+  in collect and apply, as is a value that is not plainly off or a domain that cannot be read; the report says why.
+- **Dynamic Profiles.** iTerm2 reads **every** file in `DynamicProfiles/` except a name starting with `.` or ending
+  with `~`, trying a plist first and JSON second, so the extension means nothing to it. The preset tracks `*.json`; a
+  Dynamic Profile written as a plist is out of scope, and so is `dynamicProfilesPath`. Because `*.json` has a literal
+  part, a dot-leading `.x.json` is synced too, although iTerm2 itself never loads it. `Profiles` is merged by `Guid`.
+- **Default profile.** A fresh install gives its default profile a `Guid` of its own, so two Macs that never shared
+  settings keep two "Default" profiles and `Default Bookmark Guid` is a both-sides change: a one-time choice.
+- The policy history entry was **replaced**, not appended, because no `v*` tag has shipped an `iterm2` policy yet (the
+  `orca` precedent, #115).
 
 ### `vscode` notes
 
