@@ -218,3 +218,12 @@ def test_two_different_paths_never_share_a_label(pair) -> None:
 
     # then
     assert first != second
+
+
+@pytest.mark.parametrize("kind", ["data", "date"])
+def test_a_plist_data_or_date_is_not_the_string_with_the_same_characters(kind) -> None:
+    # when
+    plist_value = Scalar(kind, "AQIDBA==")
+
+    # then — the kind is part of the identity, so a `<data>` never merges as a `<string>`
+    assert plist_value != Scalar("str", "AQIDBA==")

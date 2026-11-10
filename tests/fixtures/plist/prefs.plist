@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AppleAntiAliasingThreshold</key>
+	<integer>4</integer>
+	<key>Default Bookmark Guid</key>
+	<string>11111111-2222-3333-4444-555555555555</string>
+	<key>HotkeyMigratedFromSingleToMulti</key>
+	<true/>
+	<key>New Bookmarks</key>
+	<array>
+		<dict>
+			<key>Guid</key>
+			<string>11111111-2222-3333-4444-555555555555</string>
+			<key>Horizontal Spacing</key>
+			<real>1.0</real>
+			<key>Keyboard Map</key>
+			<dict/>
+			<key>Name</key>
+			<string>Default</string>
+			<key>Scrollback Lines</key>
+			<integer>1000</integer>
+			<key>Tags</key>
+			<array/>
+		</dict>
+	</array>
+	<key>NoSyncSavedWindowPositions</key>
+	<dict>
+		<key>sample window</key>
+		<string>0 0 100 100</string>
+	</dict>
+	<key>SampleBlob</key>
+	<data>
+	AQIDBA==
+	</data>
+	<key>SampleDate</key>
+	<date>2024-01-02T03:04:05Z</date>
+	<key>SampleReal</key>
+	<real>1</real>
+</dict>
+</plist>

@@ -8,9 +8,9 @@ line-level merge that would break JSON/XML syntax (``AGENTS.md`` §2.5, §2.9).
 
 Three shapes keep a flat map honest:
 
-* :class:`Scalar` carries its JSON **kind** (``null``/``bool``/``int``/``float``/``str``)
-  beside the value, so ``true`` and ``1`` and ``1`` and ``1.0`` are three different values, not
-  one; a merge must not treat a rewritten type as "unchanged".
+* :class:`Scalar` carries its **kind** (``null``/``bool``/``int``/``float``/``str``, plus the plist
+  ``data``/``date``) beside the value, so ``true`` and ``1`` and ``1`` and ``1.0`` are three different
+  values, not one; a merge must not treat a rewritten type as "unchanged".
 * :class:`Array` is a leaf compared **whole**. An array has no key paths inside it: a positional
   edit is not a key edit, and a partial array merge would need an index identity the format does
   not have. :class:`Object` carries an object that lives inside an array for the same reason —
@@ -78,13 +78,15 @@ def matches_pattern(path: KeyPath, pattern: KeyPattern) -> bool:
 # stay distinct, so a missing `when` and `"when": ""` name different elements.
 ElementId = tuple[tuple[str, str | None], ...]
 
-# The JSON primitive kinds, serialized verbatim so they are a `Literal` and never an `Enum`.
-ScalarKind = Literal["null", "bool", "int", "float", "str"]
+# The primitive kinds, serialized verbatim so they are a `Literal` and never an `Enum`. `data` (a plist `<data>`,
+# base64 text) and `date` (a plist `<date>`, ISO-8601 UTC text) hold a string but are not one: a `<data>` and a
+# `<string>` with the same characters are different values, and each is compared whole.
+ScalarKind = Literal["null", "bool", "int", "float", "str", "data", "date"]
 
 
 @dataclass(frozen=True)
 class Scalar:
-    """A JSON primitive together with its kind.
+    """A primitive (a JSON one, or a plist `data`/`date`) together with its kind.
 
     The kind is part of the identity, so ``True`` (``bool``) and ``1`` (``int``) are different
     leaves — Python's own ``==`` would fold them together — and ``1`` and ``1.0`` differ too.

@@ -132,13 +132,14 @@ def _adapters() -> dict[FileFormat, ContentAdapter]:
     """Every structural adapter, by the format a preset file names.
 
     Wired for `sync`, `watch` and `diff` alike so the three cannot disagree on which formats merge key by key. A
-    format with no entry falls back to the line-level driver. Imported here so CLI startup does not parse either
+    format with no entry falls back to the line-level driver. Imported here so CLI startup does not parse any
     format's machinery (``AGENTS.md`` §4); `lxml` itself loads only inside the XML adapter's first parse.
     """
     from syncintosh.adapters.jsonc import JsoncAdapter
+    from syncintosh.adapters.plist import PlistAdapter
     from syncintosh.adapters.xml import XmlAdapter
 
-    return {"jsonc": JsoncAdapter(), "xml": XmlAdapter()}
+    return {"jsonc": JsoncAdapter(), "xml": XmlAdapter(), "plist": PlistAdapter()}
 
 
 def validators() -> dict[ValidatorName, SyntaxValidator]:
