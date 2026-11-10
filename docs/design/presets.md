@@ -28,6 +28,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `webstorm` | `Library/Application Support/JetBrains/@WebStorm/` (logical; the real folder is `WebStorm<year>.<n>`): the same files as `datagrip` without `databaseSettings` and `csvSettings` | `xml` | as `datagrip` | none in a tracked file; the credential-shaped `options/` files are never tracked and are denied in code | `com.jetbrains.WebStorm` | <https://www.jetbrains.com/webstorm/download/> | `webstorm` |
 | `orca` | `Library/Application Support/orca/profiles/local-default/@profile-state/settings.json` (virtual: the `settings` row of `profile-state.db`, shown as an indented JSON file; `local-default` only) | `jsonc` (the row's JSON) | `notifications.customSoundPath`; every key outside the allowlist stays local | an exact allowlist of top-level preference keys (`presets/orca.py` `SYNCED`); each credential-shaped key is also named as excluded: `opencodeSessionCookie` · `opencodeGoApiKey` · `codexManagedAccounts` · `claudeManagedAccounts` · `agentDefaultEnv` · `agentCmdOverrides` · `httpProxyUrl` · `mobilePairingCustomAddress(es)` · … | `com.stablyai.orca` | <https://github.com/stablyai/orca/releases> | — (Homebrew's `orca` is another app) |
 | `claude-memory` | `.claude/projects/@<name>/memory/*.md` (logical; the real folder is the project's real path with every non-alphanumeric turned into `-`). Per project this machine maps in `agent_projects`; never by default | `text` | — (a memory file has no key paths) | — (the secret scan is the backstop) | — (a CLI) | — | — |
+| `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
 
 ### `docker` notes
 
@@ -400,7 +401,7 @@ collected until a project is listed, and a record is written only under a name t
 ```json
 {
   "agent_projects": [
-    {"name": "syncintosh", "path": "Develop/syncintosh", "presets": ["claude-memory"]}
+    {"name": "syncintosh", "path": "Develop/syncintosh", "presets": ["claude-memory", "claude-sessions"]}
   ]
 }
 ```
@@ -425,7 +426,37 @@ collected until a project is listed, and a record is written only under a name t
   `.codex/{auth.json,installation_id,history.jsonl,shell_snapshots,sqlite,*.sqlite*,thread-writer-locks,app-server-*,ipc}`.
 
 A secret-scan hit in a memory file stops the cycle like any other file (there is no per-session refusal for memory); the
-transcripts presets that follow refuse a whole session instead.
+`claude-sessions` preset below refuses a whole session instead.
+
+### `claude-sessions` notes
+
+Session history (issue #56) rides on `docs/design/07-session-history.md`: append-only text, one unit per session, idle and
+caps, a whole-session refusal on a secret-scan hit, prefix-only apply with a fresh mtime. Claude Code specifics:
+
+* **Workflows**: 2.1.308 also keeps a workflow's sub-agents under
+  `<uuid>/subagents/workflows/wf_<id>/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}`. They are listed
+  with the session (one run level, regular files only; a link or an odd entry leaves the session out; a folder whose name is
+  not a run id, `/^wf_[a-z0-9-]{6,}$/` as the binary spells it, is not part of the session). UNVERIFIED: that those are the
+  only file kinds there; they are assumed to match `subagents/`.
+* **Layout** (2.1.308): `<uuid>.jsonl` plus `<uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,
+  forked-skill.marker.json}` and `<uuid>/tool-results/*`. `{uuid}` in a preset path is exactly one UUID, so a record cannot
+  name another folder under a project; every other name beside a transcript is left alone.
+* **Resume without rewriting `cwd`.** `--resume <id>` tries the cwd folder, worktree folders, then every project folder; the
+  picker hides a session only when its recorded `cwd` exists here, is another directory and encodes to the same folder name.
+  `cwd` is never rewritten. Open caveat: anthropics/claude-code#58475 reports an empty project-scoped picker after a move that
+  the code does not explain; check `claude --resume` on a second Mac before a release.
+* **Open session.** `~/.claude/sessions/<pid>.json` (`pid`, `sessionId`, `procStart`) is written on start and removed on exit,
+  and survives a crash. A session is open only when the pid is alive **and** `procStart` equals `ps -o lstart= -p <pid>`
+  (`LC_ALL=C TZ=UTC`), the CLI's own check. A file that cannot be read leaves the answer "cannot tell", which counts as open;
+  a Mac with no such folder has no open session.
+* **mtime.** `cleanupPeriodDays` (default 30) deletes a `.jsonl` older than that by **mtime**, with its `<uuid>/` folder, so
+  apply writes with a fresh mtime.
+* **Version.** After a transcript is written, its first record's `version` is compared with `claude --version`; a different
+  one prints a one-line note, and an unknown one prints nothing. It never refuses.
+* **Memory is separate.** `claude-memory` and `claude-sessions` are enabled per project independently; neither implies the other.
+* **Never collected** (deny-listed): `~/.claude.json*`, `session-env/`, `shell-snapshots/`, `file-history/`, `paste-cache/`,
+  `history.jsonl`, `cache/`, `daemon*`, and `sessions/` itself. Without `file-history/`, `/rewind` cannot restore code on the
+  other Mac.
 
 ## Versioned config directories
 

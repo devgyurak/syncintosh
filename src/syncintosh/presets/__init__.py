@@ -20,6 +20,7 @@ from syncintosh.core.errors import ConfigError
 from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import Preset, PresetFile, ShippedPresets
 from syncintosh.presets.claude_memory import CLAUDE_MEMORY
+from syncintosh.presets.claude_sessions import CLAUDE_SESSIONS
 from syncintosh.presets.datagrip import DATAGRIP
 from syncintosh.presets.docker import DOCKER
 from syncintosh.presets.history import POLICY_HISTORY
@@ -30,7 +31,17 @@ from syncintosh.presets.zed import ZED
 from syncintosh.presets.zsh import ZSH
 
 # Every built-in preset, in the order a catalog lists them.
-BUILTIN_PRESETS: tuple[Preset, ...] = (ZSH, VSCODE, DOCKER, ZED, DATAGRIP, *JETBRAINS_IDES, ORCA, CLAUDE_MEMORY)
+BUILTIN_PRESETS: tuple[Preset, ...] = (
+    ZSH,
+    VSCODE,
+    DOCKER,
+    ZED,
+    DATAGRIP,
+    *JETBRAINS_IDES,
+    ORCA,
+    CLAUDE_MEMORY,
+    CLAUDE_SESSIONS,
+)
 
 
 @dataclass(frozen=True)

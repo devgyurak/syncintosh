@@ -188,6 +188,9 @@ class _NoSessions:
     def session_of(self, path: str) -> str | None:
         return None
 
+    def note_for(self, path: str, data: bytes) -> str | None:
+        return None
+
 
 class _UnknownSessionActivity:
     """A `SessionActivity` that cannot tell: every session counts as open, so none is sealed or overwritten."""
@@ -1143,7 +1146,8 @@ def _expand_agent_projects(
                 continue
             for file in owner.files:
                 relative = layout.spec.relative_of_template(file.path)
-                if relative is None:
+                if relative is None or file.append_only:
+                    # An append-only file is a session's, enumerated per session by the store (`_collect_sessions`).
                     continue
                 logical = layout.spec.logical_path(project.name, relative)
                 located = paths.resolve_project(layout.spec, project.name, relative)
@@ -2577,6 +2581,7 @@ class _Applied:
     unprojectable: tuple[Refusal, ...] = ()
     invalid: tuple[Refusal, ...] = ()
     session_skipped: tuple[SessionSkipped, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 def _missing_file_decision(installed: bool | None, *, parent_exists: bool) -> _Decision:
@@ -2687,6 +2692,7 @@ def _apply(
     unprojectable: list[Refusal] = []
     invalid: list[Refusal] = []
     session_skipped: list[SessionSkipped] = []
+    notes: list[str] = []
     # One `mdfind` per app per cycle, however many files that app owns (§2.6).
     installed_cache: dict[str, bool | None] = {}
     running_cache: dict[str, bool | None] = {}
@@ -2788,6 +2794,8 @@ def _apply(
             # A conversation, not a setting: a file created here is owner-only, as a person's own transcripts should be.
             live.write(live_path, data, private=True)
             applied.append(record.path)
+            if (note := presets.sessions.note_for(record.path, data)) is not None:
+                notes.append(note)
             continue
         # Collect's projection stands in for this one only when the file is byte-for-byte the one it was made from.
         # A record whose format is not the catalog's never gets here (refused above), so the two agree on the format.
@@ -2933,6 +2941,7 @@ def _apply(
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
         session_skipped=tuple(session_skipped),
+        notes=tuple(dict.fromkeys(notes)),
     )
 
 
@@ -3544,7 +3553,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
-        notes=(*_carried_notes, *presets.notes(), *transport.notes()),
+        notes=(*_carried_notes, *presets.notes(), *transport.notes(), *applied.notes),
         # One row per session and reason: collect names the session, apply the file, and they are the same finding.
         session_skipped=_one_per_session(
             (*collected.session_skipped, *outcome.session_skipped, *applied.session_skipped)

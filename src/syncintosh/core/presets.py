@@ -64,9 +64,49 @@ _RECURSIVE_GLOB: Final = "**"
 MAX_GLOB_EXPANSION: Final = 256
 
 
+# A path element that stands for exactly one UUID (`{uuid}.jsonl`, `{uuid}/subagents/…`). Only an append-only file may
+# use it: it is how a preset owns a session's files without owning every folder name under a project.
+UUID_TOKEN: Final = "{uuid}"
+_UUID_REGEX: Final = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# A date or a clock reading in a path: four digits, or two. Like the UUID token, only an append-only path may use them.
+YEAR_TOKEN: Final = "{year}"
+TWO_DIGITS_TOKEN: Final = "{2d}"
+# Claude Code's workflow run id (2.1.308: `/^wf_[a-z0-9-]{6,}$/`, next to the `workflows` folder name in the binary).
+WORKFLOW_RUN_TOKEN: Final = "{wf}"
+_TOKENS: Final = {
+    UUID_TOKEN: _UUID_REGEX,
+    YEAR_TOKEN: r"[0-9]{4}",
+    TWO_DIGITS_TOKEN: r"[0-9]{2}",
+    WORKFLOW_RUN_TOKEN: r"wf_[a-z0-9-]{6,}",
+}
+
+
 def _has_glob(path: str) -> bool:
     """True when the **last** element of `path` carries a glob metacharacter."""
     return any(character in path.rpartition("/")[2] for character in GLOB_METACHARACTERS)
+
+
+def _has_pattern(path: str) -> bool:
+    """True when **any** element of `path` carries a metacharacter or the UUID token (an append-only path)."""
+    return any(token in path for token in _TOKENS) or any(character in path for character in GLOB_METACHARACTERS)
+
+
+def _deep_to_regex(path: str) -> str:
+    """The regex a path pattern means, element by element: `*` and `?` never cross a `/`, `{uuid}` is one UUID.
+
+    Matched against the path **as written**, never folded: an agent's own folder names are exact, so a record that
+    spells a UUID in capitals names a different folder on a case-sensitive volume and must not be taken for the
+    lowercase one the agent made.
+    """
+    parts = re.split("(" + "|".join(re.escape(token) for token in _TOKENS) + ")", path)
+    return "".join(
+        _TOKENS[part]
+        if part in _TOKENS
+        else "".join(
+            "[^/]*" if character == "*" else "[^/]" if character == "?" else re.escape(character) for character in part
+        )
+        for part in parts
+    )
 
 
 def _glob_to_regex(name: str) -> str:
@@ -92,6 +132,26 @@ class PresetGlob:
     directory: str
     name: str
     matcher: re.Pattern[str]
+    # Set only for a pattern in a directory element (an append-only path): the whole folded path is matched, and the
+    # pattern is never expanded by a directory listing — the session store enumerates, `core/sessions.py`.
+    whole: re.Pattern[str] | None = None
+
+    @classmethod
+    def deep(cls, path: str) -> PresetGlob:
+        """Validate and freeze a pattern that may sit in any element; never recursive, and never expanded by a walk."""
+        validated = validate_path(path)
+        if _RECURSIVE_GLOB in validated:
+            raise ConfigError(f"a preset glob must not be recursive: {validated!r}")
+        if not _has_pattern(validated):
+            raise ConfigError(f"a preset glob must name a pattern: {validated!r}")
+        directory, _, name = validated.rpartition("/")
+        return cls(
+            path=validated,
+            directory=directory,
+            name=name,
+            matcher=re.compile(_glob_to_regex(collision_key(name))),
+            whole=re.compile(_deep_to_regex(validated)),
+        )
 
     @classmethod
     def create(cls, path: str) -> PresetGlob:
@@ -125,6 +185,10 @@ class PresetGlob:
         directory, _, name = collision_key(path).rpartition("/")
         if any(character in name for character in GLOB_METACHARACTERS):
             return False
+        if self.whole is not None:
+            return not any(character in directory for character in GLOB_METACHARACTERS) and (
+                self.whole.fullmatch(path) is not None
+            )
         return directory == collision_key(self.directory) and self.matcher.fullmatch(name) is not None
 
     def expand(self, names: Iterable[str]) -> tuple[str, ...]:
@@ -248,7 +312,11 @@ class PresetFile:
             validated_format = validate_format(format)
         except ManifestCorrupt as exc:
             raise ConfigError(f"invalid preset file: {exc}") from exc
-        glob = PresetGlob.create(validated_path) if _has_glob(validated_path) else None
+        if append_only and _has_pattern(validated_path):
+            # A session's files sit under a folder named by the agent (a UUID), so the pattern may be in any element.
+            glob = PresetGlob.deep(validated_path)
+        else:
+            glob = PresetGlob.create(validated_path) if _has_glob(validated_path) else None
         if glob is None and any(character in validated_path for character in GLOB_METACHARACTERS):
             # A metacharacter outside the last element is neither an exact path nor a glob, so it is
             # refused rather than read as a literal directory name.
