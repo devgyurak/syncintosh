@@ -53,9 +53,13 @@ def _validator(app: Path, home: Path) -> GhosttySyntaxValidator:
     return GhosttySyntaxValidator(home=str(home), find=lambda bundle_id: (str(app),), timeout=60)
 
 
-def _home(tmp_path: Path) -> Path:
+def _home(tmp_path: Path, *, includes: tuple[str, ...] = ()) -> Path:
+    """A home with Ghostty's config folder, holding an (empty) file for each name in `includes`."""
     home = tmp_path / "home"
-    (home / ".config" / "ghostty").mkdir(parents=True)
+    folder = home / ".config" / "ghostty"
+    folder.mkdir(parents=True)
+    for name in includes:
+        (folder / name).write_text("", encoding="utf-8")
     return home
 
 
@@ -194,15 +198,14 @@ def test_a_missing_directory_falls_back_to_a_private_one_that_is_removed(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("includes", "expectation"),
-    [([], pytest.raises(SyntaxInvalid)), (["needed"], contextlib.nullcontext())],
+    ("include_present", "expectation"),
+    [(False, pytest.raises(SyntaxInvalid)), (True, contextlib.nullcontext())],
     ids=["include-missing", "include-beside-target"],
 )
-def test_a_relative_include_is_resolved_beside_the_target(tmp_path, includes, expectation) -> None:
+def test_a_relative_include_is_resolved_beside_the_target(tmp_path, include_present, expectation) -> None:
     # given — a required include, present in the target's directory or not
     app, _, _ = _fake_app(tmp_path)
-    home = _home(tmp_path)
-    [(home / ".config" / "ghostty" / name).write_text("", encoding="utf-8") for name in includes]
+    home = _home(tmp_path, includes=("needed",) if include_present else ())
 
     # when & then
     with expectation:
