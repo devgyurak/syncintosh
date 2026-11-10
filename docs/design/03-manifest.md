@@ -351,7 +351,9 @@ one listing and never a walk, and each expanded file runs the same deny → owne
 projection checks an exact item does. A record is written under a glob **only because this machine's
 own config names the same pattern** (`core/config.LocalGlob`), matched on the record's path and never
 on its `preset` — which is what keeps a synced manifest from reaching a path the local config did not
-choose.
+choose. A glob that is wildcards only (`dots/*`) leaves out a hidden name, so a file such as `.zshrc` is not
+in it; add a glob that starts with the dot (`dots/.*`) to track those ([01-sync-model.md](01-sync-model.md),
+"Preset globs").
 
 ### `~/.zshrc` that is a symlink
 

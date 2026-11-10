@@ -116,6 +116,16 @@ def _glob_to_regex(name: str) -> str:
     )
 
 
+def _skip_hidden(name: str, pattern: str) -> str:
+    """`pattern` made to refuse a dot-leading name when the glob `name` is wildcards only (`*`, `?*`).
+
+    A glob with a literal part (`*.json`, `agent-*`) already says what its files look like, and has always matched
+    a hidden name that fits it; only a bare `*` takes in whatever a folder holds, Finder's `.DS_Store` and a tool's
+    hidden temporary files included.
+    """
+    return rf"(?!\.){pattern}" if all(character in GLOB_METACHARACTERS for character in name) else pattern
+
+
 @dataclass(frozen=True)
 class PresetGlob:
     """A preset path whose last element is a glob (`*`, `?`), never recursive.
@@ -155,7 +165,13 @@ class PresetGlob:
 
     @classmethod
     def create(cls, path: str) -> PresetGlob:
-        """Validate and freeze one glob; never assign fields afterwards."""
+        """Validate and freeze one glob; never assign fields afterwards.
+
+        A glob that is wildcards only (`themes/*`) does not name a hidden file, the shell's rule: a directory of user
+        files otherwise collects Finder's `.DS_Store` (not text) and a tool's hidden temporary files. A glob with a
+        literal part (`*.json`) is unchanged. The rule sits in the matcher, which is rebuilt from the path wherever a
+        glob is (the catalog, the machine's config), so every place that lists or checks a glob agrees.
+        """
         validated = validate_path(path)
         directory, _, name = validated.rpartition("/")
         if any(character in directory for character in GLOB_METACHARACTERS):
@@ -167,11 +183,12 @@ class PresetGlob:
             raise ConfigError(f"a preset glob must not be recursive: {validated!r}")
         if not _has_glob(validated):
             raise ConfigError(f"a preset glob must name a pattern: {validated!r}")
+        pattern = _glob_to_regex(collision_key(name))
         return cls(
             path=validated,
             directory=directory,
             name=name,
-            matcher=re.compile(_glob_to_regex(collision_key(name))),
+            matcher=re.compile(_skip_hidden(name, pattern)),
         )
 
     def matches(self, path: str) -> bool:

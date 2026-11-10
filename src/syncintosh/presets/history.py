@@ -69,5 +69,6 @@ POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "claude-memory": ("b9954c5ba08ebde47b3d92c5dd884438550ad897ebb3ffff38acd71b50856e00",),
         "claude-sessions": ("d33cbc67ca56056a31fb785ec3d98d42d173ca23c07ec7d68c9e00f06bcfcefd",),
         "codex-sessions": ("1c179038e2d2317296aff07bf494e2591a0f8d99ca238bb3a7e1afc7006e5556",),
+        "ghostty": ("c2f1c1e25831d5f3e43e2e59090870138a23ec592f0ebca49f89e56fdcb39b90",),
     }
 )
