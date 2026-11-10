@@ -662,6 +662,20 @@ class DocumentStore(Protocol):
 
 
 @runtime_checkable
+class DocumentSkips(Protocol):
+    """Which of the documents a preset presents this machine must leave alone right now, read once per cycle.
+
+    The sentence per document is what the report shows. A document whose database or plist is not here is not a
+    skip (the existing "the app is not here" deferral covers it); one the app manages itself, or that cannot be read
+    to tell, is (`core/documents.py`, `skip_reason`).
+    """
+
+    def reasons(self) -> Mapping[str, str]:
+        """`$HOME`-relative view path → why that document is skipped; documents that are not skipped are absent."""
+        ...
+
+
+@runtime_checkable
 class AgentProjectIndex(Protocol):
     """Where this machine keeps each opted-in project's agent data, read once per cycle.
 
