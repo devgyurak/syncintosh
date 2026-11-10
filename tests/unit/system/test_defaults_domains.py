@@ -10,7 +10,7 @@ import pytest
 
 from syncintosh.core.documents import CFPREFS_DOMAIN, ORCA_PROFILE_STATE, DocumentSource
 from syncintosh.core.errors import DocumentRefused, DocumentStale, DocumentWrittenUnverified
-from syncintosh.system.defaults_domains import DEFAULTS_EXECUTABLE, DefaultsDomainStore
+from syncintosh.system.defaults_domains import DefaultsDomainStore
 
 DOMAIN = "com.example.app"
 SOURCE = DocumentSource.create(
@@ -33,9 +33,13 @@ def _home(tmp_path):
     return tmp_path / "home"
 
 
-def test_the_real_tool_is_run_by_absolute_path() -> None:
+def test_the_real_tool_is_run_by_absolute_path(monkeypatch) -> None:
+    # given — the suite-wide guard replaced it with a stub; look at the shipped value
+    monkeypatch.undo()
+    from syncintosh.system import defaults_domains
+
     # when & then
-    assert DEFAULTS_EXECUTABLE == "/usr/bin/defaults"
+    assert defaults_domains.DEFAULTS_EXECUTABLE == "/usr/bin/defaults"
 
 
 def test_the_constructor_runs_nothing(tmp_path, fake_defaults) -> None:
@@ -334,3 +338,37 @@ def test_a_document_that_is_not_a_plist_dictionary_is_refused_before_any_change(
     with pytest.raises(DocumentRefused):
         store.write(SOURCE, payload, expected_revision=read.revision)
     assert fake_defaults.values(_home(tmp_path), DOMAIN) == {"a": 1}
+
+
+def test_an_import_that_outlives_the_timeout_is_the_unverified_signal_not_a_refusal(tmp_path, fake_defaults) -> None:
+    # given — exports answer at once; the import hangs past the timeout
+    fake_defaults.seed(_home(tmp_path), DOMAIN, {"a": 1})
+    script = tmp_path / "slow-import"
+    script.write_text(
+        f'#!/bin/sh\nif [ "$1" = import ]; then sleep 5; fi\nexec {fake_defaults.path} "$@"\n', encoding="utf-8"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    store = DefaultsDomainStore(str(_home(tmp_path)), executable=str(script), timeout_seconds=1.0)
+    read = _store(tmp_path, fake_defaults).read(SOURCE)
+    assert read is not None
+
+    # when & then
+    with pytest.raises(DocumentWrittenUnverified):
+        store.write(SOURCE, _xml({"a": 2}), expected_revision=read.revision)
+
+
+def test_an_import_killed_by_a_signal_is_the_unverified_signal(tmp_path, fake_defaults) -> None:
+    # given
+    fake_defaults.seed(_home(tmp_path), DOMAIN, {"a": 1})
+    script = tmp_path / "killed-import"
+    script.write_text(
+        f'#!/bin/sh\nif [ "$1" = import ]; then kill -9 $$; fi\nexec {fake_defaults.path} "$@"\n', encoding="utf-8"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    store = DefaultsDomainStore(str(_home(tmp_path)), executable=str(script))
+    read = _store(tmp_path, fake_defaults).read(SOURCE)
+    assert read is not None
+
+    # when & then
+    with pytest.raises(DocumentWrittenUnverified):
+        store.write(SOURCE, _xml({"a": 2}), expected_revision=read.revision)

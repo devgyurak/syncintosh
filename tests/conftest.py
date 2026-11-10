@@ -142,8 +142,8 @@ _FAKE_DEFAULTS = '''#!{python}
 """A stand-in for /usr/bin/defaults that keeps each domain as an XML plist under $HOME/Library/Preferences.
 
 It reproduces what the issue-58 Step 0 probe saw on a scratch domain: `export` of a missing domain prints an empty
-`<dict/>` and exits 0, `import` merges per top-level key (a nested dict is replaced whole), `delete` removes one key,
-and malformed input exits 1 and changes nothing. Every call is appended to $HOME/.fake-defaults-calls.jsonl.
+`<dict/>` and exits 0, `import` merges per top-level key (a nested dict is replaced
+whole), `delete` removes one key (rc 1 when there is none), and malformed input exits 1 and changes nothing. Every call is appended to $HOME/.fake-defaults-calls.jsonl.
 """
 import json, os, plistlib, sys
 home = os.environ["HOME"]
@@ -171,7 +171,9 @@ elif command == "import":
     if not os.path.exists(keep):
         plistlib.dump(current | incoming, open(path, "wb"), fmt=plistlib.FMT_XML)
 elif command == "delete":
-    current.pop(argv[2], None)
+    if argv[2] not in current:
+        sys.exit(1)
+    current.pop(argv[2])
     plistlib.dump(current, open(path, "wb"), fmt=plistlib.FMT_XML)
 else:
     sys.exit(2)
@@ -224,3 +226,14 @@ def fake_defaults(tmp_path):
             (home / ".fake-defaults-drop-import").write_text("", encoding="utf-8")
 
     return _Fake
+
+
+@pytest.fixture(autouse=True)
+def _no_real_defaults(monkeypatch):
+    """No test can run the real `/usr/bin/defaults`: it ignores `HOME` and would read the developer's own domains.
+
+    A test that needs a tool takes `fake_defaults` and hands its path to the store or patches this constant again.
+    """
+    monkeypatch.setattr(
+        "syncintosh.system.defaults_domains.DEFAULTS_EXECUTABLE", "/nonexistent/never-the-real-defaults"
+    )
