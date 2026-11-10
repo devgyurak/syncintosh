@@ -1,0 +1,22 @@
+{
+  "Profiles": [
+    {
+      "Name": "Fixture Work",
+      "Guid": "11111111-AAAA-4AAA-8AAA-000000000001",
+      "Dynamic Profile Parent Name": "Default",
+      "Custom Directory": "Yes",
+      "Working Directory": "/tmp/fixture-work",
+      "Badge Text": "work",
+      "Tags": ["fixture"]
+    },
+    {
+      "Name": "Fixture Logs",
+      "Guid": "11111111-AAAA-4AAA-8AAA-000000000002",
+      "Dynamic Profile Parent Name": "Default",
+      "Custom Directory": "Yes",
+      "Working Directory": "/tmp/fixture-logs",
+      "Badge Text": "logs",
+      "Tags": ["fixture"]
+    }
+  ]
+}
