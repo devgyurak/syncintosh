@@ -581,3 +581,20 @@ def test_a_record_no_store_claims_is_not_written_because_nothing_says_it_is_clos
 
     # then
     assert ((b.home / MAIN).exists(), [s.reason for s in report.session_skipped]) == (False, ["open"])
+
+
+def test_a_published_session_that_is_open_still_counts_toward_the_project_cap(tmp_path, memory_key_store) -> None:
+    # given — s1 and s2 (96 MiB each) are published; then s1 is open while a third 96 MiB session appears
+    a, _ = _pair(tmp_path, memory_key_store)
+    _grow(a, "s1", age=10)
+    _grow(a, "s2", age=9)
+    _run(a)
+    _grow(a, "s3", age=8)
+    a.activity.answers["s1"] = True
+
+    # when
+    report = _run(a)
+
+    # then — the cap decision for s3 does not flip because s1 is open this cycle
+    assert ("s3", "cap") in [(s.session_id, s.reason) for s in report.session_skipped]
+    assert _records(a) == sorted([*FILES["s1"], *FILES["s2"]])

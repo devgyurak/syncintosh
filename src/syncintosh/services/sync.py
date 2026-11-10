@@ -1450,18 +1450,21 @@ def _collect_sessions(
         for record in (() if head is None else head.records.values())
         if (found := presets.sessions.session_of(record.path)) is not None
     )
+    # The project cap is judged over every session the store lists, idle or not, so a published session that happens to
+    # be open this cycle still counts and the decision for a new session does not flip with what is open right now.
+    listed, over = within_project_cap(listing.units, published=published)
+    state.session_skipped.extend(SessionSkipped.create(session_id=unit.session_id, reason="cap") for unit in over)
     idle: list[SessionUnit] = []
-    for unit in listing.units:
+    for unit in listed:
         why = eligibility(unit, now=presets.now, is_open=presets.activity.is_open(unit.session_id))
         if why is None:
             idle.append(unit)
         else:
             state.session_skipped.append(SessionSkipped.create(session_id=unit.session_id, reason=why))
-    fitting, over = within_project_cap(idle, published=published)
-    state.session_skipped.extend(SessionSkipped.create(session_id=unit.session_id, reason="cap") for unit in over)
-    for unit in fitting:
+    sealed = {record.path: record.sha256 for record in (() if head is None else head.records.values())}
+    for unit in idle:
         staged = _stage_session(
-            state, unit, live=live, deny=deny, home=home, presets=presets, scanner=scanner, paths=paths
+            state, unit, live=live, deny=deny, home=home, presets=presets, scanner=scanner, paths=paths, sealed=sealed
         )
         if staged is None:
             continue
@@ -1485,6 +1488,7 @@ def _stage_session(
     presets: _Presets,
     scanner: SecretScanner,
     paths: LivePaths,
+    sealed: Mapping[str, str],
 ) -> list[tuple[LocalItem, bytes]] | None:
     """Every file of `unit` as an item with its bytes, or `None` (reported) when any file may not be collected."""
     staged: list[tuple[LocalItem, bytes]] = []
@@ -1534,7 +1538,9 @@ def _stage_session(
             )
             return None
         try:
-            scanner.scan(raw, subject=file.path, format="text")
+            if _sha256(raw) != sealed.get(file.path):
+                # Bytes the repository already holds were scanned when sealed; only new bytes are scanned again.
+                scanner.scan(raw, subject=file.path, format="text")
         except SecretScanError as exc:
             state.session_skipped.append(
                 SessionSkipped.create(session_id=unit.session_id, reason="secret", path=file.path, detail=str(exc))
@@ -2692,6 +2698,9 @@ def _apply(
         if policy is not None and policy.append_only:
             # Written only when missing or when the repo's copy strictly extends the local one, so the old bytes are
             # a prefix of the new and no restore point is needed (`core/append.py`, decision D10).
+            if live_bytes is not None and _sha256(live_bytes) == record.sha256:
+                # Already what the repository holds: nothing to decrypt or write.
+                continue
             data = _verified_object(transport, cipher, target_commit, file_id, record.sha256)
             if data is None:
                 deferred.append(Deferral(record.path, _OBJECT_MISSING))

@@ -42,7 +42,9 @@ session: it is sealed, skipped, or refused together, because a session with a fi
   file on every sync would commit a full new ciphertext each time; waiting for idle bounds that.
 * **Caps.** 48 MiB of plaintext per file (the sealed object stays under GitHub's 50 MiB warning) and 256 MiB per
   project. A file over its cap, or the newest new sessions past the project cap, are skipped and reported; there is no
-  chunking. The project cap is soft like a glob's: a session that is already a record is never dropped by it.
+  chunking. The project cap is soft like a glob's: a session that is already a record is never dropped by it. It is judged over every session the store lists, idle or open, so the answer does not change with what is open
+  right now. A project that is over it keeps its published sessions and admits no new one until room is made (a session
+  removed from the store and the repository); nothing is dropped silently, each held-back session is reported.
 * **Secrets.** Before anything of a session is staged, every file is scanned. One hit leaves the **whole session** out
   and reports the session id, the file and the scanner's own location text (a label and a line number — never the
   value). The rest of the cycle goes on. There is no redaction: it would alter history. `write_repo`'s scan stays as the
