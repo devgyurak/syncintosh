@@ -693,6 +693,15 @@ class SessionStore(Protocol):
         """The id of the session a record path belongs to, or `None` when it is not a session file of this machine."""
         ...
 
+    def note_for(self, path: str, data: bytes) -> str | None:
+        """A fixed sentence about a session file just written, or `None`.
+
+        Used for the one thing worth saying about a transcript from another Mac: the CLI that wrote it differs from
+        the one that will resume it (decision D12). A warning only, never a refusal, and `None` when either version is
+        not known. The sentence may name versions; it never quotes the transcript.
+        """
+        ...
+
 
 @runtime_checkable
 class SessionActivity(Protocol):

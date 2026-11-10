@@ -106,6 +106,9 @@ class FakeStore:
         found = SESSION_PATH.fullmatch(path)
         return None if found is None else found.group("id")
 
+    def note_for(self, path: str, data: bytes) -> str | None:
+        return None
+
 
 class FakeActivity:
     """A `SessionActivity` that answers what it is told; a session it was not told about is closed."""
