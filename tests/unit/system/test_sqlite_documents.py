@@ -58,7 +58,7 @@ def test_read_returns_the_payload_and_the_profile_revision(tmp_path, profile_sta
 
     # then
     assert read is not None
-    assert (read.payload, read.revision) == (PAYLOAD, 7)
+    assert (read.payload, read.revision) == (PAYLOAD, "7")
 
 
 def test_read_of_a_missing_database_is_none_and_creates_nothing(tmp_path) -> None:
@@ -172,7 +172,7 @@ def test_a_database_behind_a_symlink_is_refused_for_reading_and_writing(tmp_path
     with pytest.raises(DocumentRefused, match="symlink"):
         store.read(SOURCE)
     with pytest.raises(DocumentRefused, match="symlink"):
-        store.write(SOURCE, '{"a":1}', expected_revision=7)
+        store.write(SOURCE, '{"a":1}', expected_revision="7")
 
 
 def test_a_symlinked_profile_folder_is_a_symlink_too(tmp_path, profile_state_db) -> None:
@@ -204,7 +204,7 @@ def test_a_symlink_anywhere_below_home_is_refused_for_reading_and_writing(
     with pytest.raises(DocumentRefused, match="symlink"):
         store.read(SOURCE)
     with pytest.raises(DocumentRefused, match="symlink"):
-        store.write(SOURCE, '{"a":1}', expected_revision=7)
+        store.write(SOURCE, '{"a":1}', expected_revision="7")
 
 
 @pytest.mark.parametrize(
@@ -221,7 +221,7 @@ def test_a_flip_between_a_boolean_and_a_number_is_written(tmp_path, profile_stat
     database = profile_state_db(_database(tmp_path), settings=before)
 
     # when
-    _store(tmp_path).write(SOURCE, after, expected_revision=7)
+    _store(tmp_path).write(SOURCE, after, expected_revision="7")
 
     # then
     assert _query(database, "SELECT payload, revision FROM profile_state_documents WHERE domain='settings'") == [
@@ -260,7 +260,7 @@ def test_a_write_follows_the_apps_protocol_and_touches_only_that_row_and_the_rev
     new = '{"theme":"light","fontSize":14}'
 
     # when
-    _store(tmp_path).write(SOURCE, new, expected_revision=7)
+    _store(tmp_path).write(SOURCE, new, expected_revision="7")
 
     # then
     row = _query(
@@ -286,12 +286,12 @@ def test_what_a_write_leaves_is_readable_by_the_next_read(tmp_path, profile_stat
     store = _store(tmp_path)
 
     # when
-    store.write(SOURCE, '{"a":1}', expected_revision=7)
+    store.write(SOURCE, '{"a":1}', expected_revision="7")
     read = store.read(SOURCE)
 
     # then
     assert read is not None
-    assert (read.payload, read.revision) == ('{"a":1}', 8)
+    assert (read.payload, read.revision) == ('{"a":1}', "8")
 
 
 def test_updated_at_is_a_millisecond_epoch(tmp_path, profile_state_db) -> None:
@@ -299,7 +299,7 @@ def test_updated_at_is_a_millisecond_epoch(tmp_path, profile_state_db) -> None:
     database = profile_state_db(_database(tmp_path))
 
     # when
-    _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision=7)
+    _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision="7")
 
     # then
     (stamp,) = _query(database, "SELECT updated_at FROM profile_state_documents WHERE domain='settings'")[0]
@@ -313,7 +313,7 @@ def test_a_write_of_an_equal_value_writes_nothing_and_keeps_the_revision(tmp_pat
     before = _snapshot(database)
 
     # when
-    _store(tmp_path).write(SOURCE, same, expected_revision=7)
+    _store(tmp_path).write(SOURCE, same, expected_revision="7")
 
     # then
     assert _snapshot(database) == before
@@ -344,7 +344,7 @@ def test_a_write_after_someone_else_moved_the_revision_fails_and_writes_nothing(
 def test_a_write_to_a_missing_database_refuses_and_does_not_create_it(tmp_path) -> None:
     # when & then
     with pytest.raises(DocumentRefused, match="not created"):
-        _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision=7)
+        _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision="7")
     assert (tmp_path / "app").exists() is False
 
 
@@ -360,7 +360,7 @@ def test_a_write_to_an_unsupported_database_is_refused_and_leaves_it_alone(
 
     # when & then
     with pytest.raises(DocumentRefused):
-        _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision=7)
+        _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision="7")
     assert _snapshot(database) == before
 
 
@@ -370,7 +370,7 @@ def test_a_write_keeps_the_files_mode(tmp_path, profile_state_db) -> None:
     database.chmod(0o600)
 
     # when
-    _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision=7)
+    _store(tmp_path).write(SOURCE, '{"a":1}', expected_revision="7")
 
     # then
     assert database.stat().st_mode & 0o777 == 0o600
@@ -413,7 +413,7 @@ class _ReadsBackWrong(SqliteDocumentStore):
 
 @pytest.mark.parametrize(
     "answer",
-    [DocumentRead(payload='{"other":1}', revision=9), DocumentRefused("gone"), None],
+    [DocumentRead(payload='{"other":1}', revision="9"), DocumentRefused("gone"), None],
 )
 def test_a_read_back_that_does_not_confirm_the_commit_is_a_distinct_written_unverified_signal(
     tmp_path, profile_state_db, answer: DocumentRead | DocumentRefused | None
@@ -424,15 +424,15 @@ def test_a_read_back_that_does_not_confirm_the_commit_is_a_distinct_written_unve
 
     # when & then — the signal is a refusal for callers that do not care, but the database really did change
     with pytest.raises(DocumentWrittenUnverified) as raised:
-        store.write(SOURCE, '{"a":1}', expected_revision=7)
+        store.write(SOURCE, '{"a":1}', expected_revision="7")
     assert isinstance(raised.value, DocumentRefused)
     assert _query(database, "SELECT payload, revision FROM profile_state_documents WHERE domain='settings'") == [
         ('{"a":1}', 8)
     ]
 
 
-@pytest.mark.parametrize("revision", [3, 99])
-def test_a_stale_write_is_not_the_unverified_signal(tmp_path, profile_state_db, revision: int) -> None:
+@pytest.mark.parametrize("revision", ["3", "99"])
+def test_a_stale_write_is_not_the_unverified_signal(tmp_path, profile_state_db, revision: str) -> None:
     # given
     profile_state_db(_database(tmp_path), revision=7)
 

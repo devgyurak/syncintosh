@@ -93,7 +93,7 @@ class SqliteDocumentStore:
         except sqlite3.Error:
             raise DocumentRefused("the database could not be read") from None
 
-    def write(self, source: DocumentSource, payload: str, *, expected_revision: int) -> None:
+    def write(self, source: DocumentSource, payload: str, *, expected_revision: str) -> None:
         path = self._checked_path(source)
         if not path.exists():
             # Never created: a database the app has not made is the app not having run.
@@ -162,7 +162,7 @@ class SqliteDocumentStore:
             raise DocumentRefused("the document is newer than its profile")
         if stored_hash != content_hash(payload):
             raise DocumentRefused("the document does not match its stored hash")
-        return DocumentRead(payload=payload, revision=int(profile_revision))
+        return DocumentRead(payload=payload, revision=profile_revision)
 
     def _replace(
         self,
@@ -170,7 +170,7 @@ class SqliteDocumentStore:
         source: DocumentSource,
         path: Path,
         payload: str,
-        expected_revision: int,
+        expected_revision: str,
     ) -> bool:
         """Do the write inside the open transaction; True when there is something to commit."""
         current = self._validated(connection, source, path)
@@ -178,7 +178,7 @@ class SqliteDocumentStore:
             raise DocumentStale("the document changed since it was read, so it was not written")
         if same_value(current.payload, payload):
             return False
-        revision = current.revision + 1
+        revision = int(current.revision) + 1
         connection.execute(
             "UPDATE profile_state_documents SET payload = ?, domain_version = ?, revision = ?, updated_at = ?, "
             "content_hash = ? WHERE domain = ?",

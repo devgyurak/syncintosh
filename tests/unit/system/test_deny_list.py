@@ -523,3 +523,23 @@ def test_a_symlink_to_orcas_state_database_is_denied(tmp_path) -> None:
 
     # when & then
     assert is_denied(home / "notes" / "link", home) is True
+
+
+@pytest.mark.parametrize(
+    ("relative", "denied"),
+    [
+        ("Library/Preferences/com.googlecode.iterm2.plist", True),
+        ("Library/Preferences/com.googlecode.iterm2.private.plist", True),
+        ("Library/Preferences/COM.GOOGLECODE.ITERM2.PLIST", True),
+        ("Library/Preferences/@defaults/com.googlecode.iterm2.plist", False),
+        ("Library/Preferences/com.apple.finder.plist", False),
+    ],
+)
+def test_a_preferences_domain_plist_is_denied_but_its_virtual_view_is_not(
+    tmp_path, relative: str, denied: bool
+) -> None:
+    # given — `cfprefsd` owns the file; the only door is the `@defaults` view that `defaults` serves
+    home = tmp_path / "home"
+
+    # when & then
+    assert is_denied(home / relative, home) is denied

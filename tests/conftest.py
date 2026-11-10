@@ -136,3 +136,91 @@ def profile_state_db():
         return path
 
     return _make
+
+
+_FAKE_DEFAULTS = '''#!{python}
+"""A stand-in for /usr/bin/defaults that keeps each domain as an XML plist under $HOME/Library/Preferences.
+
+It reproduces what the issue-58 Step 0 probe saw on a scratch domain: `export` of a missing domain prints an empty
+`<dict/>` and exits 0, `import` merges per top-level key (a nested dict is replaced whole), `delete` removes one key,
+and malformed input exits 1 and changes nothing. Every call is appended to $HOME/.fake-defaults-calls.jsonl.
+"""
+import json, os, plistlib, sys
+home = os.environ["HOME"]
+argv = sys.argv[1:]
+stdin = b"" if sys.stdin.isatty() else sys.stdin.buffer.read()
+with open(os.path.join(home, ".fake-defaults-calls.jsonl"), "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": argv, "stdin": stdin.decode("utf-8", "replace")}}) + "\\n")
+command, domain = argv[0], argv[1]
+path = os.path.join(home, "Library", "Preferences", domain + ".plist")
+current = plistlib.load(open(path, "rb")) if os.path.exists(path) else {{}}
+refuse = os.path.join(home, ".fake-defaults-refuse")
+if os.path.exists(refuse) and command in open(refuse, encoding="utf-8").read().split():
+    sys.exit(1)
+if command == "export":
+    sys.stdout.buffer.write(plistlib.dumps(current, fmt=plistlib.FMT_XML))
+elif command == "import":
+    try:
+        incoming = plistlib.loads(stdin)
+    except Exception:
+        sys.exit(1)
+    if not isinstance(incoming, dict):
+        sys.exit(1)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    keep = os.path.join(home, ".fake-defaults-drop-import")
+    if not os.path.exists(keep):
+        plistlib.dump(current | incoming, open(path, "wb"), fmt=plistlib.FMT_XML)
+elif command == "delete":
+    current.pop(argv[2], None)
+    plistlib.dump(current, open(path, "wb"), fmt=plistlib.FMT_XML)
+else:
+    sys.exit(2)
+'''
+
+
+@pytest.fixture
+def fake_defaults(tmp_path):
+    """A fake `defaults` executable and the helpers to seed a domain and read back what it was asked to do.
+
+    The tests never reach the real `defaults` or `cfprefsd`: the store under test is handed this path. HOME is
+    the temp home, so the domain's "plist" is a file under it (the real one is binary; the fake keeps XML).
+    """
+    import json
+    import plistlib
+    import stat
+    import sys
+    from pathlib import Path
+
+    executable = tmp_path / "bin" / "defaults"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text(_FAKE_DEFAULTS.format(python=sys.executable), encoding="utf-8")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    class _Fake:
+        path = str(executable)
+
+        @staticmethod
+        def seed(home: Path, domain: str, values: dict) -> Path:
+            plist = home / "Library" / "Preferences" / f"{domain}.plist"
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_bytes(plistlib.dumps(values, fmt=plistlib.FMT_XML))
+            return plist
+
+        @staticmethod
+        def values(home: Path, domain: str) -> dict:
+            return plistlib.loads((home / "Library" / "Preferences" / f"{domain}.plist").read_bytes())
+
+        @staticmethod
+        def calls(home: Path) -> list[dict]:
+            log = home / ".fake-defaults-calls.jsonl"
+            return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+
+        @staticmethod
+        def refuse(home: Path, *commands: str) -> None:
+            (home / ".fake-defaults-refuse").write_text(" ".join(commands), encoding="utf-8")
+
+        @staticmethod
+        def drop_imports(home: Path) -> None:
+            (home / ".fake-defaults-drop-import").write_text("", encoding="utf-8")
+
+    return _Fake

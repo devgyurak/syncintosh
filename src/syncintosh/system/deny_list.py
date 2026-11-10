@@ -128,6 +128,13 @@ DENIED_PATHS: tuple[str, ...] = (
     "Library/Application Support/JetBrains/*/options/mac/recentConnections.xml",
     "Library/Application Support/JetBrains/*/options/mac/trusted-paths.xml",
     _ORCA_ROOT,
+    # A preferences domain's plist belongs to `cfprefsd`, which caches it and rewrites the file on its own schedule:
+    # a read of the file misses what is still in memory and a write under it is lost or half-applied. The one
+    # supported door is `defaults`, behind a virtual `Library/Preferences/@defaults/<domain>.plist` view
+    # (`system/defaults_domains.py`), so the real file is refused by construction (issue #58). The `.private` plist is
+    # iTerm2's second domain file, listed in its cask's zap paths; neither is ever a preset's file.
+    "Library/Preferences/com.googlecode.iterm2.plist",
+    "Library/Preferences/com.googlecode.iterm2.private.plist",
     # Coding agents' own state (issue #56). Only a project's `memory/` and, later, its transcripts are ever synced, and
     # those are reached through a logical `@<name>` path; everything else the CLIs keep beside them is account metadata,
     # environment dumps, file backups or live process state. A wildcard covers the names the CLIs add and rotate
