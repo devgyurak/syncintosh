@@ -12,7 +12,9 @@ from syncintosh.core.errors import SecretScanError
 from syncintosh.core.manifest import ManifestRecord
 from syncintosh.core.ports import Cipher, GitTransport, SecretScanner
 from syncintosh.core.repo import object_path
-from syncintosh.services.sync import Backup, Refusal, _save_restore_point
+from syncintosh.services.sync import Backup
+from syncintosh.services.sync._shared import Refusal
+from syncintosh.services.sync.apply import _save_restore_point
 
 FILE_ID = "2" * 32
 CYCLE = "c" * 40

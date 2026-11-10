@@ -14,15 +14,15 @@ from typing import cast
 
 import pytest
 
-# `syncintosh.services.sync` is also a function name in the package, so the module is taken from `sys.modules`.
-import syncintosh.services.sync  # noqa: F401  (imported for the side effect of registering the module)
+# `syncintosh.services.sync` is also a function name in the package, so the `publish` module comes from `sys.modules`.
+import syncintosh.services.sync.publish  # noqa: F401  (imported for the side effect of registering the module)
 from syncintosh.core.errors import GenerationDivergence
 from syncintosh.core.models import PendingPush
 from syncintosh.core.ports import RepoFiles, RingCodec
 from syncintosh.core.repo import wrap_path
 from syncintosh.services.keys import discard_stray_generations
 
-_SYNC = sys.modules["syncintosh.services.sync"]
+_SYNC = sys.modules["syncintosh.services.sync.publish"]
 
 LOCAL = "l" * 40
 REMOTE = "r" * 40

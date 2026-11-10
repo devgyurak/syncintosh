@@ -9,7 +9,8 @@ from collections.abc import Mapping
 import pytest
 
 from syncintosh.core.manifest import ManifestRecord
-from syncintosh.services.sync import Backup, RestorePoint, SyncReport, _restore_point
+from syncintosh.services.sync import Backup, RestorePoint, SyncReport
+from syncintosh.services.sync.apply import _restore_point
 
 FILE_ID = "0" * 32
 CYCLE = "c" * 40

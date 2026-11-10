@@ -21,7 +21,9 @@ from syncintosh.core.ports import Cipher, GitTransport
 from syncintosh.core.repo import object_path
 from syncintosh.presets import BuiltinCatalog, vscode
 from syncintosh.services.policy_gate import PolicyView
-from syncintosh.services.sync import NO_APP_INFO, Backup, RestorePoint, _apply, _Presets
+from syncintosh.services.sync import NO_APP_INFO, Backup, RestorePoint
+from syncintosh.services.sync._shared import _Presets
+from syncintosh.services.sync.apply import _apply
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
 

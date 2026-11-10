@@ -40,19 +40,19 @@ from syncintosh.core.ports import (
 from syncintosh.core.presets import ValidatorName
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Unresolved, open_live_paths
-from syncintosh.services.sync import (
+from syncintosh.services.sync._shared import (
     _decode,
     _document_refusal,
     _Presets,
     _project_file,
     _read_ignores,
     _read_manifest,
-    _real_path_refusal,
     _record_refusal,
     _sha256,
     _verified_object,
     static_projector,
 )
+from syncintosh.services.sync.collect import _real_path_refusal
 
 # How a tracked path stands relative to the repo side.
 DiffStatus = Literal["in-sync", "changed", "missing-here", "deferred"]

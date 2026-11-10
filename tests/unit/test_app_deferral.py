@@ -7,7 +7,8 @@ import pytest
 
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import SETTINGS
-from syncintosh.services.sync import NO_APP_INFO, NO_RUNNING_INFO, _deferral, _missing_file_decision
+from syncintosh.services.sync import NO_APP_INFO, NO_RUNNING_INFO
+from syncintosh.services.sync.apply import _deferral, _missing_file_decision
 
 
 @pytest.mark.parametrize(
