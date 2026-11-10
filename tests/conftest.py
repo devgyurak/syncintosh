@@ -141,9 +141,10 @@ def profile_state_db():
 _FAKE_DEFAULTS = '''#!{python}
 """A stand-in for /usr/bin/defaults that keeps each domain as an XML plist under $HOME/Library/Preferences.
 
-It reproduces what the issue-58 Step 0 probe saw on a scratch domain: `export` of a missing domain prints an empty
-`<dict/>` and exits 0, `import` merges per top-level key (a nested dict is replaced
-whole), `delete` removes one key (rc 1 when there is none), and malformed input exits 1 and changes nothing. Every call is appended to $HOME/.fake-defaults-calls.jsonl.
+It reproduces what the issue-58 Step 0 probe saw on a scratch domain: `export` of a missing domain prints an
+empty `<dict/>` and exits 0, `import` merges per top-level key (a nested dict is replaced whole), `delete` removes
+one key (rc 1 when there is none), and malformed input exits 1 and changes nothing. Every call is appended to
+$HOME/.fake-defaults-calls.jsonl.
 """
 import json, os, plistlib, sys
 home = os.environ["HOME"]
