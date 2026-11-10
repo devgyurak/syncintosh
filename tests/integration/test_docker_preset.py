@@ -30,7 +30,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.docker import CONFIG, DAEMON
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import SyncPorts, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.json_check import JsonSyntaxValidator
@@ -134,28 +134,28 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={"jsonc": JsoncAdapter()},
-        catalog=BuiltinCatalog.default(),
-        # The preset names the strict JSON check, and a missing one is refused rather than skipped,
-        # so the harness wires what the CLI wires.
-        validators={"json": JsonSyntaxValidator()},
-        live=SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        source=SecureFileIdSource(),
-        config=load_config(machine.config_file),
-        home=str(machine.home),
-        branch=active.branch() or BRANCH,
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={"jsonc": JsoncAdapter()},
+            catalog=BuiltinCatalog.default(),
+            validators={"json": JsonSyntaxValidator()},
+            live=SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            source=SecureFileIdSource(),
+            config=load_config(machine.config_file),
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+        ),
         adopt=adopt,
     )
 

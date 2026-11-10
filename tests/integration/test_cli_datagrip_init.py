@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.cli import wiring as wiring_module
 from syncintosh.presets import datagrip
 from syncintosh.system.config import load_config
 
@@ -32,7 +33,7 @@ def _init(tmp_path: Path, monkeypatch, memory_key_store, *args: str):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
     monkeypatch.setenv("SYNCINTOSH_PASSPHRASE", "a recovery passphrase")
-    monkeypatch.setattr(main_module, "_key_store", lambda _remote: store)
+    monkeypatch.setattr(wiring_module, "key_store", lambda _remote: store)
     result = runner.invoke(main_module.app, ["init", "--remote", str(remote), *args])
     return result, home
 

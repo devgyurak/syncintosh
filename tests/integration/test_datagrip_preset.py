@@ -30,7 +30,7 @@ from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.jetbrains import SYNC_CONFLICT
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import SyncPorts, SyncReport, sync
 from syncintosh.system.app_config_dir import ProductInfoConfigDir
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
@@ -163,28 +163,30 @@ def _run(machine: Machine, *, running: FakeRunning | None = None, locate: tuple[
     cipher = EnvelopeCipher(machine.store)
     found = (str(machine.app),) if locate is None else locate
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={"xml": XmlAdapter()},
-        catalog=CATALOG,
-        live=SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        apps=FakeApps(),
-        running=FakeRunning(False) if running is None else running,
-        source=SecureFileIdSource(),
-        config=load_config(machine.config_file),
-        home=str(machine.home),
-        branch=active.branch() or BRANCH,
-        config_dirs=ProductInfoConfigDir(lambda _bundle: found, home=machine.home),
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={"xml": XmlAdapter()},
+            catalog=CATALOG,
+            live=SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            apps=FakeApps(),
+            running=FakeRunning(False) if running is None else running,
+            source=SecureFileIdSource(),
+            config=load_config(machine.config_file),
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+            config_dirs=ProductInfoConfigDir(lambda _bundle: found, home=machine.home),
+        )
     )
 
 

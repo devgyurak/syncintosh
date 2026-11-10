@@ -39,7 +39,7 @@ from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import SyncReport, sync
+from syncintosh.services.sync import SyncPorts, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.document_files import open_live_files
@@ -159,25 +159,27 @@ def _run(machine: Machine, *, wrap: Callable[[LiveFiles], LiveFiles] = lambda li
     cipher = EnvelopeCipher(machine.store)
     config: SyncConfig = load_config(machine.config_file)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={},
-        catalog=CATALOG,
-        live=wrap(open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents())),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        source=SecureFileIdSource(),
-        config=config,
-        home=str(machine.home),
-        branch=active.branch() or BRANCH,
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={},
+            catalog=CATALOG,
+            live=wrap(open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents())),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            source=SecureFileIdSource(),
+            config=config,
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+        )
     )
 
 

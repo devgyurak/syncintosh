@@ -57,7 +57,7 @@ from syncintosh.services.keys import (
     rotate_repo,
 )
 from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
-from syncintosh.services.sync import RestorePoint, SyncReport, sync
+from syncintosh.services.sync import RestorePoint, SyncPorts, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -222,30 +222,32 @@ def _run(
     active = transport or GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
-        live=live or SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        rotation_marker=machine.marker,
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        source=SecureFileIdSource(),
-        config=load_config(machine.config_file),
-        home=str(machine.home),
-        branch=active.branch() or BRANCH,
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
+            live=live or SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            rotation_marker=machine.marker,
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            source=SecureFileIdSource(),
+            config=load_config(machine.config_file),
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+            catalog=EMPTY_CATALOG if catalog is None else catalog,
+            validators={} if validators is None else validators,
+        ),
         adopt=adopt,
         resolving=resolving,
         decide=decide,
-        catalog=EMPTY_CATALOG if catalog is None else catalog,
-        validators={} if validators is None else validators,
     )
 
 

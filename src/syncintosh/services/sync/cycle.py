@@ -7,61 +7,23 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from syncintosh.core.config import SyncConfig
 from syncintosh.core.errors import GitError, PendingConflict
 from syncintosh.core.ledger import AdoptChoice
-from syncintosh.core.manifest import MANIFEST_SCHEMA, FileFormat, Manifest, ManifestRecord
+from syncintosh.core.manifest import MANIFEST_SCHEMA, Manifest, ManifestRecord
 from syncintosh.core.models import PendingState
 from syncintosh.core.policy import stamp_policies
-from syncintosh.core.ports import (
-    AgentProjectIndex,
-    AppConfigDir,
-    AppDetector,
-    Cipher,
-    ContentAdapter,
-    DenyList,
-    DocumentSkips,
-    FileIdSource,
-    GenerationWrap,
-    GitTransport,
-    KeyStore,
-    LedgerStore,
-    LiveFiles,
-    MergeDriver,
-    PendingStore,
-    PresetCatalog,
-    ProfileIndex,
-    RepoFiles,
-    RingCodec,
-    RotationMarkerStore,
-    RunningApps,
-    SecretScanner,
-    SessionActivity,
-    SessionStore,
-    SyncLock,
-    SyntaxValidator,
-    WhenTag,
-)
-from syncintosh.core.presets import ValidatorName
 from syncintosh.core.repo import plan_writes
 from syncintosh.core.resolution import ConflictView, Decide, Picks
 from syncintosh.core.sessions import SessionSkipped
-from syncintosh.services.keys import NO_ROTATION_MARKER
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, open_live_paths
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.services.sync._shared import (
-    NO_ADAPTERS,
-    NO_APP_INFO,
-    NO_CATALOG,
-    NO_RUNNING_INFO,
-    NO_SESSION_ACTIVITY,
-    NO_SESSION_STORE,
-    NO_VALIDATORS,
     Backup,
+    SyncPorts,
     SyncReport,
     _baseline_reader,
     _commit,
@@ -83,40 +45,11 @@ from syncintosh.services.sync.publish import _publish
 
 
 def sync(
+    ports: SyncPorts,
     *,
-    transport: GitTransport,
-    files: RepoFiles,
-    cipher: Cipher,
-    scanner: SecretScanner,
-    store: KeyStore,
-    codec: RingCodec,
-    wrapper: GenerationWrap,
-    driver: MergeDriver,
-    live: LiveFiles,
-    ledger_store: LedgerStore,
-    pending_store: PendingStore,
-    lock: SyncLock,
-    deny: DenyList,
-    source: FileIdSource,
-    config: SyncConfig,
-    home: str,
-    branch: str,
-    adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
-    catalog: PresetCatalog = NO_CATALOG,
-    validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
-    apps: AppDetector = NO_APP_INFO,
-    running: RunningApps = NO_RUNNING_INFO,
     adopt: AdoptChoice | None = None,
     resolving: bool = False,
     decide: Decide | None = None,
-    when_tag: WhenTag | None = None,
-    profiles: ProfileIndex | None = None,
-    config_dirs: AppConfigDir | None = None,
-    agent_projects: AgentProjectIndex | None = None,
-    documents: DocumentSkips | None = None,
-    rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
-    sessions: SessionStore = NO_SESSION_STORE,
-    activity: SessionActivity = NO_SESSION_ACTIVITY,
     clock: Callable[[], float] = time.time,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
@@ -124,13 +57,15 @@ def sync(
     `resolving` runs the cycle that `resolve` settles a pending state with; `decide` answers the
     conflicts that cycle finds (see `Resolution`). A plain sync passes neither.
     """
-    presets = _Presets(catalog=catalog, adapters=adapters, validators=validators, when_tag=when_tag)
-    lock.acquire()
+    presets = _Presets(
+        catalog=ports.catalog, adapters=ports.adapters, validators=ports.validators, when_tag=ports.when_tag
+    )
+    ports.lock.acquire()
     try:
         if resolving:
-            if pending_store.load() is None:
+            if ports.pending_store.load() is None:
                 raise PendingConflict("there is no pending conflict to resolve")
-        elif pending_store.is_pending():
+        elif ports.pending_store.is_pending():
             raise PendingConflict(
                 "a previous sync stopped with unresolved conflicts; resolve them before syncing again"
             )
@@ -138,46 +73,33 @@ def sync(
         # every file that obeys the user's ignore list against this one reading of it.
         presets = replace(
             presets,
-            ignores=_read_ignores(catalog, adapters, live, deny, home),
-            sessions=sessions,
-            activity=activity,
+            ignores=_read_ignores(ports.catalog, ports.adapters, ports.live, ports.deny, ports.home),
+            sessions=ports.sessions,
+            activity=ports.activity,
             now=clock(),
         )
-        paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects, documents)
+        paths = open_live_paths(
+            ports.config, ports.catalog, ports.profiles, ports.config_dirs, ports.agent_projects, ports.documents
+        )
         view = PolicyView(
-            transport,
-            cipher=cipher,
-            catalog=catalog,
+            ports.transport,
+            cipher=ports.cipher,
+            catalog=ports.catalog,
             project=static_projector(presets),
-            scanner=scanner,
+            scanner=ports.scanner,
         )
         return _cycle(
-            transport=view,
-            files=files,
-            cipher=cipher,
-            scanner=scanner,
-            store=store,
-            codec=codec,
-            wrapper=wrapper,
-            driver=driver,
-            presets=presets,
-            live=live,
-            ledger_store=ledger_store,
-            pending_store=pending_store,
-            rotation_marker=rotation_marker,
-            deny=deny,
-            apps=apps,
-            running=running,
-            source=source,
-            config=config,
-            home=home,
-            branch=branch,
-            adopt=adopt,
-            resolution=Resolution(decide=decide, resolving=resolving),
-            paths=paths,
+            ports,
+            _Run(
+                view=view,
+                presets=presets,
+                paths=paths,
+                adopt=adopt,
+                resolution=Resolution(decide=decide, resolving=resolving),
+            ),
         )
     finally:
-        lock.release()
+        ports.lock.release()
 
 
 def _one_per_session(skipped: tuple[SessionSkipped, ...]) -> tuple[SessionSkipped, ...]:
@@ -212,88 +134,58 @@ def _next(resolution: Resolution, picks: Picks) -> Resolution:
     )
 
 
+@dataclass(frozen=True)
+class _Run:
+    """What one `sync` call fixed before the cycle: the policy view, the presets, the live paths, and the answers.
+
+    Split from `SyncPorts` because these are built per run (the view wraps the transport, the paths are resolved
+    against this run's profiles), and `resolution` changes from one round of the cycle to the next.
+    """
+
+    view: PolicyView
+    presets: _Presets
+    paths: LivePaths
+    adopt: AdoptChoice | None
+    resolution: Resolution
+
+
 def _cycle(
+    ports: SyncPorts,
+    run: _Run,
     *,
-    transport: PolicyView,
-    files: RepoFiles,
-    cipher: Cipher,
-    scanner: SecretScanner,
-    store: KeyStore,
-    codec: RingCodec,
-    wrapper: GenerationWrap,
-    driver: MergeDriver,
-    presets: _Presets,
-    live: LiveFiles,
-    ledger_store: LedgerStore,
-    pending_store: PendingStore,
-    rotation_marker: RotationMarkerStore,
-    deny: DenyList,
-    apps: AppDetector,
-    running: RunningApps,
-    source: FileIdSource,
-    config: SyncConfig,
-    home: str,
-    branch: str,
-    adopt: AdoptChoice | None,
-    resolution: Resolution,
-    paths: LivePaths,
     _restarted: bool = False,
     _carried_notes: tuple[str, ...] = (),
 ) -> SyncReport:
-    def again(next_resolution: Resolution, restarted: bool, carried: tuple[str, ...] = _carried_notes) -> SyncReport:
-        return _cycle(
-            transport=transport,
-            files=files,
-            cipher=cipher,
-            scanner=scanner,
-            store=store,
-            codec=codec,
-            wrapper=wrapper,
-            driver=driver,
-            presets=presets,
-            live=live,
-            ledger_store=ledger_store,
-            pending_store=pending_store,
-            rotation_marker=rotation_marker,
-            deny=deny,
-            apps=apps,
-            running=running,
-            source=source,
-            config=config,
-            home=home,
-            branch=branch,
-            adopt=adopt,
-            resolution=next_resolution,
-            paths=paths,
-            _restarted=restarted,
-            _carried_notes=carried,
-        )
+    view, presets, paths, adopt, resolution = run.view, run.presets, run.paths, run.adopt, run.resolution
 
-    ledger = dict(ledger_store.load())
-    head_commit = transport.head()
+    def again(next_resolution: Resolution, restarted: bool, carried: tuple[str, ...] = _carried_notes) -> SyncReport:
+        return _cycle(ports, replace(run, resolution=next_resolution), _restarted=restarted, _carried_notes=carried)
+
+    ledger = dict(ports.ledger_store.load())
+    head_commit = view.head()
     if head_commit is not None:
         # Discard anything a previous, failed cycle left in the working tree before `git add -A`
         # can stage it — a partially written object or a stale manifest. The commits, not the
         # working tree, are the source of truth.
-        transport.materialize(head_commit)
-    head_manifest = _read_manifest(transport, cipher, head_commit)
+        view.materialize(head_commit)
+    head_manifest = _read_manifest(view, ports.cipher, head_commit)
     ledger = _drop_foreign_releases(ledger, head_manifest, paths)
     # The write is planned against what is stored: against the view, a migrated object would look unchanged.
-    stored_head = _read_manifest(transport.raw, cipher, head_commit)
+    stored_head = _read_manifest(view.raw, ports.cipher, head_commit)
     collected = _collect(
-        config=config,
+        config=ports.config,
         head=head_manifest,
         ledger=ledger,
-        live=live,
-        deny=deny,
-        home=home,
+        live=ports.live,
+        deny=ports.deny,
+        home=ports.home,
         adopt=adopt,
-        source=source,
+        source=ports.source,
         presets=presets,
         paths=paths,
-        baseline=_baseline_reader(transport, cipher, ledger, head_commit),
-        scanner=scanner,
-        head_object=lambda record: _verified_object(transport, cipher, head_commit, record.file_id, record.sha256),
+        baseline=_baseline_reader(view, ports.cipher, ledger, head_commit),
+        scanner=ports.scanner,
+        head_object=lambda record: _verified_object(view, ports.cipher, head_commit, record.file_id, record.sha256),
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
@@ -303,14 +195,14 @@ def _cycle(
             skipped=tuple(collected.skipped),
             refused=tuple(collected.refused),
             unprojectable=tuple(collected.unprojectable),
-            notes=(*_carried_notes, *presets.notes(), *transport.notes()),
+            notes=(*_carried_notes, *presets.notes(), *view.notes()),
         )
     if collected.stale:
         found = _merge_stale(
-            config=config,
-            transport=transport,
-            cipher=cipher,
-            driver=driver,
+            config=ports.config,
+            transport=view,
+            cipher=ports.cipher,
+            driver=ports.driver,
             presets=presets,
             head_commit=head_commit,
             collected=collected,
@@ -322,7 +214,7 @@ def _cycle(
             if answer is not None:
                 return again(_next(resolution, answer), _restarted)
             stale_conflicts = tuple(item.record for item in found)
-            pending_store.record(
+            ports.pending_store.record(
                 PendingState.create(
                     local_commit=head_commit or "",
                     remote_commit=head_commit or "",
@@ -339,7 +231,7 @@ def _cycle(
                 unprojectable=tuple(collected.unprojectable),
             )
 
-    generation = _current_generation(store, head_manifest)
+    generation = _current_generation(ports.store, head_manifest)
     new_manifest = Manifest.create(
         schema=MANIFEST_SCHEMA,
         key_generation=generation,
@@ -352,32 +244,32 @@ def _cycle(
     changed = plan.write_manifest or bool(plan.objects_to_write) or bool(plan.objects_to_delete)
     if changed:
         write_repo(
-            files=files,
-            cipher=cipher,
-            scanner=scanner,
+            files=ports.files,
+            cipher=ports.cipher,
+            scanner=ports.scanner,
             head=stored_head,
             new=new_manifest,
             contents=collected.contents,
             # An object the migration re-projected and this collect did not touch keeps the gate's sealed blob.
-            carried=transport.migrated_blobs(head_commit),
+            carried=view.migrated_blobs(head_commit),
         )
-        local_commit = _commit(transport, branch, () if head_commit is None else (head_commit,), "syncintosh: collect")
+        local_commit = _commit(view, ports.branch, () if head_commit is None else (head_commit,), "syncintosh: collect")
     else:
         local_commit = head_commit
 
     outcome = _publish(
-        transport=transport,
-        files=files,
-        cipher=cipher,
-        scanner=scanner,
-        driver=driver,
+        transport=view,
+        files=ports.files,
+        cipher=ports.cipher,
+        scanner=ports.scanner,
+        driver=ports.driver,
         presets=presets,
-        codec=codec,
-        wrapper=wrapper,
-        store=store,
-        rotation_marker=rotation_marker,
-        config=config,
-        branch=branch,
+        codec=ports.codec,
+        wrapper=ports.wrapper,
+        store=ports.store,
+        rotation_marker=ports.rotation_marker,
+        config=ports.config,
+        branch=ports.branch,
         local_commit=local_commit,
         local_manifest=new_manifest,
         resolution=resolution,
@@ -393,7 +285,7 @@ def _cycle(
         answer = _answer(outcome.views, resolution)
         if answer is not None:
             return again(_next(resolution, answer), _restarted)
-        pending_store.record(
+        ports.pending_store.record(
             PendingState.create(
                 local_commit=local_commit or "",
                 remote_commit=outcome.remote_commit or "",
@@ -411,10 +303,10 @@ def _cycle(
         )
     if resolution.resolving:
         # The push landed, so the conflicts this run settled are no longer pending.
-        pending_store.clear()
+        ports.pending_store.clear()
 
     target_commit = outcome.published or local_commit or ""
-    target_manifest = _read_manifest(transport, cipher, target_commit) or new_manifest
+    target_manifest = _read_manifest(view, ports.cipher, target_commit) or new_manifest
     # The restore point is the commit this cycle made (or the HEAD it kept), never the publish's merge; a file
     # published earlier but not yet applied is restored from the ledger's commit instead (`_restore_point`).
     # One manifest decrypt per commit per cycle, however many files ask.
@@ -422,43 +314,43 @@ def _cycle(
 
     def records_at(commit: str) -> Mapping[str, ManifestRecord] | None:
         if commit not in records_cache:
-            manifest = _read_manifest(transport, cipher, commit)
+            manifest = _read_manifest(view, ports.cipher, commit)
             records_cache[commit] = None if manifest is None else manifest.records
         return records_cache[commit]
 
     applied = _apply(
-        transport=transport,
-        cipher=cipher,
+        transport=view,
+        cipher=ports.cipher,
         presets=presets,
         target_commit=target_commit,
         target_manifest=target_manifest,
         seen=collected.seen,
         views=collected.views,
         ledger=ledger,
-        live=live,
-        deny=deny,
-        apps=apps,
-        running=running,
-        config=config,
-        home=home,
+        live=ports.live,
+        deny=ports.deny,
+        apps=ports.apps,
+        running=ports.running,
+        config=ports.config,
+        home=ports.home,
         adopt=adopt,
         backup=Backup.create(local_commit, records_at=records_at),
-        scanner=scanner,
+        scanner=ports.scanner,
         unstored=frozenset(change.record.file_id for change in collected.stale),
         paths=paths,
     )
-    ledger_store.save(
+    ports.ledger_store.save(
         _settle_ledger(
             target_manifest=target_manifest,
             target_commit=target_commit,
             ledger=ledger,
-            live=live,
-            deny=deny,
+            live=ports.live,
+            deny=ports.deny,
             presets=presets,
-            config=config,
-            home=home,
+            config=ports.config,
+            home=ports.home,
             paths=paths,
-            target=lambda record: _object_reader(transport, cipher, target_commit, record),
+            target=lambda record: _object_reader(view, ports.cipher, target_commit, record),
         )
     )
     return SyncReport(
@@ -480,7 +372,7 @@ def _cycle(
         invalid=applied.invalid,
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
-        notes=(*_carried_notes, *presets.notes(), *transport.notes(), *applied.notes),
+        notes=(*_carried_notes, *presets.notes(), *view.notes(), *applied.notes),
         # One row per session and reason: collect names the session, apply the file, and they are the same finding.
         session_skipped=_one_per_session(
             (*collected.session_skipped, *outcome.session_skipped, *applied.session_skipped)

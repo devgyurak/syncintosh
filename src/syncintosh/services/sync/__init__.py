@@ -39,6 +39,7 @@ from syncintosh.services.sync._shared import (
     DroppedLocal,
     RecordReader,
     RestorePoint,
+    SyncPorts,
     SyncReport,
 )
 from syncintosh.services.sync.cycle import sync
@@ -59,6 +60,7 @@ __all__ = [
     "RecordReader",
     "Resolution",
     "RestorePoint",
+    "SyncPorts",
     "SyncReport",
     "sync",
 ]
