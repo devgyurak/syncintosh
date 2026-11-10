@@ -49,6 +49,10 @@ _DOMAIN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]*")
 _ENVIRONMENT: Final = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
+class _Interrupted(DocumentRefused):
+    """The tool started and did not finish normally: a timeout or a signal. For a write, the outcome is unknown."""
+
+
 class DefaultsDomainStore:
     """Reads and writes one preferences domain; runs `defaults` per call and keeps nothing."""
 
@@ -99,7 +103,14 @@ class DefaultsDomainStore:
         if codec.same(current, payload):
             return
         removed = sorted(_top_level_keys(current) - _top_level_keys(payload))
-        self._run(source, ["import", source.domain, "-"], stdin=payload.encode("utf-8"))
+        try:
+            self._run(source, ["import", source.domain, "-"], stdin=payload.encode("utf-8"))
+        except _Interrupted:
+            # A timeout or a signal does not say whether `cfprefsd` took the document, unlike a plain rc 1, which the
+            # probe showed changes nothing.
+            raise DocumentWrittenUnverified(
+                "the import was interrupted, so whether it took effect is unknown"
+            ) from None
         try:
             for key in removed:
                 self._run(source, ["delete", source.domain, key])
@@ -132,8 +143,12 @@ class DefaultsDomainStore:
                 env=_ENVIRONMENT | {"HOME": self._home},
                 stdin=subprocess.DEVNULL if stdin is None else None,
             )
+        except subprocess.TimeoutExpired:
+            raise _Interrupted("the defaults tool did not answer in time") from None
         except (OSError, subprocess.SubprocessError):
             raise DocumentRefused("the defaults tool could not be run") from None
+        if result.returncode < 0:
+            raise _Interrupted("the defaults tool was stopped by a signal")
         if result.returncode != 0:
             raise DocumentRefused("the defaults tool refused the request")
         return result.stdout
