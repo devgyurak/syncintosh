@@ -92,8 +92,11 @@ class ClaudeSessionStore:
             if layout.preset == PRESET
         )
 
-    def sessions(self) -> SessionListing:
-        """The sessions of every enabled project, plus the projects and sessions that could not be listed safely."""
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
+        """The sessions of every enabled project, plus the projects and sessions that could not be listed safely.
+
+        `published` is not needed: a Claude Code session is found by the folder it sits in, not by what it says.
+        """
         units: list[SessionUnit] = []
         skipped: list[SessionSkipped] = []
         for project, spec in self._enabled():
@@ -192,6 +195,10 @@ class ClaudeSessionStore:
             found.append(f"{session_directory.name}/{name}/{entry.name}")
         return found
 
+    def retired(self, path: str) -> bool:
+        """Claude Code does not move or compress a session away, so nothing is ever retired."""
+        return False
+
     def session_of(self, path: str) -> str | None:
         """The session id of a record path under a project this machine enabled, else `None`."""
         for project, spec in self._enabled():
@@ -203,7 +210,7 @@ class ClaudeSessionStore:
                 return found.group(1)
         return None
 
-    def note_for(self, path: str, data: bytes) -> str | None:
+    def note_for(self, path: str, data: bytes, *, created: bool) -> str | None:
         """A one-line warning when the transcript was written by a different Claude Code version, else `None`."""
         session = self.session_of(path)
         if session is None or not path.endswith(f"/{session}.jsonl"):
@@ -238,7 +245,8 @@ def installed_version() -> str | None:
         result = subprocess.run(
             ["claude", "--version"], capture_output=True, text=True, timeout=_PROBE_SECONDS, check=False
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # `ValueError` covers output that is not text (`UnicodeDecodeError`): a version probe never aborts a cycle.
         return None
     found = _VERSION.match(result.stdout.strip()) if result.returncode == 0 else None
     return None if found is None else found.group(0)

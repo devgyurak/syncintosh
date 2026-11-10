@@ -366,7 +366,7 @@ def test_a_different_cli_version_is_a_warning_and_an_unknown_one_is_silent(
     data = b"{}\n" if written is None else json.dumps({"version": written}).encode() + b"\n"
 
     # when
-    note = _store(Path("/nonexistent-home"), version=local).note_for(_logical(f"{SESSION}.jsonl"), data)
+    note = _store(Path("/nonexistent-home"), version=local).note_for(_logical(f"{SESSION}.jsonl"), data, created=True)
 
     # then
     assert note == expected
@@ -375,7 +375,7 @@ def test_a_different_cli_version_is_a_warning_and_an_unknown_one_is_silent(
 def test_only_the_main_transcript_is_checked_for_a_version() -> None:
     # when
     note = _store(Path("/x"), version="9.9.9").note_for(
-        _logical(f"{SESSION}/tool-results/a.txt"), b'{"version":"1.0.0"}\n'
+        _logical(f"{SESSION}/tool-results/a.txt"), b'{"version":"1.0.0"}\n', created=True
     )
 
     # then
@@ -626,7 +626,7 @@ def test_the_installed_version_is_asked_for_once_per_store(tmp_path: Path) -> No
     data = b'{"version":"2.1.300"}\n'
 
     # when
-    [store.note_for(_logical(f"{SESSION}.jsonl"), data) for _ in range(3)]
+    [store.note_for(_logical(f"{SESSION}.jsonl"), data, created=True) for _ in range(3)]
 
     # then
     assert asked == [1]
@@ -638,3 +638,17 @@ def test_an_uppercase_uuid_is_not_the_folder_the_agent_made() -> None:
 
     # then
     assert owned is None
+
+
+def test_claude_version_output_that_is_not_text_is_unknown_not_a_crash(monkeypatch) -> None:
+    # given
+    def fail(*a, **k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(module.subprocess, "run", fail)
+
+    # when
+    version = module.installed_version()
+
+    # then
+    assert version is None

@@ -685,20 +685,35 @@ class SessionStore(Protocol):
     bounded first record to tell which project a session belongs to — and never a transcript's content.
     """
 
-    def sessions(self) -> SessionListing:
-        """The sessions of every opted-in project, plus the ones that could not be listed safely."""
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
+        """The sessions of every opted-in project, plus the ones that could not be listed safely.
+
+        `published` are the record paths the repository already holds. A session whose record is there belongs to the
+        project it was published under even when its own contents name another Mac's folder (Codex records the cwd it
+        was started in, which is never rewritten), so a continuation here is still collected.
+        """
         ...
 
     def session_of(self, path: str) -> str | None:
         """The id of the session a record path belongs to, or `None` when it is not a session file of this machine."""
         ...
 
-    def note_for(self, path: str, data: bytes) -> str | None:
+    def note_for(self, path: str, data: bytes, *, created: bool) -> str | None:
         """A fixed sentence about a session file just written, or `None`.
 
-        Used for the one thing worth saying about a transcript from another Mac: the CLI that wrote it differs from
-        the one that will resume it (decision D12). A warning only, never a refusal, and `None` when either version is
-        not known. The sentence may name versions; it never quotes the transcript.
+        Called once every file of the cycle is written, so what a session builds on is there to be found. It says what
+        is worth knowing about a transcript from another Mac: the CLI that wrote it differs from the one that will
+        resume it (decision D12), how to resume a session the agent's picker will not list (D13), a file it builds on
+        that is missing. `created` is true when the file did not exist here. A warning only, never a refusal. The
+        sentence may name versions and ids; it never quotes the transcript.
+        """
+        ...
+
+    def retired(self, path: str) -> bool:
+        """True when the agent archived or compressed this session here, so writing it would bring it back.
+
+        Codex moves an archived rollout to `archived_sessions/` and may compress one to `.jsonl.zst`; a plain file
+        written beside either would resurrect it (decision D10).
         """
         ...
 

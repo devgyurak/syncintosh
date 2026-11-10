@@ -29,6 +29,7 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
 | `orca` | `Library/Application Support/orca/profiles/local-default/@profile-state/settings.json` (virtual: the `settings` row of `profile-state.db`, shown as an indented JSON file; `local-default` only) | `jsonc` (the row's JSON) | `notifications.customSoundPath`; every key outside the allowlist stays local | an exact allowlist of top-level preference keys (`presets/orca.py` `SYNCED`); each credential-shaped key is also named as excluded: `opencodeSessionCookie` · `opencodeGoApiKey` · `codexManagedAccounts` · `claudeManagedAccounts` · `agentDefaultEnv` · `agentCmdOverrides` · `httpProxyUrl` · `mobilePairingCustomAddress(es)` · … | `com.stablyai.orca` | <https://github.com/stablyai/orca/releases> | — (Homebrew's `orca` is another app) |
 | `claude-memory` | `.claude/projects/@<name>/memory/*.md` (logical; the real folder is the project's real path with every non-alphanumeric turned into `-`). Per project this machine maps in `agent_projects`; never by default | `text` | — (a memory file has no key paths) | — (the secret scan is the backstop) | — (a CLI) | — | — |
 | `claude-sessions` | `.claude/projects/@<name>/{<uuid>.jsonl, <uuid>/subagents/agent-*.{jsonl,meta.json,forked-skill.json,forked-skill.marker.json}, <uuid>/tool-results/*}` (logical; enumerated per session by `ClaudeSessionStore`, never by a glob). Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**) | — (a CLI) | — | — |
+| `codex-sessions` | `.codex/sessions/@<name>/YYYY/MM/DD/rollout-<stamp>-<thread>[_<rollout>].jsonl` (logical; on disk there is no project folder, so `@<name>` is dropped: the real path is `~/.codex/sessions/YYYY/MM/DD/<file>`). Listed per session by `CodexSessionStore`; the project is the one whose root equals the first `session_meta` record's `cwd`. Per project this machine maps in `agent_projects`; never by default | `text`, append-only | — | — (a secret-scan hit refuses the **whole session**; `creator_user_id`/`creator_account_id` are kept) | — (a CLI) | — | — |
 
 ### `docker` notes
 
@@ -401,7 +402,7 @@ collected until a project is listed, and a record is written only under a name t
 ```json
 {
   "agent_projects": [
-    {"name": "syncintosh", "path": "Develop/syncintosh", "presets": ["claude-memory", "claude-sessions"]}
+    {"name": "syncintosh", "path": "Develop/syncintosh", "presets": ["claude-memory", "claude-sessions", "codex-sessions"]}
   ]
 }
 ```
@@ -449,6 +450,39 @@ caps, a whole-session refusal on a secret-scan hit, prefix-only apply with a fre
 * **Never collected** (deny-listed): `~/.claude.json*`, `session-env/`, `shell-snapshots/`, `file-history/`, `paste-cache/`,
   `history.jsonl`, `cache/`, `daemon*`, and `sessions/` itself. Without `file-history/`, `/rewind` cannot restore code on the
   other Mac.
+
+### `codex-sessions` notes
+
+Session history (issue #56) rides on `docs/design/07-session-history.md`. Codex specifics, from `openai/codex` at
+`rust-v0.157.1` (matching the installed codex-cli 0.157.1; names, sizes and record keys only):
+
+* **Layout.** `~/.codex/sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<thread-uuid>.jsonl`; a reverted thread has a second
+  file with `_<rollout-uuid>` appended. Keyed by date, not project. `{year}`, `{2d}` and `{uuid}` in a preset path are exactly
+  four digits, two digits and one lowercase UUID, so a record cannot name a `.zst` file or another folder.
+* **Which project.** The first `session_meta` record's `payload.cwd` (resolved) must equal the project's resolved root.
+  Only a bounded head (1 MiB) of each rollout is read, and only `cwd`, `cli_version` and `history_base` are taken from it.
+  A rollout whose record is **already in the repository** under a project's name belongs to that project whatever its
+  `cwd` says: `cwd` is never rewritten, so a session started on the other Mac keeps that Mac's path and would otherwise
+  never travel back. `archived_sessions/` is never listed.
+* **`creator_account_id` / `creator_user_id` are kept** (decision D7). Dropping them is parse-safe, but it changes line 1,
+  which Codex's sqlite has already indexed on the Mac that wrote it. They are account identifiers, not credentials, and the
+  repository is encrypted. Nothing in Codex compares them with the logged-in account.
+* **Resume.** `codex resume <id>` finds a rollout by live writer, then a database row, then a scan of `sessions/**` by file
+  name, and seeds the database when it finds one. **The picker reads the database only**, so a copied rollout is not listed —
+  not even with `--all` — until it has been resumed once. Sync output prints `codex resume <id>` for each rollout it wrote
+  (decision D13). Codex's sqlite is never written, and `session_index.jsonl` is not needed to resume by id.
+* **History base.** A fork or a revert stores `history_base.thread_id` — a *rollout* id — pointing at an immutable prefix file.
+  Apply says when that file is not on this Mac (plain, `.zst` or archived), once every rollout of the cycle is written.
+* **Open thread.** `thread-writer-locks/<thread>.lock` is an exclusive `flock` (Rust's `File::try_lock` is `flock(2)` on
+  macOS). Its presence proves nothing, because a crash leaves it. The probe is Codex's own (`writer_lock.rs`): take
+  `.coordination.lock`, try-lock the thread's lock, release both at once, never creating a file. A lock that cannot be probed
+  counts as open.
+* **Never written over.** A rollout that was archived (`archived_sessions/<file>`) or compressed (`<file>.zst`) here is left
+  alone, since writing a plain file beside either would bring it back. In-place edits Codex makes (compression, migration) are
+  off by default.
+* **`CODEX_HOME`** moves the whole tree: the layout is refused and reported, and `syncintosh doctor` shows it.
+* **Never collected** (deny-listed): `auth.json`, `installation_id`, `history.jsonl`, `shell_snapshots/`, `sqlite/`,
+  `*.sqlite*`, `thread-writer-locks/`, `app-server-*`, `ipc/`.
 
 ## Versioned config directories
 

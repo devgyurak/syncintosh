@@ -910,9 +910,11 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.presets.orca import BUNDLE_ID as ORCA_BUNDLE_ID
     from syncintosh.system.agent_project_index import SystemAgentProjectIndex
+    from syncintosh.system.agent_sessions import CombinedSessionActivity, CombinedSessionStore
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.claude_sessions import ClaudeSessionActivity, ClaudeSessionStore
+    from syncintosh.system.codex_sessions import CodexSessionActivity, CodexSessionStore
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.document_files import open_live_files
     from syncintosh.system.ledger import JsonLedgerStore
@@ -967,14 +969,27 @@ def _sync_ports(config, paths) -> dict:
         # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
         "agent_projects": SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
         # Claude Code's sessions for the projects mapped with `claude-sessions`, and its own open-session signal.
-        "sessions": ClaudeSessionStore(
-            str(paths.home),
-            config.agent_projects,
-            SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-            SystemDenyList(),
-            BuiltinCatalog.default(),
+        "sessions": CombinedSessionStore(
+            (
+                ClaudeSessionStore(
+                    str(paths.home),
+                    config.agent_projects,
+                    SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+                    SystemDenyList(),
+                    BuiltinCatalog.default(),
+                ),
+                CodexSessionStore(
+                    str(paths.home),
+                    config.agent_projects,
+                    SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+                    SystemDenyList(),
+                    BuiltinCatalog.default(),
+                ),
+            )
         ),
-        "activity": ClaudeSessionActivity(str(paths.home)),
+        "activity": CombinedSessionActivity(
+            (ClaudeSessionActivity(str(paths.home)), CodexSessionActivity(str(paths.home)))
+        ),
         # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
         "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         "source": SecureFileIdSource(),

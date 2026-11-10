@@ -68,6 +68,10 @@ MAX_GLOB_EXPANSION: Final = 256
 # use it: it is how a preset owns a session's files without owning every folder name under a project.
 UUID_TOKEN: Final = "{uuid}"
 _UUID_REGEX: Final = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# A date or a clock reading in a path: four digits, or two. Like the UUID token, only an append-only path may use them.
+YEAR_TOKEN: Final = "{year}"
+TWO_DIGITS_TOKEN: Final = "{2d}"
+_TOKENS: Final = {UUID_TOKEN: _UUID_REGEX, YEAR_TOKEN: r"[0-9]{4}", TWO_DIGITS_TOKEN: r"[0-9]{2}"}
 
 
 def _has_glob(path: str) -> bool:
@@ -77,7 +81,7 @@ def _has_glob(path: str) -> bool:
 
 def _has_pattern(path: str) -> bool:
     """True when **any** element of `path` carries a metacharacter or the UUID token (an append-only path)."""
-    return UUID_TOKEN in path or any(character in path for character in GLOB_METACHARACTERS)
+    return any(token in path for token in _TOKENS) or any(character in path for character in GLOB_METACHARACTERS)
 
 
 def _deep_to_regex(path: str) -> str:
@@ -87,16 +91,14 @@ def _deep_to_regex(path: str) -> str:
     spells a UUID in capitals names a different folder on a case-sensitive volume and must not be taken for the
     lowercase one the agent made.
     """
-    folded = path.replace(UUID_TOKEN, "\0")
+    parts = re.split("(" + "|".join(re.escape(token) for token in _TOKENS) + ")", path)
     return "".join(
-        "[^/]*"
-        if character == "*"
-        else "[^/]"
-        if character == "?"
-        else _UUID_REGEX
-        if character == "\0"
-        else re.escape(character)
-        for character in folded
+        _TOKENS[part]
+        if part in _TOKENS
+        else "".join(
+            "[^/]*" if character == "*" else "[^/]" if character == "?" else re.escape(character) for character in part
+        )
+        for part in parts
     )
 
 
