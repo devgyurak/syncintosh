@@ -87,7 +87,8 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   `config-file = …` is **not** followed; to sync an include, add it as an entry of your own (see the machine-local note).
 - **Validator.** Every merge result and every write is checked with `<app>/Contents/MacOS/ghostty +validate-config`
   (found by bundle ID through Spotlight, never `PATH`, and only a bundle directly under `/Applications` or
-  `~/Applications` is run — Spotlight also lists a bundle in `~/Downloads` or on a disk image). Only the exit code is read — the checker's stderr echoes values
+  `~/Applications` is run — Spotlight also lists a bundle in `~/Downloads` or on a disk image; a cask installed
+  elsewhere with `--appdir` is refused as "no ghostty to validate against"). Only the exit code is read — the checker's stderr echoes values
   — and a missing or unrunnable binary is a refusal, not a pass. The text is checked as a file **beside the target**, so
   a relative `config-file` include resolves as Ghostty resolves it.
 - **Machine-local values.** `text` cannot cut a line out, so a per-display value (`font-size`, `window-padding-*`,

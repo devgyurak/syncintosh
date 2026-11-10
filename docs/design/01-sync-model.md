@@ -134,6 +134,16 @@ but every file inside it is judged on its own. `core.presets.MAX_GLOB_EXPANSION`
 a glob **publishes**, as a soft guard: a file that is already a record keeps being collected, new files
 fill the slots that are left, and only the ones past that are held back and reported by name.
 
+**Hidden files.** A glob that is wildcards only (`themes/*`) does not name a file whose own name starts
+with a dot — the shell's rule — because a folder of user files otherwise collects Finder's `.DS_Store`
+(not text) and a tool's hidden temporary files. A glob with a literal part (`*.json`, `agent-*`) is
+unchanged and still names a hidden file that fits it. To track hidden files under a bare `*`, add a second
+glob that starts with the dot (`.*`). Under an existing config the rule applies from the next sync: a hidden
+file a bare-`*` glob tracked earlier leaves the glob, the repository keeps its record, and the sync reports it
+(non-blocking, "not in this machine's config") without deleting it anywhere. A *built-in* preset's record
+that its own catalog no longer owns is the blocking "preset does not own it" row instead; the only built-in
+glob the rule touches (`ghostty`'s `themes/*`) shipped with it.
+
 A record for a path inside a glob is written on another machine **only because that machine's own
 config names a glob** (`core/config.LocalGlob`). The file is per-machine — this Mac has
 `javascript.json`, that one has `python.json` — so an exact allowlist item cannot express it, and the

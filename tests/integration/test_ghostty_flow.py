@@ -8,6 +8,7 @@ carries real Ghostty key names with invented values. The catalog is the one the 
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,8 +17,9 @@ from typing import Any
 import pytest
 
 from syncintosh.adapters.text_merge import TextMergeDriver
+from syncintosh.core import presets as presets_core
 from syncintosh.core.commitments import loads_commitments
-from syncintosh.core.config import SyncConfig
+from syncintosh.core.config import LocalGlob, SyncConfig
 from syncintosh.core.errors import SecretScanError, SyntaxInvalid
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.ports import AppDetector
@@ -28,7 +30,7 @@ from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
-from syncintosh.presets.ghostty import CONFIG_FILES, THEMES
+from syncintosh.presets.ghostty import CONFIG_FILES, GHOSTTY, THEMES
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
@@ -118,14 +120,14 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str) -> Machine:
     )
 
 
-def _config(machine: Machine) -> SyncConfig:
+def _config(machine: Machine, catalog: BuiltinCatalog | None = None) -> SyncConfig:
     # The shipped preset, so the config carries the four exact files and the glob — the
     # same thing `init` writes.
     return new_machine_config(
         remote=machine.remote,
         machine_id=machine.machine_id,
         preset_names=("ghostty",),
-        catalog=BuiltinCatalog.default(),
+        catalog=catalog or BuiltinCatalog.default(),
     )
 
 
@@ -163,6 +165,7 @@ def _run(
     apps: AppDetector | None = None,
     decide: Decide | None = None,
     resolving: bool = False,
+    catalog: BuiltinCatalog | None = None,
 ) -> SyncReport:
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
@@ -177,7 +180,7 @@ def _run(
         driver=TextMergeDriver(),
         adapters={},
         validators={"ghostty": _FakeGhostty()},
-        catalog=BuiltinCatalog.default(),
+        catalog=catalog or BuiltinCatalog.default(),
         live=SystemLiveFiles(),
         ledger_store=JsonLedgerStore(machine.ledger),
         pending_store=DirectoryPendingStore(machine.pending),
@@ -373,3 +376,107 @@ def test_a_hidden_file_in_the_themes_folder_is_never_collected(tmp_path, memory_
 
     # then — only the theme is published; the hidden file is not a record, so it cannot reach another Mac
     assert (report.created, report.refused) == ((theme,), ())
+
+
+OLD_HIDDEN = ".config/ghostty/themes/.old-theme"
+
+
+class OlderGlobRule:
+    """Switches this process between the glob rule an older build had (a hidden name matches) and the current one.
+
+    The catalog's preset globs are built at import and a machine's config rebuilds its own from the path, so both are
+    switched: the compiled matcher of the shipped themes glob, and the helper every new glob is built through.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._monkeypatch = monkeypatch
+        self._glob = next(each.glob for each in GHOSTTY.files if each.glob is not None)
+        self._current = self._glob.matcher
+        self._older = re.compile(self._current.pattern.removeprefix("(?!\\.)"))
+
+    def on(self) -> None:
+        self._monkeypatch.setattr(presets_core, "_skip_hidden", lambda name, pattern: pattern)
+        object.__setattr__(self._glob, "matcher", self._older)
+
+    def off(self) -> None:
+        self._monkeypatch.undo()
+        object.__setattr__(self._glob, "matcher", self._current)
+
+
+@pytest.fixture
+def older_glob_rule(monkeypatch: pytest.MonkeyPatch):
+    switch = OlderGlobRule(monkeypatch)
+    yield switch
+    switch.off()
+
+
+def test_a_hidden_record_an_older_build_published_is_refused_not_deleted(
+    tmp_path, memory_key_store, older_glob_rule
+) -> None:
+    # given — under the older rule `themes/*` took a hidden theme in, and the repo holds its record
+    older_glob_rule.on()
+    a, _ = _pair(tmp_path, memory_key_store)
+    _write(a, OLD_HIDDEN, b"background = #101010\n")
+    _run(a)
+    older_glob_rule.off()
+    save_config(_config(a), a.config_file)
+    b = _machine(tmp_path, memory_key_store, "machine-b2", a.remote)
+    _initialize(b, import_from=a.recovery)
+    (b.home / ".config" / "ghostty" / "themes").mkdir(parents=True)
+
+    # when — both Macs sync under the current rule
+    on_a, on_b = _run(a), _run(b)
+
+    # then — the record is reported as one the preset does not own (blocking, the existing rule for such a record),
+    # nothing is deleted from the repo or from the Mac that has the file, and nothing is written to the other
+    assert [(each.path, each.reason, each.blocking) for each in (*on_a.refused, *on_b.refused)] == [
+        (OLD_HIDDEN, "the path's preset does not own it", True)
+    ] * 2
+    assert ((a.home / OLD_HIDDEN).exists(), (b.home / OLD_HIDDEN).exists()) == (True, False)
+
+
+def _user_glob_config(machine: Machine) -> SyncConfig:
+    """A machine's own entry for a folder of its own: every file in `dots/`, under a preset name of the user's."""
+    return SyncConfig.create(
+        remote=machine.remote,
+        machine_id=machine.machine_id,
+        items=(),
+        globs=(LocalGlob.create(path="dots/*", preset="mine", scope="common", format="text"),),
+    )
+
+
+def test_a_hidden_file_a_wildcard_glob_used_to_track_is_kept_not_deleted(
+    tmp_path, memory_key_store, older_glob_rule
+) -> None:
+    # given — under the older rule `dots/*` tracked a hidden file and a plain one, and both are published
+    older_glob_rule.on()
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    save_config(_user_glob_config(a), a.config_file)
+    _write(a, "dots/.rc", b"export A=1\n")
+    _write(a, "dots/plain", b"x\n")
+    _run(a)
+    older_glob_rule.off()
+    save_config(_user_glob_config(a), a.config_file)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    save_config(_user_glob_config(b), b.config_file)
+    (b.home / "dots").mkdir(parents=True)
+
+    # when — both Macs sync under the current rule, and A once more to see what the first sync left in the repo
+    on_a, on_b, again = _run(a), _run(b), _run(a)
+
+    # then — the hidden file leaves the glob quietly (carried, never a blocking refusal), the repo still holds its
+    # record (it is reported again), nothing is deleted from A, nothing is written to B, and the plain file syncs
+    quiet = [("dots/.rc", "the path is not in this machine's config", False)]
+    assert [[(each.path, each.reason, each.blocking) for each in report.refused] for report in (on_a, on_b, again)] == [
+        quiet,
+        quiet,
+        quiet,
+    ]
+    assert ((a.home / "dots/.rc").exists(), (b.home / "dots/.rc").exists(), (b.home / "dots/plain").exists()) == (
+        True,
+        False,
+        True,
+    )

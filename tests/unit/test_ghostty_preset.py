@@ -145,19 +145,20 @@ def test_the_themes_glob_names_visible_files_only(name, named) -> None:
 @pytest.mark.parametrize(
     ("pattern", "name", "named"),
     [
-        ("snippets/*.json", ".draft.json", False),
-        ("snippets/*.json", "a.json", True),
-        ("snippets/?x.json", ".x.json", False),
-        ("snippets/.*.json", ".draft.json", True),
-        ("snippets/a*", "a.json", True),
+        ("snippets/*", ".DS_Store", False),
+        ("snippets/?*", ".hidden", False),
+        ("snippets/*", "a.json", True),
+        ("snippets/*.json", ".draft.json", True),
+        ("snippets/agent-*", "agent-.x", True),
+        ("snippets/.*", ".draft", True),
     ],
 )
-def test_a_glob_follows_the_shell_rule_for_a_leading_dot(pattern, name, named) -> None:
+def test_only_a_wildcards_only_glob_skips_a_hidden_name(pattern, name, named) -> None:
     # given
     glob = PresetGlob.create(pattern)
 
     # when
     expanded = glob.expand((name,))
 
-    # then — only a pattern that starts with a wildcard skips a hidden name; a literal dot or prefix still names it
+    # then — a glob with a literal part keeps naming what it always named, so no existing preset changes
     assert bool(expanded) is named
