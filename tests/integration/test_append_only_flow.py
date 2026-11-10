@@ -598,3 +598,76 @@ def test_a_published_session_that_is_open_still_counts_toward_the_project_cap(tm
     # then — the cap decision for s3 does not flip because s1 is open this cycle
     assert ("s3", "cap") in [(s.session_id, s.reason) for s in report.session_skipped]
     assert _records(a) == sorted([*FILES["s1"], *FILES["s2"]])
+
+
+# --------------------------------------------------------------------------- review of #124: mode and the rescan skip
+
+
+def test_a_session_file_created_on_the_receiving_mac_is_owner_only_along_with_its_new_folders(
+    tmp_path, memory_key_store
+) -> None:
+    # given
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(a, FILES["s1"][1], LINE_2)
+    _run(a)
+    _initialize(b, import_from=a.recovery)
+
+    # when
+    _run(b)
+
+    # then — a conversation is not a setting: 0600, and the folders made for it are 0700
+    target = b.home / FILES["s1"][1]
+    assert (target.stat().st_mode & 0o777, target.parent.stat().st_mode & 0o777) == (0o600, 0o700)
+
+
+def test_an_existing_file_keeps_its_own_mode_when_it_is_extended(tmp_path, memory_key_store) -> None:
+    # given
+    a, b = _synced_pair(tmp_path, memory_key_store)
+    (b.home / MAIN).chmod(0o640)
+    _write(a, MAIN, LINE_1 + LINE_2 + LINE_3)
+    _run(a)
+
+    # when
+    _run(b)
+
+    # then
+    assert (b.home / MAIN).stat().st_mode & 0o777 == 0o640
+
+
+def test_a_secret_added_to_an_already_published_file_still_refuses_the_whole_session(
+    tmp_path, memory_key_store
+) -> None:
+    # given — the old bytes are published, so they are not scanned again; the new tail is not the old bytes
+    a, _ = _pair(tmp_path, memory_key_store)
+    _write(a, MAIN, LINE_1)
+    _write(a, SUB, LINE_2)
+    _run(a)
+    _write(a, MAIN, LINE_1 + SECRET_LINE)
+
+    # when
+    report = _run(a)
+
+    # then
+    assert [(s.session_id, s.reason, s.path) for s in report.session_skipped] == [("s1", "secret", MAIN)]
+    assert _records(a) == sorted([MAIN, SUB])
+
+
+def test_a_published_file_that_has_not_changed_is_not_scanned_again(tmp_path, memory_key_store, monkeypatch) -> None:
+    # given
+    a, _ = _pair(tmp_path, memory_key_store)
+    _write(a, MAIN, LINE_1)
+    _run(a)
+    scanned: list[str] = []
+    original = PatternSecretScanner.scan
+
+    def counting(self, plaintext, *, subject, format):
+        scanned.append(subject)
+        return original(self, plaintext, subject=subject, format=format)
+
+    monkeypatch.setattr(PatternSecretScanner, "scan", counting)
+
+    # when
+    _run(a)
+
+    # then — the repository's own bytes were scanned when they were sealed
+    assert MAIN not in scanned

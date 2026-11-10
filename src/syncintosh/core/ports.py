@@ -598,8 +598,13 @@ class LiveFiles(Protocol):
         """Return the file's bytes, or `None` when it does not exist."""
         ...
 
-    def write(self, path: str, data: bytes) -> None:
-        """Write `data`, creating parent directories. Raises on failure."""
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
+        """Write `data`, creating parent directories. Raises on failure.
+
+        `private` is for a file that holds a conversation, not a setting (an agent's session transcript): a file this
+        call **creates** is readable by its owner only (`0600`), and so are the directories it creates (`0700`), where
+        the default is the umask's. A file that already exists keeps the mode it has.
+        """
         ...
 
     def exists(self, path: str) -> bool:
