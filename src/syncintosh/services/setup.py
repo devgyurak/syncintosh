@@ -55,6 +55,13 @@ def new_machine_config(
         preset = catalog.get(name)
         if preset is None:
             raise ConfigError(f"unknown preset {name!r}")
+        if preset.agent_projects is not None:
+            # Its files are listed for a project's element, which only this machine's own mapping can fill in; a glob
+            # of the template would track a directory called `@` and sync nothing, which looks like a working setup.
+            raise ConfigError(
+                f"{name!r} syncs per-project data: map the project under `agent_projects` in config.json "
+                "and list the preset there (docs/design/presets.md)"
+            )
         if preset.profiles is not None:
             # Every profile this machine has, by name. Which ones exist is read at sync time from the app's
             # own list; naming "*" here allows them, it does not create any (decision D3, D5).

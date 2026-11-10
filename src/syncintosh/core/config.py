@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
+from syncintosh.core.agent_projects import AgentProject, agent_project_key, duplicate_agent_project_names
 from syncintosh.core.errors import ConfigError, ManifestCorrupt
 from syncintosh.core.manifest import (
     FileFormat,
@@ -28,7 +29,7 @@ from syncintosh.core.manifest import (
     validate_scope,
 )
 from syncintosh.core.models import Scope
-from syncintosh.core.paths import collision_key
+from syncintosh.core.paths import collision_key, duplicate_paths
 from syncintosh.core.presets import PresetGlob
 from syncintosh.core.profiles import ProfileSpec, duplicate_profile_names, profile_name_key
 
@@ -112,6 +113,7 @@ class SyncConfig:
     globs: tuple[LocalGlob, ...] = ()
     llm: LlmConfig = NO_LLM
     profiles: tuple[LocalProfiles, ...] = ()
+    agent_projects: tuple[AgentProject, ...] = ()
 
     @classmethod
     def create(
@@ -123,6 +125,7 @@ class SyncConfig:
         globs: tuple[LocalGlob, ...] = (),
         llm: LlmConfig = NO_LLM,
         profiles: tuple[LocalProfiles, ...] = (),
+        agent_projects: tuple[AgentProject, ...] = (),
     ) -> SyncConfig:
         """Validate the machine-wide fields and that every machine-scope entry names this machine."""
         if not isinstance(remote, str) or remote == "":
@@ -143,6 +146,14 @@ class SyncConfig:
             # Two entries for one preset would collect the same real files twice, as two records that differ
             # only in scope.
             raise ConfigError(f"a preset may have one profiles entry: {repeated}")
+        twice = duplicate_agent_project_names(project.name for project in agent_projects)
+        if twice:
+            # One name on two roots would write one logical record to two directories.
+            raise ConfigError(f"a project name may be mapped once: {list(twice)}")
+        shared = duplicate_paths(project.path for project in agent_projects)
+        if shared:
+            # Two names on one root would collect the same real folder as two records.
+            raise ConfigError(f"a project root may have one name: {list(shared)}")
         return cls(
             remote=remote,
             machine_id=machine_id,
@@ -150,6 +161,7 @@ class SyncConfig:
             globs=tuple(globs),
             llm=llm,
             profiles=tuple(profiles),
+            agent_projects=tuple(agent_projects),
         )
 
 
@@ -269,7 +281,22 @@ def allows_path(config: SyncConfig, *, scope: Scope, machine: str | None, path: 
         return True
     if any((entry.scope, entry.machine) == (scope, machine) and entry.glob.matches(path) for entry in config.globs):
         return True
-    return any(_allows_profile(entry, scope=scope, machine=machine, path=path) for entry in config.profiles)
+    if any(_allows_profile(entry, scope=scope, machine=machine, path=path) for entry in config.profiles):
+        return True
+    return scope == "common" and any(_allows_agent_project(project, path) for project in config.agent_projects)
+
+
+def _allows_agent_project(project: AgentProject, path: str) -> bool:
+    """True when `path` is a logical project path of a layout this machine enabled for exactly this project.
+
+    A name this config does not map is never allowed, whatever the remote's record says (decision D3). Only the common
+    scope: a project's data is the same data on every machine.
+    """
+    return any(
+        (parsed := layout.spec.parse(path)) is not None
+        and agent_project_key(parsed.name) == agent_project_key(project.name)
+        for layout in project.layouts
+    )
 
 
 def _allows_profile(entry: LocalProfiles, *, scope: Scope, machine: str | None, path: str) -> bool:

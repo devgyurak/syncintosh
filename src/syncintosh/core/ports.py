@@ -24,6 +24,7 @@ WhenTag = Callable[[str], str]
 if TYPE_CHECKING:
     # Annotation-only imports: `core.presets` reads the manifest, which reads this module, so a
     # runtime import here would close the cycle (``AGENTS.md`` §4).
+    from syncintosh.core.agent_projects import AgentProject, AgentProjectMap, AgentProjectSpec
     from syncintosh.core.config_dirs import ConfigDirMap, ConfigDirSpec
     from syncintosh.core.documents import DocumentRead, DocumentSource
     from syncintosh.core.manifest import FileFormat
@@ -656,6 +657,24 @@ class DocumentStore(Protocol):
         """Replace the row's payload if it still holds `expected_revision`; a payload equal in value writes nothing.
 
         Raises `DocumentStale` when the row moved and `DocumentRefused` for anything else it will not do.
+        """
+        ...
+
+
+@runtime_checkable
+class AgentProjectIndex(Protocol):
+    """Where this machine keeps each opted-in project's agent data, read once per cycle.
+
+    An agent names a project's folder after the project's **real** absolute path, which differs between Macs and
+    needs the filesystem (`realpath`) and the agent's own environment to settle. The implementation does that and
+    hands back an `AgentProjectMap`; `core` and `services` never see a path they did not get from here (issue #56).
+    """
+
+    def read(self, spec: AgentProjectSpec, projects: tuple[AgentProject, ...]) -> AgentProjectMap:
+        """The folder each of `projects` has under `spec`, or the reason it has none.
+
+        A root that is missing, a symlink, denied or outside `$HOME`, and an environment override that moves the
+        agent's data, each yield an unresolved entry rather than raising: the caller reports it and keeps its records.
         """
         ...
 

@@ -63,6 +63,7 @@ from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.paths import collision_key
 from syncintosh.core.policy import stamp_policies
 from syncintosh.core.ports import (
+    AgentProjectIndex,
     AppConfigDir,
     AppDetector,
     Cipher,
@@ -809,6 +810,7 @@ _GLOB_FULL = "the glob is full, so this new file is not published"
 _GLOB_DIRECTORY_UNSAFE = "the glob's directory is a symbolic link or a dangerous path"
 _PROFILE_DIRECTORY_UNSAFE = "the profile's directory is a symbolic link or a dangerous path"
 _PROFILE_FOLDER_MISSING = "the profile has no folder on this machine yet; open the profile in the app once"
+_AGENT_ROOT_MISSING = "the project is not on this machine yet; clone it at the mapped path to sync its data"
 _CONFIG_FOLDER_MISSING = "the app's settings folder is not on this machine yet; open the app once to create it"
 _APP_RUNNING = "the app is open (or cannot be told to be closed); quit it to apply this file"
 # A document kept in a database row (`core/documents.py`) whose store refused to read or write it. The store's message
@@ -1118,6 +1120,59 @@ def _expand_profiles(
     return _Expanded(items=tuple(items), refusals=tuple(refusals), deferrals=tuple(deferrals))
 
 
+def _expand_agent_projects(
+    config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str, paths: LivePaths
+) -> _Expanded:
+    """The logical items of every project this machine mapped, for each preset it enabled for that project.
+
+    One item per project per preset file, with the logical path a record carries; the live path is `paths.resolve`'s.
+    A project with no usable folder here (a missing root, an environment override) is a non-blocking deferral, and a
+    file under a relocated memory directory is left out the same way (decision D3). A glob lists the project's own
+    directory after it passes the symlink/deny/escape checks a glob directory gets. Nothing is collected for a project
+    or a preset the config does not name (decision D5).
+    """
+    head_records = () if head is None else tuple(head.records.values())
+    items: list[LocalItem] = []
+    refusals: list[Refusal] = []
+    deferrals: list[Deferral] = []
+    for project in config.agent_projects:
+        for layout in project.layouts:
+            owner = paths.catalog.get(layout.preset)
+            view = next((candidate for candidate in paths.agent_views if candidate.spec == layout.spec), None)
+            if owner is None or owner.agent_projects != layout.spec or view is None:
+                continue
+            for file in owner.files:
+                relative = layout.spec.relative_of_template(file.path)
+                if relative is None:
+                    continue
+                logical = layout.spec.logical_path(project.name, relative)
+                located = paths.resolve_project(layout.spec, project.name, relative)
+                if isinstance(located, Unresolved):
+                    deferrals.append(Deferral(logical, located.reason))
+                    continue
+                if file.glob is None:
+                    items.append(
+                        LocalItem.create(path=logical, preset=layout.preset, scope="common", format=file.format)
+                    )
+                    continue
+                directory = located.path.rpartition("/")[0]
+                if (
+                    deny.is_denied(home, directory)
+                    or deny.escapes(home, directory)
+                    or live.is_symlink(_join(home, directory))
+                ):
+                    refusals.append(Refusal(logical, _PROFILE_DIRECTORY_UNSAFE))
+                    continue
+                pattern = PresetGlob.create(logical)
+                matched, held = _bounded(pattern, pattern.expand(live.list_dir(_join(home, directory))), head_records)
+                refusals.extend(held)
+                items.extend(
+                    LocalItem.create(path=path, preset=layout.preset, scope="common", format=file.format)
+                    for path in matched
+                )
+    return _Expanded(items=tuple(items), refusals=tuple(refusals), deferrals=tuple(deferrals))
+
+
 def _real_path_refusal(live: LiveFiles, deny: DenyList, home: str, logical: str, located: Located) -> Refusal | None:
     """Why a profile or config-directory file's **real** path may not be used, or `None`.
 
@@ -1228,9 +1283,10 @@ def _collect(
     state = _Collect(records={} if head is None else dict(head.records))
     expanded = _expand_globs(config, head, live, deny, home, paths)
     profiled = _expand_profiles(config, head, live, deny, home, paths)
-    state.refused.extend((*expanded.refusals, *profiled.refusals))
-    state.deferred.extend((*expanded.deferrals, *profiled.deferrals))
-    for item in (*expanded.items, *profiled.items):
+    projected = _expand_agent_projects(config, head, live, deny, home, paths)
+    state.refused.extend((*expanded.refusals, *profiled.refusals, *projected.refusals))
+    state.deferred.extend((*expanded.deferrals, *profiled.deferrals, *projected.deferrals))
+    for item in (*expanded.items, *profiled.items, *projected.items):
         if presets.sessions.session_of(item.path) is not None:
             # A session file is collected with the rest of its session, below: alone it would skip the idle check and
             # the per-session refusal.
@@ -2667,6 +2723,11 @@ def _apply(
             # and the write would be re-created; profiles share the pattern, and it is tracked as a follow-up.
             deferred.append(Deferral(record.path, _CONFIG_FOLDER_MISSING))
             continue
+        if located.agent_root is not None and not live.exists(_join(home, located.agent_root)):
+            # The project is mapped but not cloned here. Its agent folder is the agent's to make on a first run, but
+            # data for a project that is not on this Mac would be an orphan under a name nothing will open.
+            deferred.append(Deferral(record.path, _AGENT_ROOT_MISSING))
+            continue
         policy = presets.policy_for(record.path)
         if policy is not None and policy.format != record.format:
             # The record names a format the local catalog does not use for this path. Apply must
@@ -3035,8 +3096,10 @@ def _settle_ledger(
         live_path = _join(home, located.path)
         # Known limitation (TOCTOU): the folder is checked here and `LiveFiles.write` later runs `mkdir(parents=True)`,
         # so a folder removed in between would be re-created. Profiles share this pattern; tracked as a follow-up.
-        if live.is_symlink(live_path) or (
-            located.config_directory is not None and not live.exists(_join(home, located.config_directory))
+        if (
+            live.is_symlink(live_path)
+            or (located.config_directory is not None and not live.exists(_join(home, located.config_directory)))
+            or (located.agent_root is not None and not live.exists(_join(home, located.agent_root)))
         ):
             # A symlink is never read, and a release folder that is not there is not a file the user removed: the
             # baseline stays, so the record is neither suppressed nor re-created when the app comes back.
@@ -3114,6 +3177,7 @@ def sync(
     when_tag: WhenTag | None = None,
     profiles: ProfileIndex | None = None,
     config_dirs: AppConfigDir | None = None,
+    agent_projects: AgentProjectIndex | None = None,
     rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
     sessions: SessionStore = NO_SESSION_STORE,
     activity: SessionActivity = NO_SESSION_ACTIVITY,
@@ -3143,7 +3207,7 @@ def sync(
             activity=activity,
             now=clock(),
         )
-        paths = open_live_paths(config, catalog, profiles, config_dirs)
+        paths = open_live_paths(config, catalog, profiles, config_dirs, agent_projects)
         view = PolicyView(
             transport,
             cipher=cipher,

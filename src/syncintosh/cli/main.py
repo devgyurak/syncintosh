@@ -371,7 +371,13 @@ def daemon_uninstall() -> None:
 def doctor() -> None:
     """Check that this machine's install can actually sync. Exits 1 when a check fails."""
     from syncintosh.presets import BuiltinCatalog, vscode
-    from syncintosh.services.profile_paths import config_dir_summary, open_live_paths, profile_summary
+    from syncintosh.services.profile_paths import (
+        agent_project_summary,
+        config_dir_summary,
+        open_live_paths,
+        profile_summary,
+    )
+    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.daemon import entry_point
@@ -388,9 +394,21 @@ def doctor() -> None:
         transport = GitCLITransport(paths.repo_dir)
         daemon = _launchd_daemon(paths.home)
         index = SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles)
-        live_paths = open_live_paths(config, BuiltinCatalog.default(), index, ProductInfoConfigDir(home=paths.home))
+        live_paths = open_live_paths(
+            config,
+            BuiltinCatalog.default(),
+            index,
+            ProductInfoConfigDir(home=paths.home),
+            SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
+        )
         summaries = tuple(
-            row for row in (profile_summary(config, live_paths), config_dir_summary(config, live_paths)) if row
+            row
+            for row in (
+                profile_summary(config, live_paths),
+                config_dir_summary(config, live_paths),
+                agent_project_summary(config, live_paths),
+            )
+            if row
         )
         report = doctor_service(
             transport=transport,
@@ -423,6 +441,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     """
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.presets import BuiltinCatalog, vscode
+    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.deny_list import SystemDenyList
@@ -451,6 +470,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             validators=validators(),
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
             config_dirs=ProductInfoConfigDir(home=paths.home),
+            agent_projects=SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
         )
     except DomainError as exc:
         _fail(exc)
@@ -889,6 +909,7 @@ def _sync_ports(config, paths) -> dict:
     from syncintosh.crypto.key_material import KeyMaterial
     from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.presets.orca import BUNDLE_ID as ORCA_BUNDLE_ID
+    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
     from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.app_detector import MdfindAppDetector
     from syncintosh.system.deny_list import SystemDenyList
@@ -942,6 +963,8 @@ def _sync_ports(config, paths) -> dict:
         "running": OrcaDaemonRunningApps(LsappinfoRunningApps(), home=str(paths.home), bundle_id=ORCA_BUNDLE_ID),
         # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
         "config_dirs": ProductInfoConfigDir(home=paths.home),
+        # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
+        "agent_projects": SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
         # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
         "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
         "source": SecureFileIdSource(),
