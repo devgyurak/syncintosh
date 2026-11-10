@@ -340,17 +340,24 @@ def test_a_document_that_is_not_a_plist_dictionary_is_refused_before_any_change(
     assert fake_defaults.values(_home(tmp_path), DOMAIN) == {"a": 1}
 
 
-def test_an_import_that_outlives_the_timeout_is_the_unverified_signal_not_a_refusal(tmp_path, fake_defaults) -> None:
-    # given — exports answer at once; the import hangs past the timeout
+def test_an_import_that_outlives_the_timeout_is_the_unverified_signal_not_a_refusal(
+    tmp_path, fake_defaults, monkeypatch
+) -> None:
+    # given — exports answer; the import times out (the wrapper raises what `subprocess.run` raises, with no wait)
+    import subprocess
+
     fake_defaults.seed(_home(tmp_path), DOMAIN, {"a": 1})
-    script = tmp_path / "slow-import"
-    script.write_text(
-        f'#!/bin/sh\nif [ "$1" = import ]; then sleep 5; fi\nexec {fake_defaults.path} "$@"\n', encoding="utf-8"
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    store = DefaultsDomainStore(str(_home(tmp_path)), executable=str(script), timeout_seconds=1.0)
-    read = _store(tmp_path, fake_defaults).read(SOURCE)
+    store = _store(tmp_path, fake_defaults)
+    read = store.read(SOURCE)
     assert read is not None
+    real_run = subprocess.run
+
+    def run(command, **options):
+        if command[1] == "import":
+            raise subprocess.TimeoutExpired(command, 10.0)
+        return real_run(command, **options)
+
+    monkeypatch.setattr("syncintosh.system.defaults_domains.subprocess.run", run)
 
     # when & then
     with pytest.raises(DocumentWrittenUnverified):
