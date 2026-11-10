@@ -370,3 +370,17 @@ def test_a_domain_that_is_not_an_accepted_plist_is_refused_without_quoting_it(ba
     with pytest.raises(DocumentRefused) as raised:
         codec_for(CFPREFS_DOMAIN).render(bad)
     assert bad not in str(raised.value) or bad == ""
+
+
+@pytest.mark.parametrize(
+    "database", ["Library/Preferences/com.other.app.plist", "Library/Preferences/x/com.example.app.plist"]
+)
+def test_a_preferences_domain_whose_plist_is_not_its_own_is_refused(database: str) -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        DocumentSource.create(
+            kind=CFPREFS_DOMAIN,
+            database=database,
+            domain="com.example.app",
+            view="Library/Preferences/@defaults/com.example.app.plist",
+        )

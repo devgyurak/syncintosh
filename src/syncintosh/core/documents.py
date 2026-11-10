@@ -88,6 +88,10 @@ class DocumentSource:
             raise ConfigError(f"a document's view path cannot be a glob: {validated_view!r}")
         if validated_view == validated_database:
             raise ConfigError("a document's view path cannot be its database")
+        if kind == CFPREFS_DOMAIN and validated_database != f"Library/Preferences/{domain}.plist":
+            # The store asks the plist file whether the domain is here and `defaults` for its content; two names for
+            # one domain would test one file and write another.
+            raise ConfigError(f"a preferences domain's database must be Library/Preferences/{domain}.plist")
         return cls(kind=kind, database=validated_database, domain=domain, view=validated_view)
 
     @property
