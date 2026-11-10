@@ -29,12 +29,14 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
 
+from syncintosh.core.append import append_merge
 from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import (
@@ -81,6 +83,8 @@ from syncintosh.core.ports import (
     RotationMarkerStore,
     RunningApps,
     SecretScanner,
+    SessionActivity,
+    SessionStore,
     SyncLock,
     SyntaxValidator,
     WhenTag,
@@ -109,6 +113,14 @@ from syncintosh.core.resolution import (
     Side,
     digest_of,
     fingerprint,
+)
+from syncintosh.core.sessions import (
+    MAX_FILE_BYTES,
+    SessionListing,
+    SessionSkipped,
+    SessionUnit,
+    eligibility,
+    within_project_cap,
 )
 from syncintosh.core.tree import ABSENT, Absent, ElementId, KeyPath, Leaf, Node, Tree, path_label
 from syncintosh.services.keys import (
@@ -164,6 +176,27 @@ class _UnknownRunning:
 
 
 NO_RUNNING_INFO: RunningApps = _UnknownRunning()
+
+
+class _NoSessions:
+    """A `SessionStore` that lists nothing and owns no path: the store a caller with no agent sessions passes."""
+
+    def sessions(self) -> SessionListing:
+        return SessionListing()
+
+    def session_of(self, path: str) -> str | None:
+        return None
+
+
+class _UnknownSessionActivity:
+    """A `SessionActivity` that cannot tell: every session counts as open, so none is sealed or overwritten."""
+
+    def is_open(self, session_id: str) -> bool | None:
+        return None
+
+
+NO_SESSION_STORE: SessionStore = _NoSessions()
+NO_SESSION_ACTIVITY: SessionActivity = _UnknownSessionActivity()
 
 # What apply decided for one record.
 _Decision = Literal["write", "skip", "abort", "defer"]
@@ -237,6 +270,17 @@ class _Presets:
     # the spec, or the fixed reason the list could not be used. Empty until a cycle entry point fills it, so
     # building a `_Presets` reads nothing (``AGENTS.md`` §2.6).
     ignores: Mapping[str, IgnoreSpec | str] = field(default_factory=lambda: MappingProxyType({}), repr=False)
+    # The agent sessions this machine has and whether the agent has one open, and the cycle's clock reading (taken once,
+    # so every session is judged idle against the same instant). The defaults list nothing and cannot tell, so a
+    # cycle built without them seals no session.
+    sessions: SessionStore = NO_SESSION_STORE
+    activity: SessionActivity = NO_SESSION_ACTIVITY
+    now: float = 0.0
+
+    def append_only(self, path: str) -> bool:
+        """True when `path` is a file that is only ever extended (`PresetFile.append_only`)."""
+        policy = self.catalog.policy_for(path)
+        return policy is not None and policy.append_only
 
     def policy_for(self, path: str) -> PresetFile | None:
         """The strip/validate policy for `path`, or `None` when no preset owns it."""
@@ -347,6 +391,8 @@ class SyncReport:
     unchanged: bool = False
     # Fixed sentences about the cycle that are neither failures nor file content (the ignore list, today).
     notes: tuple[str, ...] = ()
+    # Agent sessions left out of this cycle, each with a fixed reason (`core/sessions.py`). Never blocking.
+    session_skipped: tuple[SessionSkipped, ...] = ()
 
     @property
     def has_conflicts(self) -> bool:
@@ -404,6 +450,7 @@ class _Collect:
     skipped: list[str] = field(default_factory=list)
     refused: list[Refusal] = field(default_factory=list)
     unprojectable: list[Refusal] = field(default_factory=list)
+    session_skipped: list[SessionSkipped] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1168,11 +1215,14 @@ def _collect(
     presets: _Presets,
     paths: LivePaths | None = None,
     baseline: Callable[[ManifestRecord], _Source] = lambda record: _NO_SOURCE,
+    scanner: SecretScanner | None = None,
+    head_object: Callable[[ManifestRecord], bytes | None] = lambda record: None,
 ) -> _Collect:
     """Steps 2–4: read the tracked paths, classify each, and stage what changed.
 
     `baseline` reads, for a record, the object a carried key's value is taken from: the one the apply ledger
-    last accounted for (`core.projection.Carry`).
+    last accounted for (`core.projection.Carry`). `head_object` reads HEAD's object for a record, which an append-only
+    file is compared with (`core/append.py`); `scanner` pre-scans an agent session before anything of it is sealed.
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     state = _Collect(records={} if head is None else dict(head.records))
@@ -1181,6 +1231,10 @@ def _collect(
     state.refused.extend((*expanded.refusals, *profiled.refusals))
     state.deferred.extend((*expanded.deferrals, *profiled.deferrals))
     for item in (*expanded.items, *profiled.items):
+        if presets.sessions.session_of(item.path) is not None:
+            # A session file is collected with the rest of its session, below: alone it would skip the idle check and
+            # the per-session refusal.
+            continue
         if deny.is_denied(home, item.path):
             # The dangerous-path check comes first so a private key or a cloud credential is
             # reported as what it is, whatever its preset happens to own.
@@ -1236,7 +1290,22 @@ def _collect(
         if record is None:
             _collect_new(state, item, projected, live_sha, source)
         else:
-            _collect_existing(state, item, record, projected, live_sha, ledger, adopt)
+            _collect_existing(state, item, record, projected, live_sha, ledger, adopt, presets, head_object)
+    if scanner is not None:
+        _collect_sessions(
+            state,
+            head=head,
+            ledger=ledger,
+            live=live,
+            deny=deny,
+            home=home,
+            adopt=adopt,
+            source=source,
+            presets=presets,
+            scanner=scanner,
+            head_object=head_object,
+            paths=paths,
+        )
     return state
 
 
@@ -1275,7 +1344,14 @@ def _collect_existing(
     view_sha: str | None,
     ledger: Mapping[str, LedgerEntry],
     adopt: AdoptChoice | None,
+    presets: _Presets,
+    head_object: Callable[[ManifestRecord], bytes | None],
 ) -> None:
+    if projected.view is not None and view_sha is not None and presets.append_only(item.path):
+        # No ledger, no stale base: an append-only file is compared with HEAD's copy directly (`core/append.py`).
+        state.views[record.file_id] = projected.view
+        _collect_append_only(state, item, record, projected.view, view_sha, presets, head_object)
+        return
     entry = ledger.get(record.file_id)
     verdict = classify(entry, view_sha, record.sha256)
     if projected.view is not None:
@@ -1311,6 +1387,161 @@ def _collect_existing(
         _collect_first_sight(state, item, record, projected.view, view_sha, adopt)
     # `in-sync` and `pending-apply` collect nothing: the first is already settled, and the second
     # is finished by the apply step.
+
+
+def _collect_append_only(
+    state: _Collect,
+    item: LocalItem,
+    record: ManifestRecord,
+    view: bytes,
+    view_sha: str,
+    presets: _Presets,
+    head_object: Callable[[ManifestRecord], bytes | None],
+) -> None:
+    """Collect an append-only file only when it extends HEAD's copy (decision D2).
+
+    Equal: nothing to do. HEAD's copy extends the local one: this machine is behind, and apply writes the extension.
+    The local one extends HEAD's: it is collected. Neither: the session was continued on both Macs, so the
+    repository's copy stays, the local one is **not** collected, and the report says so without blocking the cycle.
+    """
+    if view_sha == record.sha256:
+        return
+    session = presets.sessions.session_of(item.path) or item.path
+    stored = head_object(record)
+    if stored is None:
+        state.session_skipped.append(SessionSkipped.create(session_id=session, reason="unknown", path=item.path))
+        return
+    outcome = append_merge(view, stored)
+    if outcome.forked:
+        state.session_skipped.append(SessionSkipped.create(session_id=session, reason="forked", path=item.path))
+        return
+    if outcome.longer == "local":
+        state.records[record.file_id] = _replace_sha(record, view_sha, format=item.format)
+        state.contents[record.file_id] = view
+        state.collected.append(item.path)
+
+
+def _collect_sessions(
+    state: _Collect,
+    *,
+    head: Manifest | None,
+    ledger: Mapping[str, LedgerEntry],
+    live: LiveFiles,
+    deny: DenyList,
+    home: str,
+    adopt: AdoptChoice | None,
+    source: FileIdSource,
+    presets: _Presets,
+    scanner: SecretScanner,
+    head_object: Callable[[ManifestRecord], bytes | None],
+    paths: LivePaths,
+) -> None:
+    """Collect the agent sessions the store lists, one whole session at a time.
+
+    A session is sealed only when it is idle and within the caps (`core/sessions.eligibility`); every file of it is
+    read and scanned **before** any is staged, so one secret-scan hit leaves the whole session out and reports it by
+    session, file and the scanner's own location text (decision D6) — the rest of the cycle goes on, and nothing of
+    the session reaches `write_repo`, whose scan stays as the second wall (``AGENTS.md`` §3.4).
+    """
+    listing = presets.sessions.sessions()
+    state.session_skipped.extend(listing.skipped)
+    published = frozenset(
+        found
+        for record in (() if head is None else head.records.values())
+        if (found := presets.sessions.session_of(record.path)) is not None
+    )
+    idle: list[SessionUnit] = []
+    for unit in listing.units:
+        why = eligibility(unit, now=presets.now, is_open=presets.activity.is_open(unit.session_id))
+        if why is None:
+            idle.append(unit)
+        else:
+            state.session_skipped.append(SessionSkipped.create(session_id=unit.session_id, reason=why))
+    fitting, over = within_project_cap(idle, published=published)
+    state.session_skipped.extend(SessionSkipped.create(session_id=unit.session_id, reason="cap") for unit in over)
+    for unit in fitting:
+        staged = _stage_session(
+            state, unit, live=live, deny=deny, home=home, presets=presets, scanner=scanner, paths=paths
+        )
+        if staged is None:
+            continue
+        for item, raw in staged:
+            record = _find_item_record(state.records, item)
+            projected = _Projected(raw=raw, view=raw)
+            if record is None:
+                _collect_new(state, item, projected, _sha256(raw), source)
+                continue
+            state.seen[record.file_id] = raw
+            _collect_existing(state, item, record, projected, _sha256(raw), ledger, adopt, presets, head_object)
+
+
+def _stage_session(
+    state: _Collect,
+    unit: SessionUnit,
+    *,
+    live: LiveFiles,
+    deny: DenyList,
+    home: str,
+    presets: _Presets,
+    scanner: SecretScanner,
+    paths: LivePaths,
+) -> list[tuple[LocalItem, bytes]] | None:
+    """Every file of `unit` as an item with its bytes, or `None` (reported) when any file may not be collected."""
+    staged: list[tuple[LocalItem, bytes]] = []
+    for file in unit.files:
+        owner = presets.catalog.preset_for(file.path)
+        if (
+            owner is None
+            or not presets.append_only(file.path)
+            or not presets.catalog.knows(owner.name, file.path)
+            or deny.is_denied(home, file.path)
+            or deny.is_denied(home, file.live)
+            or deny.escapes(home, file.live)
+        ):
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="unknown", path=file.path)
+            )
+            return None
+        located = paths.resolve(file.path)
+        if (
+            isinstance(located, Unresolved)
+            or located.path != file.live
+            or _real_path_refusal(live, deny, home, file.path, located) is not None
+        ):
+            # The store's idea of where the file lives must be the resolver's, which is what apply writes through:
+            # two answers for one record would collect one file and write another.
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="unknown", path=file.path)
+            )
+            return None
+        if live.is_symlink(_join(home, file.live)):
+            # Collection copies regular files, never follows a link (``AGENTS.md`` §2.4).
+            state.symlinks.append(file.path)
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="unknown", path=file.path)
+            )
+            return None
+        raw = live.read(_join(home, file.live))
+        if raw is None:
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="unknown", path=file.path)
+            )
+            return None
+        if len(raw) > MAX_FILE_BYTES:
+            # Listed sizes are a snapshot; the bytes read are what would be sealed.
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="cap", path=file.path)
+            )
+            return None
+        try:
+            scanner.scan(raw, subject=file.path, format="text")
+        except SecretScanError as exc:
+            state.session_skipped.append(
+                SessionSkipped.create(session_id=unit.session_id, reason="secret", path=file.path, detail=str(exc))
+            )
+            return None
+        staged.append((LocalItem.create(path=file.path, preset=owner.name, scope="common", format="text"), raw))
+    return staged
 
 
 def _collect_first_sight(
@@ -1396,6 +1627,8 @@ class _Settled:
     data: bytes | None = field(repr=False)
     detail: str = ""
     views: tuple[ConflictView, ...] = ()
+    # An append-only file that was continued on both sides: `data` is the repository's copy (`core/append.py`).
+    forked: bool = False
 
 
 def _readable(data: bytes) -> str:
@@ -1639,6 +1872,11 @@ def _settle_content(
     """
     adapter = presets.adapter_for(fmt)
     policy = presets.policy_for(path)
+    if policy is not None and policy.append_only:
+        # A transcript is only extended: there is no base and no key to merge by (`core/append.py`). A fork is not a
+        # conflict to ask about — the repository's copy is kept and the report says so — and a pick has nothing to pick.
+        outcome = append_merge(local, remote)
+        return _Settled(data=outcome.data, forked=outcome.forked)
     arrays = policy.array_rules if policy is not None else {}
     whole = _content_pick(picks.get(_whole_fingerprint(file_id, base, local, remote)))
     if isinstance(whole, Proposal) and not _is_text(fmt, base, local, remote):
@@ -1869,6 +2107,7 @@ class _Merged:
     conflicts: tuple[PendingConflictRecord, ...]
     base_commit: str | None = None
     views: tuple[ConflictView, ...] = ()
+    session_skipped: tuple[SessionSkipped, ...] = ()
 
 
 def _merge_diverged(
@@ -1908,6 +2147,7 @@ def _merge_diverged(
 
     contents: dict[str, bytes] = {}
     records = dict(result.merged)
+    forked: list[SessionSkipped] = []
     for task in result.content_merges:
         base_bytes = _verified_object(transport, cipher, base_commit, task.file_id, task.base_sha256)
         local_bytes = _verified_object(transport, cipher, local, task.file_id, task.local_sha256)
@@ -1937,6 +2177,12 @@ def _merge_diverged(
             )
             views.extend(settled.views)
             continue
+        if settled.forked:
+            forked.append(
+                SessionSkipped.create(
+                    session_id=presets.sessions.session_of(task.path) or task.path, reason="forked", path=task.path
+                )
+            )
         projected = _project_merged(
             presets, config, settled.data, scope=task.scope, machine=task.machine, path=task.path, fmt=task.format
         )
@@ -1980,7 +2226,7 @@ def _merge_diverged(
         carried=carried,
     )
     commit = _commit(transport, branch, (local, remote), "syncintosh: merge")
-    return _Merged(commit=commit, conflicts=(), base_commit=base_commit)
+    return _Merged(commit=commit, conflicts=(), base_commit=base_commit, session_skipped=tuple(forked))
 
 
 def _object_blob(
@@ -2034,6 +2280,8 @@ class _Publish:
     restart: bool = False
     # A fixed sentence the report must carry across the restart (an unpublished rotation was discarded).
     note: str | None = None
+    # Sessions a diverged merge kept the repository's copy of (`_Settled.forked`).
+    session_skipped: tuple[SessionSkipped, ...] = ()
 
 
 # Shown when a hygiene rotation that never reached the remote is dropped; the rotation can simply be repeated.
@@ -2217,7 +2465,12 @@ def _publish(
             )
         outcome = transport.push(config.remote, branch, merged.commit)
         if outcome == "ok":
-            return _Publish(published=merged.commit, base_commit=merged.base_commit, remote_commit=remote_commit)
+            return _Publish(
+                published=merged.commit,
+                base_commit=merged.base_commit,
+                remote_commit=remote_commit,
+                session_skipped=merged.session_skipped,
+            )
         # Either way the merge commit did not land. Discard it and keep the collect commit, so a
         # stuck branch never holds an unpushed merge — stacking a second merge on one is what
         # produces criss-cross history.
@@ -2261,6 +2514,7 @@ class _Applied:
     refused: tuple[Refusal, ...] = ()
     unprojectable: tuple[Refusal, ...] = ()
     invalid: tuple[Refusal, ...] = ()
+    session_skipped: tuple[SessionSkipped, ...] = ()
 
 
 def _missing_file_decision(installed: bool | None, *, parent_exists: bool) -> _Decision:
@@ -2370,6 +2624,7 @@ def _apply(
     refused: list[Refusal] = []
     unprojectable: list[Refusal] = []
     invalid: list[Refusal] = []
+    session_skipped: list[SessionSkipped] = []
     # One `mdfind` per app per cycle, however many files that app owns (§2.6).
     installed_cache: dict[str, bool | None] = {}
     running_cache: dict[str, bool | None] = {}
@@ -2434,6 +2689,35 @@ def _apply(
         # projection, and never the content this cycle will publish, which for a merged record is
         # not what the file holds.
         collect_baseline = seen.get(file_id)
+        if policy is not None and policy.append_only:
+            # Written only when missing or when the repo's copy strictly extends the local one, so the old bytes are
+            # a prefix of the new and no restore point is needed (`core/append.py`, decision D10).
+            data = _verified_object(transport, cipher, target_commit, file_id, record.sha256)
+            if data is None:
+                deferred.append(Deferral(record.path, _OBJECT_MISSING))
+                continue
+            if live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline:
+                # The agent appended between collect and apply: a write now would cut that line off.
+                aborted.append(record.path)
+                continue
+            if live_bytes == data or (live_bytes is None and ledger.get(file_id) is not None):
+                # In sync, or a file this machine wrote and the person removed: never recreated.
+                continue
+            if live_bytes is not None and not data.startswith(live_bytes):
+                # The local copy is longer or has forked: it is never shortened or replaced (collect reports a fork).
+                continue
+            session = presets.sessions.session_of(record.path)
+            if session is None:
+                # No store claims the path, so nothing can say the agent is done with it; "I could not tell" is not
+                # evidence that it is closed (decision D10).
+                session_skipped.append(SessionSkipped.create(session_id=record.path, reason="open", path=record.path))
+                continue
+            if presets.activity.is_open(session) is not False:
+                session_skipped.append(SessionSkipped.create(session_id=session, reason="open", path=record.path))
+                continue
+            live.write(live_path, data)
+            applied.append(record.path)
+            continue
         # Collect's projection stands in for this one only when the file is byte-for-byte the one it was made from.
         # A record whose format is not the catalog's never gets here (refused above), so the two agree on the format.
         # A file with carried keys is never reused: collect measured it against the ledger's object, while apply
@@ -2577,6 +2861,7 @@ def _apply(
         refused=tuple(refused),
         unprojectable=tuple(unprojectable),
         invalid=tuple(invalid),
+        session_skipped=tuple(session_skipped),
     )
 
 
@@ -2820,6 +3105,9 @@ def sync(
     profiles: ProfileIndex | None = None,
     config_dirs: AppConfigDir | None = None,
     rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
+    sessions: SessionStore = NO_SESSION_STORE,
+    activity: SessionActivity = NO_SESSION_ACTIVITY,
+    clock: Callable[[], float] = time.time,
 ) -> SyncReport:
     """Run one sync cycle. A conflict returns a report; a hard failure raises.
 
@@ -2838,7 +3126,13 @@ def sync(
             )
         # Read once per run: every live path of the cycle is resolved against this one view of the profiles, and
         # every file that obeys the user's ignore list against this one reading of it.
-        presets = replace(presets, ignores=_read_ignores(catalog, adapters, live, deny, home))
+        presets = replace(
+            presets,
+            ignores=_read_ignores(catalog, adapters, live, deny, home),
+            sessions=sessions,
+            activity=activity,
+            now=clock(),
+        )
         paths = open_live_paths(config, catalog, profiles, config_dirs)
         view = PolicyView(
             transport,
@@ -2874,6 +3168,14 @@ def sync(
         )
     finally:
         lock.release()
+
+
+def _one_per_session(skipped: tuple[SessionSkipped, ...]) -> tuple[SessionSkipped, ...]:
+    """The first report for each session and reason, in the order found."""
+    first: dict[tuple[str, str], SessionSkipped] = {}
+    for each in skipped:
+        first.setdefault((each.session_id, each.reason), each)
+    return tuple(first.values())
 
 
 def _answer(views: tuple[ConflictView, ...], resolution: Resolution) -> Picks | None:
@@ -2980,6 +3282,8 @@ def _cycle(
         presets=presets,
         paths=paths,
         baseline=_baseline_reader(transport, cipher, ledger, head_commit),
+        scanner=scanner,
+        head_object=lambda record: _verified_object(transport, cipher, head_commit, record.file_id, record.sha256),
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
@@ -3167,6 +3471,10 @@ def _cycle(
         skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
         notes=(*_carried_notes, *presets.notes(), *transport.notes()),
+        # One row per session and reason: collect names the session, apply the file, and they are the same finding.
+        session_skipped=_one_per_session(
+            (*collected.session_skipped, *outcome.session_skipped, *applied.session_skipped)
+        ),
     )
 
 
@@ -3176,6 +3484,8 @@ __all__ = [
     "NO_CATALOG",
     "NO_RESOLUTION",
     "NO_RUNNING_INFO",
+    "NO_SESSION_ACTIVITY",
+    "NO_SESSION_STORE",
     "NO_VALIDATORS",
     "Backup",
     "Deferral",

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from syncintosh.core.manifest import FileFormat
     from syncintosh.core.presets import Preset, PresetFile
     from syncintosh.core.profiles import ProfileMap, ProfileSpec
+    from syncintosh.core.sessions import SessionListing
     from syncintosh.core.watch import FileEvent
 
 # What an envelope binds a ciphertext to, and which subkey decrypts it
@@ -650,6 +651,39 @@ class DocumentStore(Protocol):
         """Replace the row's payload if it still holds `expected_revision`; a payload equal in value writes nothing.
 
         Raises `DocumentStale` when the row moved and `DocumentRefused` for anything else it will not do.
+        """
+        ...
+
+
+@runtime_checkable
+class SessionStore(Protocol):
+    """The agent sessions this machine has for the projects it opted in, enumerated per session (issue #56).
+
+    A transcript is not a glob: it lives under a folder named after the project's real path, beside sub-agent files
+    and spilled tool results, and Codex keeps its sessions by date with the project only inside the first record.
+    So the store enumerates **sessions**, each with every file that must travel with it, and reports what it could not
+    list safely. It reads directory entries and file names, sizes and mtimes — and, for a layout that needs it, a
+    bounded first record to tell which project a session belongs to — and never a transcript's content.
+    """
+
+    def sessions(self) -> SessionListing:
+        """The sessions of every opted-in project, plus the ones that could not be listed safely."""
+        ...
+
+    def session_of(self, path: str) -> str | None:
+        """The id of the session a record path belongs to, or `None` when it is not a session file of this machine."""
+        ...
+
+
+@runtime_checkable
+class SessionActivity(Protocol):
+    """Whether the agent has a session open right now, by the agent's own signal (never by file age alone)."""
+
+    def is_open(self, session_id: str) -> bool | None:
+        """`True` when open, `False` when closed, `None` when that cannot be told.
+
+        `None` is treated as open by every caller: a session that is still being written must not be sealed or
+        overwritten, and "I could not tell" is not evidence that it is closed (decision D10).
         """
         ...
 

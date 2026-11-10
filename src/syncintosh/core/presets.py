@@ -162,6 +162,23 @@ def _check_allowlist(
         raise ConfigError(f"{path}: an allowlisted key is also excluded: {clashing}")
 
 
+def _check_append_only(
+    path: str, format: FileFormat, stripped: frozenset[KeyPattern], validator: ValidatorName | None, ignore_list: bool
+) -> None:
+    """Refuse an append-only file that asks for something only a keyed or rewritten file can have."""
+    if format != "text":
+        # The prefix rule compares bytes. A keyed format is merged by key, and `binary` is opaque on purpose.
+        raise ConfigError(f"{path}: an append-only file must be `text`, not {format!r}")
+    if stripped:
+        # Stripping rewrites the file, so the stored bytes would no longer be a prefix of the live ones.
+        raise ConfigError(f"{path}: an append-only file cannot strip noise or excluded keys")
+    if ignore_list:
+        raise ConfigError(f"{path}: an append-only file cannot be an ignore-list file")
+    if validator is not None:
+        # A transcript is not a script; and a check that fails on a half-written tail would hold the file back.
+        raise ConfigError(f"{path}: an append-only file cannot name a syntax check")
+
+
 @dataclass(frozen=True)
 class PresetFile:
     """One file a preset owns, with the keys to strip and the checker to run.
@@ -187,6 +204,11 @@ class PresetFile:
     noise key is. It is for an app whose file mixes a few shared preferences with state and credentials, and
     that adds keys over time: a deny-list would carry each new key until someone noticed, the allowlist holds it
     back until the preset names it. `noise` and `excluded` still apply inside it. `None` is no allowlist.
+
+    `append_only` marks a file that is only ever extended — a session transcript (`core/append.py`). It is merged by
+    the prefix rule instead of a line-level three-way merge, is applied only as a missing file or a strict extension of
+    the local one, and is never restore-pointed. Like `arrays` it shapes how a merge reads the file, not which bytes an
+    object holds, so it is not in the policy digest. It needs a whole-file format with nothing to strip.
     """
 
     path: str
@@ -198,6 +220,7 @@ class PresetFile:
     arrays: tuple[tuple[KeyPath, ArrayRule], ...] = ()
     ignore_list: bool = False
     synced: frozenset[KeyPath] | None = None
+    append_only: bool = False
 
     @property
     def array_rules(self) -> dict[KeyPath, ArrayRule]:
@@ -216,6 +239,7 @@ class PresetFile:
         array_identity: Mapping[KeyPath, ArrayRule] | None = None,
         ignore_list: bool = False,
         synced: Iterable[KeyPath] | None = None,
+        append_only: bool = False,
     ) -> PresetFile:
         """Validate and freeze one preset file; never assign fields afterwards."""
         try:
@@ -253,6 +277,11 @@ class PresetFile:
         allowed = None if synced is None else frozenset(synced)
         if allowed is not None:
             _check_allowlist(validated_path, allowed, excluded_paths, validated_format, ignore_list)
+        if append_only:
+            _check_append_only(validated_path, validated_format, noise_paths | excluded_paths, validator, ignore_list)
+            if allowed is not None or array_identity:
+                # An allowlist and element rules read a file as keys; an append-only file has none.
+                raise ConfigError(f"{validated_path}: an append-only file cannot use an allowlist or array rules")
         repeated = noise_paths & excluded_paths
         if repeated:
             raise ConfigError(
@@ -268,6 +297,7 @@ class PresetFile:
             arrays=tuple(sorted((array_identity or {}).items(), key=lambda item: item[0])),
             ignore_list=ignore_list,
             synced=allowed,
+            append_only=append_only,
         )
 
     @property
@@ -399,6 +429,12 @@ class Preset:
             if any(file.ignore_list and file.path in {source.view for source in documents} for file in files):
                 # The ignore list is read from the file's own path, which here is virtual.
                 raise ConfigError(f"preset {name!r}: a document cannot be an ignore-list file")
+        if any(file.append_only for file in files) and (profiles is not None or config_dir is not None or documents):
+            # An append-only file is applied only when it is missing or extends the local one, and the profile, config
+            # directory and document resolvers each decide on a directory or a database row this rule does not know.
+            raise ConfigError(
+                f"preset {name!r}: append-only files cannot be combined with profiles, a config directory or documents"
+            )
         if defer_while_running and bundle_id is None:
             raise ConfigError(f"preset {name!r}: deferring while running needs a bundle id to ask about")
         return cls(
