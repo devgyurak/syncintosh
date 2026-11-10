@@ -567,3 +567,63 @@ def test_a_profiles_settings_file_takes_the_defaults_ignore_list_policy() -> Non
 
     # then — the policy is the default file's, so it names the file the list is read from
     assert (policy is not None and policy.ignore_list, policy is not None and policy.path) == (True, vscode.SETTINGS)
+
+
+# --------------------------------------------------------------------------- append-only files (issue #56)
+
+
+def test_an_append_only_file_is_text_with_nothing_to_strip() -> None:
+    # when
+    file = PresetFile.create(path="a/b.jsonl", format="text", append_only=True)
+
+    # then
+    assert (file.append_only, file.strips) == (True, False)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"format": "jsonc"},
+        {"format": "binary"},
+        {"noise": [("a",)]},
+        {"excluded": [("a",)]},
+        {"validator": "zsh"},
+        {"synced": [("a",)], "format": "jsonc"},
+    ],
+)
+def test_an_append_only_file_that_asks_for_a_strip_a_check_or_a_keyed_format_is_refused(changes: dict) -> None:
+    # given
+    fields = {"path": "a/b.jsonl", "format": "text", "append_only": True, **changes}
+
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetFile.create(**fields)  # ty: ignore[invalid-argument-type]  # the case varies the arguments
+
+
+def test_an_append_only_file_cannot_be_an_ignore_list_file() -> None:
+    # when & then
+    with pytest.raises(ConfigError):
+        PresetFile.create(path="a.json", format="text", ignore_list=True, append_only=True)
+
+
+def test_append_only_is_not_part_of_the_policy_digest() -> None:
+    # given
+    from syncintosh.core.policy import policy_digest
+
+    plain = Preset.create(name="p", files=(PresetFile.create(path="a.jsonl", format="text"),))
+    appended = Preset.create(name="p", files=(PresetFile.create(path="a.jsonl", format="text", append_only=True),))
+
+    # when & then
+    assert policy_digest(plain) == policy_digest(appended)
+
+
+def test_append_only_files_cannot_share_a_preset_with_a_config_directory() -> None:
+    # given
+    from syncintosh.core.config_dirs import ConfigDirSpec
+
+    spec = ConfigDirSpec.create(home="Lib/V", prefix="W", vendor="V", bundle_id="com.example.w")
+    file = PresetFile.create(path=spec.logical_path("a.jsonl"), format="text", append_only=True)
+
+    # when & then
+    with pytest.raises(ConfigError):
+        Preset.create(name="p", files=(file,), bundle_id=spec.bundle_id, config_dir=spec)

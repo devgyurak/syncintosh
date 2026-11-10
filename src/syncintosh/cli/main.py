@@ -1094,6 +1094,10 @@ def _render(report: SyncReport, config) -> None:
     for label, refusals in (("unprojectable", report.unprojectable), ("invalid", report.invalid)):
         for refusal in refusals:
             _say(f"{label} ({refusal.reason}): {_shown(refusal.path)}", err=True)
+    for skipped in report.session_skipped:
+        # Never blocking and never a transcript value: the session id, why, and the file or scanner location.
+        where = f" {_shown(skipped.path)}" if skipped.path else ""
+        _say(f"session {skipped.session_id} left out ({skipped.reason}){where}: {skipped.detail}")
     if report.dropped:
         from syncintosh.core.advice import visible
 
