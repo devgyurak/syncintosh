@@ -484,7 +484,7 @@ Session history (issue #56) rides on `docs/design/07-session-history.md`. Codex 
   macOS). Its presence proves nothing, because a crash leaves it. The probe is Codex's own (`writer_lock.rs`): take
   `.coordination.lock`, try-lock the thread's lock, release both at once, never creating a file. A lock that cannot be probed
   counts as open.
-* **Never written over.** A rollout that was archived (`archived_sessions/<file>`) or compressed (`<file>.zst`) here is left
+* **Never written over.** A rollout that was archived (`archived_sessions/<file>`, or `<file>.zst` there) or compressed (`<file>.zst`) here is left
   alone, since writing a plain file beside either would bring it back. In-place edits Codex makes (compression, migration) are
   off by default.
 * **`CODEX_HOME`** moves the whole tree: the layout is refused and reported, and `syncintosh doctor` shows it.

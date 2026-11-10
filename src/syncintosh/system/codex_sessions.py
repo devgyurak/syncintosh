@@ -188,10 +188,11 @@ class CodexSessionStore:
             if cwd is None and not claimed:
                 unmatched += 1
                 continue
-            for project, spec, real_root in roots:
+            # One rollout belongs to one project: the one it was published under, else the first whose root is its cwd.
+            # (A rollout claimed twice would become two records for one file.)
+            owners = claimed or [(p, s, r) for p, s, r in roots if cwd == r]
+            for project, spec, _ in owners[:1]:
                 logical = spec.logical_path(project.name, relative)
-                if cwd != real_root and logical not in published:
-                    continue
                 policy = self._catalog.policy_for(logical)
                 if policy is None or not policy.append_only:
                     continue
@@ -297,9 +298,9 @@ class CodexSessionStore:
         if live is None:
             return False
         home = Path(self._home)
-        return os.path.lexists(home / f"{live}.zst") or os.path.lexists(
-            home / ".codex" / "archived_sessions" / live.rpartition("/")[2]
-        )
+        archived = home / ".codex" / "archived_sessions" / live.rpartition("/")[2]
+        # An archived rollout may itself have been compressed, so the archive is checked for the `.zst` too.
+        return any(os.path.lexists(each) for each in (home / f"{live}.zst", archived, Path(f"{archived}.zst")))
 
     # ------------------------------------------------------------------ what a person is told
 

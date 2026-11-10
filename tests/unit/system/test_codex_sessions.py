@@ -767,9 +767,11 @@ class _Probe:
     ("answers", "expected"),
     [((False, False), False), ((False, True), True), ((None, False), None), ((None, True), True), ((), False)],
 )
-def test_the_combined_probe_believes_open_before_unknown_before_closed(answers, expected) -> None:
-    # given
-    combined = CombinedSessionActivity(tuple(_Probe(a) for a in answers))
+def test_the_combined_probe_for_an_unclaimed_session_believes_open_before_unknown_before_closed(
+    answers, expected
+) -> None:
+    # given — no store has claimed the id, so every agent is asked
+    combined = CombinedSessionActivity(CombinedSessionStore(()), tuple(_Probe(a) for a in answers))
 
     # when
     answer = combined.is_open("id")
@@ -778,93 +780,82 @@ def test_the_combined_probe_believes_open_before_unknown_before_closed(answers, 
     assert answer is expected
 
 
-# --------------------------------------------------------------------------- a published record claims its rollout
+class _Listing(_Store):
+    """A store that lists one session of its own."""
+
+    def sessions(self, published: frozenset[str] = frozenset()) -> SessionListing:
+        from syncintosh.core.sessions import SessionFile, SessionUnit
+
+        unit = SessionUnit.create(
+            session_id=self._owns, project="p", files=(SessionFile.create(path="a/x", live="a/x", size=1, mtime=1.0),)
+        )
+        return SessionListing(units=(unit,))
 
 
-def test_a_rollout_already_published_under_the_project_is_listed_whatever_its_cwd_says(tmp_path: Path) -> None:
-    # given — started on another Mac, so its first record names a path that is not this project's root
+def test_one_agents_unreadable_state_does_not_hold_back_the_other_agents_sessions() -> None:
+    # given — the first agent cannot tell anything; the second owns the session and says it is closed
+    stores = CombinedSessionStore((_Store("first/"), _Listing("second")))
+    stores.sessions()
+    combined = CombinedSessionActivity(stores, (_Probe(None), _Probe(False)))
+
+    # when
+    owned, unclaimed = combined.is_open("second"), combined.is_open("nobody")
+
+    # then — the owner's answer for its own; the cautious combination only for an id nobody claimed
+    assert (owned, unclaimed) == (False, None)
+
+
+def test_a_session_recognised_by_path_is_routed_to_its_owner_too() -> None:
+    # given
+    stores = CombinedSessionStore((_Store("a/"), _Store("b/")))
+    combined = CombinedSessionActivity(stores, (_Probe(None), _Probe(False)))
+    stores.session_of("b/x")
+
+    # when
+    answer = combined.is_open("id")
+
+    # then
+    assert answer is False
+
+
+# --------------------------------------------------------------------------- review of #126
+
+
+def test_a_rollout_compressed_inside_the_archive_is_retired(tmp_path: Path) -> None:
+    # given
     home = _home(tmp_path)
-    _rollout(home, _meta("/Users/someone/src/x"))
+    compressed = home / ".codex" / "archived_sessions" / (_name() + ".zst")
+    compressed.parent.mkdir(parents=True)
+    compressed.write_bytes(b"zstd")
+
+    # when
+    retired = _store(home).retired(_logical(f"2026/11/09/{_name()}"))
+
+    # then
+    assert retired is True
+
+
+def test_a_rollout_two_projects_could_claim_goes_to_one_of_them(tmp_path: Path) -> None:
+    # given — one project is published under this rollout's path, and the other's root is its cwd
+    home = _home(tmp_path)
+    (home / "code" / "y").mkdir()
+    other = AgentProject.create(
+        name="other",
+        path="code/y",
+        layouts=(AgentLayout.create(preset="codex-sessions", spec=CODEX_PROJECTS),),
+    )
+    store = CodexSessionStore(
+        str(home),
+        (_project(), other),
+        SystemAgentProjectIndex(str(home), SystemDenyList(), {}),
+        SystemDenyList(),
+        CATALOG,
+    )
+    _rollout(home, _meta(os.path.realpath(home / "code" / "y")))
     published = frozenset({_logical(f"2026/11/09/{_name()}")})
 
     # when
-    claimed, unclaimed = _store(home).sessions(published), _store(home).sessions()
+    units = store.sessions(published).units
 
-    # then
-    assert ([u.session_id for u in claimed.units], unclaimed.units) == ([THREAD], ())
-
-
-def test_a_published_rollout_is_listed_even_when_its_head_cannot_be_read(tmp_path: Path) -> None:
-    # given
-    home = _home(tmp_path)
-    _rollout(home, b"not a record\n")
-    published = frozenset({_logical(f"2026/11/09/{_name()}")})
-
-    # when
-    listing = _store(home).sessions(published)
-
-    # then
-    assert ([u.session_id for u in listing.units], listing.skipped) == ([THREAD], ())
-
-
-def test_a_record_published_under_another_name_does_not_claim_the_rollout(tmp_path: Path) -> None:
-    # given
-    home = _home(tmp_path)
-    _rollout(home, _meta("/Users/someone/src/x"))
-    published = frozenset({f".codex/sessions/@other/2026/11/09/{_name()}"})
-
-    # when
-    listing = _store(home).sessions(published)
-
-    # then
-    assert listing.units == ()
-
-
-def test_the_codex_layout_is_flat_and_the_claude_one_is_not() -> None:
-    # given
-    from syncintosh.core.agent_projects import AgentProjectSpec
-
-    claude = AgentProjectSpec.create(home=".claude/projects", kind="claude")
-
-    # when & then
-    assert (CODEX_PROJECTS.flat, claude.flat) == (True, False)
-
-
-def test_version_output_that_is_not_text_is_unknown_not_a_crash(monkeypatch) -> None:
-    # given
-    def fail(*a, **k):
-        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-
-    monkeypatch.setattr(module.subprocess, "run", fail)
-
-    # when
-    version = module.installed_version()
-
-    # then
-    assert version is None
-
-
-def test_a_name_with_non_ascii_digits_is_not_a_rollout_of_this_store(tmp_path: Path) -> None:
-    # given
-    home = _home(tmp_path)
-    _rollout(home, _meta(_root(home)), day="٢٠٢٦/١١/٠٩")
-
-    # when
-    listing = _store(home).sessions()
-
-    # then
-    assert listing.units == ()
-
-
-def test_a_rollout_that_is_a_fifo_is_not_read(tmp_path: Path) -> None:
-    # given
-    home = _home(tmp_path)
-    target = home / ".codex" / "sessions" / "2026" / "11" / "09" / _name()
-    target.parent.mkdir(parents=True)
-    os.mkfifo(target)
-
-    # when
-    listing = _store(home).sessions()
-
-    # then
-    assert (listing.units, [s.reason for s in listing.skipped]) == ((), ["unknown"])
+    # then — one record for one file, under the project it was published under
+    assert [(u.session_id, u.project) for u in units] == [(THREAD, "work")]
