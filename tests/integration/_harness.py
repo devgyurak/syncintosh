@@ -29,6 +29,7 @@ from syncintosh.services.sync import (
     sync,
 )
 from syncintosh.system.config import load_config
+from syncintosh.system.live_files import SystemLiveFiles
 from syncintosh.system.lock import FileLock
 from syncintosh.system.paths import MachinePaths
 
@@ -77,8 +78,10 @@ def sync_ports(
             "sessions": NO_SESSION_STORE,
             "activity": NO_SESSION_ACTIVITY,
             "agent_projects": None,
-            # The default `documents` is built from the full catalog, so an iTerm2 view a test happens to
-            # track would read the real `defaults` domain: a test that wants one passes its own.
+            # The default `live` and `documents` are built from the full catalog, so an iTerm2 view a test happens to
+            # track would read the real `defaults` domain: plain file reads and no document skips, unless a test passes
+            # its own.
+            "live": SystemLiveFiles(),
             "documents": None,
             **ports,
         },
