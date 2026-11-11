@@ -503,6 +503,22 @@ def test_a_secret_pattern_is_refused_before_encryption(tmp_path, memory_key_stor
     assert FileRepo(a.repo).list_paths("objects") == ()
 
 
+def test_an_aws_secret_access_key_is_refused_before_encryption(tmp_path, memory_key_store) -> None:
+    # given — the tracked .zshrc exports an AWS secret access key (a prefix-less 40-character value)
+    a = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    _initialize(a)
+    key = b"wJalrXUtnFEMI" + b"/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    _write_live(a, b"export AWS_SECRET_ACCESS_KEY=" + key + b"\n")
+
+    # when & then — refused at the encrypt boundary, naming the label and never the value
+    with pytest.raises(SecretScanError) as refusal:
+        _run(a)
+    assert "AWS secret access key" in str(refusal.value)
+    assert key.decode() not in str(refusal.value)
+    assert FileRepo(a.repo).read("manifest.enc") is None
+    assert FileRepo(a.repo).list_paths("objects") == ()
+
+
 def test_a_yaml_block_scalar_authorization_is_refused_before_encryption(tmp_path, memory_key_store) -> None:
     # given — an item declared as `format: yaml` whose header value sits on continuation lines
     a = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))

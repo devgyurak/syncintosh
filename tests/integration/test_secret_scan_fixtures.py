@@ -46,3 +46,31 @@ def test_a_preset_fixture_passes_the_widened_scan(path: str, fixture: str, fmt: 
 
     # then
     assert result is None
+
+
+# Fixtures the presets above do not project, scanned as they are: the AWS secret key rule (#63) is a new
+# key-name pattern in every format, so each sample format of the repository has to still pass it.
+RAW_CASES = (
+    ("ghostty/config", "text"),
+    ("orca/settings.json", "jsonc"),
+    ("zed/settings.jsonc", "jsonc"),
+    ("zed/keymap.json", "jsonc"),
+    ("vscode/storage.json", "jsonc"),
+    ("iterm2/dynamic-profiles.json", "jsonc"),
+    ("plist/prefs.plist", "plist"),
+    ("xml/options.xml", "xml"),
+    ("jetbrains/ide.general.xml", "xml"),
+    ("jetbrains/databaseSettings.xml", "xml"),
+)
+
+
+@pytest.mark.parametrize(("fixture", "fmt"), RAW_CASES)
+def test_a_raw_fixture_passes_the_aws_secret_key_rule(fixture: str, fmt: str) -> None:
+    # given
+    data = (FIXTURES / fixture).read_bytes()
+
+    # when
+    result = PatternSecretScanner().scan(data, subject=fixture, format=fmt)
+
+    # then
+    assert result is None

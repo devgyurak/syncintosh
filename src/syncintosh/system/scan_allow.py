@@ -72,8 +72,12 @@ URL_CREDENTIALS_LABEL: Final = "URL with credentials"
 BASIC_LABEL: Final = "HTTP Basic credential"
 BEARER_LABEL: Final = "HTTP Bearer credential"
 AUTHORIZATION_LABEL: Final = "authorization header"
+# The match holds the key's value, so a fingerprint is specific to that one key (issue #63).
+AWS_SECRET_LABEL: Final = "AWS secret access key"
 
-ALLOWABLE_LABELS: Final = frozenset({URL_CREDENTIALS_LABEL, BASIC_LABEL, BEARER_LABEL, AUTHORIZATION_LABEL})
+ALLOWABLE_LABELS: Final = frozenset(
+    {URL_CREDENTIALS_LABEL, BASIC_LABEL, BEARER_LABEL, AUTHORIZATION_LABEL, AWS_SECRET_LABEL}
+)
 
 
 @dataclass(frozen=True)
@@ -251,6 +255,7 @@ __all__ = [
     "ALLOWABLE_LABELS",
     "ALLOW_VERSION",
     "AUTHORIZATION_LABEL",
+    "AWS_SECRET_LABEL",
     "BASIC_LABEL",
     "BEARER_LABEL",
     "FINGERPRINT_HEX_LEN",

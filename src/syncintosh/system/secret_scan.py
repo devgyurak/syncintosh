@@ -30,12 +30,38 @@ from syncintosh.core.errors import SecretScanError
 from syncintosh.system.scan_allow import (
     ALLOWABLE_LABELS,
     AUTHORIZATION_LABEL,
+    AWS_SECRET_LABEL,
     BASIC_LABEL,
     BEARER_LABEL,
     URL_CREDENTIALS_LABEL,
     ScanAllow,
     fingerprint,
 )
+
+# An AWS secret access key is 40 base64-ish characters with **no prefix** of its own, so unlike the id
+# above it can only be found by the name it is written under. The names are the ones real files use:
+# the AWS CLI's `aws_secret_access_key` / `aws_session_token`, the matching environment variables, the
+# camelCase `SecretAccessKey` of STS's JSON output, and boto's old `aws_security_token`. `_`/`-` are
+# optional and case is ignored, so each spelling above is one rule.
+#
+# The key is bounded on the left by "not alphanumeric", not `\b`: `\b` sees no boundary inside
+# `TF_VAR_aws_secret_access_key` or `MY_AWS_SECRET_ACCESS_KEY` (`_` is a word character), and those
+# prefixed spellings are how the key reaches Terraform and CI wrappers.
+_AWS_KEY = (
+    rb"(?<![A-Za-z0-9])(?i:(?:aws[_-]?)?(?:secret[_-]?access[_-]?key|session[_-]?token)|aws[_-]?security[_-]?token)"
+)
+
+# Shell `=`, JSON `":`, an escaped `\":\"` (JSON inside a JSON string, a keybinding's `args.text`), TOML
+# ` = `, YAML `: `; a quote around the value is optional.
+_AWS_SEPARATOR = rb"\\?[\"']?[ \t]*+[:=][ \t]*+\\?[\"']?"
+
+# At least 40, not exactly 40: a session token and the 64-hex secret of an AWS-compatible store are the
+# same credential and longer. The class has no `$`, `{` or `(`, so a reference (`$AWS_SECRET`,
+# `${KEY}`, `$(pass show …)`) — the recommended way to keep the key out of a dotfile — never matches,
+# and neither does a short placeholder (`test`, `minioadmin`) or a 39-character value. Possessive, and
+# anchored on the key name, so the match is linear. Only the value is the `secret` group: the masker
+# hides that span and leaves the key name for the model to read (issue #63).
+_AWS_VALUE = rb"(?P<secret>[A-Za-z0-9/+=]{40,}+)"
 
 # `(label, pattern)` — a high-signal, low-false-positive set. This is a heuristic in front of the
 # real gate (CI + review), not a sandbox (``AGENTS.md`` §6); a missed secret is still refused by
@@ -45,6 +71,7 @@ COMMON_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("private key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     # AWS access key id; the fixed `AKIA` prefix plus 16 uppercase-alphanumerics.
     ("AWS access key id", re.compile(rb"\bAKIA[0-9A-Z]{16}\b")),
+    (AWS_SECRET_LABEL, re.compile(_AWS_KEY + _AWS_SEPARATOR + _AWS_VALUE)),
     # GitHub personal access token (classic).
     ("GitHub token", re.compile(rb"\bghp_[0-9A-Za-z]{36}\b")),
     # GitHub fine-grained personal access token.
@@ -263,6 +290,13 @@ STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     (AUTHORIZATION_LABEL, _STRUCTURED_AUTHORIZATION),
     # A plist / XML header, where the `:`-form separator cannot see across `</key><string>`.
     (AUTHORIZATION_LABEL, _AUTHORIZATION_XML),
+    # A plist's `<key>SecretAccessKey</key><string>…</string>`, which the `:`/`=` separator cannot cross.
+    (
+        AWS_SECRET_LABEL,
+        re.compile(
+            rb"<\s*(?i:key)\s*>\s*" + _AWS_KEY + rb"\s*<\s*/\s*(?i:key)\s*>\s*<\s*(?i:string)\s*>\s*" + _AWS_VALUE
+        ),
+    ),
 )
 
 # A shell file. Two spellings, because the shell decides what a `$` means by the quoting around it:
