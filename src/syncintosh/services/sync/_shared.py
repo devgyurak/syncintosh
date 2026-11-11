@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 from syncintosh.core.config import LocalItem, SyncConfig, allows, allows_path
 from syncintosh.core.errors import (
@@ -391,6 +391,36 @@ class _Collect:
     refused: list[Refusal] = field(default_factory=list)
     unprojectable: list[Refusal] = field(default_factory=list)
     session_skipped: list[SessionSkipped] = field(default_factory=list)
+
+
+def _collect_report(collected: _Collect, *, committed: bool, notes: tuple[str, ...], **found: Any) -> SyncReport:
+    """The report a collect pass fills, under one field policy for every way a cycle can end.
+
+    What collect *observed* is reported on every return: symlinks, skipped paths, refused and unprojectable paths,
+    deferrals, skipped sessions, and the notes. What a cycle *did* is reported only where it made the collect commit:
+    `created`, `collected`, `suppressed`. A return before that commit (first sight, a stale-baseline conflict) would
+    otherwise claim files as collected that were never committed. `found` carries what a later stage adds or
+    replaces, such as the merged lists of a finished cycle.
+    """
+    observed: dict[str, Any] = {
+        "symlinks": tuple(collected.symlinks),
+        "skipped": tuple(collected.skipped),
+        "refused": tuple(collected.refused),
+        "unprojectable": tuple(collected.unprojectable),
+        "deferred": tuple(collected.deferred),
+        "session_skipped": tuple(collected.session_skipped),
+        "notes": notes,
+    }
+    outcome: dict[str, Any] = (
+        {
+            "created": tuple(collected.created),
+            "collected": tuple(collected.collected),
+            "suppressed": tuple(collected.suppressed),
+        }
+        if committed
+        else {}
+    )
+    return SyncReport(**{**observed, **outcome, **found})
 
 
 @dataclass(frozen=True)
