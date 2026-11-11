@@ -2320,6 +2320,22 @@ def test_sync_drops_an_unpublished_hygiene_rotation_the_remote_diverged_from(tmp
     assert loads_commitments(GitCLITransport(a.repo).read_blob("HEAD", COMMITMENTS_PATH) or b"").keys() == {1}
 
 
+def test_a_conflict_after_dropping_an_unpublished_rotation_still_reports_the_drop(tmp_path, memory_key_store) -> None:
+    # given — A's rotation never reached the remote, and A and B edited the same line
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=False)
+    _publish_on_generation_one(b, b"one\nFROM B\nthree\n")
+    _write_live(a, b"one\nFROM A\nthree\n")
+
+    # when
+    report = _run(a)
+
+    # then — the cycle stops on the conflict, and the user is still told the key rotation did not happen
+    assert len(report.conflicts) == 1
+    assert any("generation 2" in note and "key rotate --hygiene" in note for note in report.notes)
+    assert a.store.generations() == (1,)
+
+
 def test_sync_recovers_when_the_remote_never_moved_and_still_publishes_the_edit(tmp_path, memory_key_store) -> None:
     # given — the rotation push was cut and nothing else happened, so the local branch is merely ahead of the
     # remote; A edits a file and the daemon's sync collects it on top of the unpublished rotation
@@ -2594,3 +2610,80 @@ def test_a_stale_edit_the_scan_refuses_is_not_overwritten_and_keeps_its_old_base
     assert _git(b.repo, "for-each-ref", "refs/syncintosh").strip() == ""
     # and the next sync does not overwrite it either
     assert later.applied == ()
+
+
+# --------------------------------------------------------------------------- report fields by return path
+
+EXTRA = ".zprofile"
+
+
+def _two_file_pair(tmp_path: Path, make_store) -> tuple[Machine, Machine]:
+    """Two machines in sync on `ZSH` and `EXTRA`: A published both, B cloned and applied them."""
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, make_store, "machine-a", remote)
+    _initialize(a, paths=(ZSH, EXTRA))
+    _write_live(a, b"one\ntwo\nthree\n")
+    _write_file(a, EXTRA, b"export BASE=1\n")
+    _run(a)
+    b = _machine(tmp_path, make_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery, paths=(ZSH, EXTRA))
+    _run(b)
+    return a, b
+
+
+def _first_sight_report(tmp_path: Path, make_store) -> SyncReport:
+    a, b = _two_file_pair(tmp_path, make_store)
+    _write_live(a, b"from A\n")
+    _run(a)
+    # B has the file the repo tracks with different content and was never in sync on it
+    JsonLedgerStore(b.ledger).save({})
+    _write_live(b, b"from B\n")
+    _write_file(b, EXTRA, b"export B=1\n")
+    return _run(b)
+
+
+def _stale_conflict_report(tmp_path: Path, make_store) -> SyncReport:
+    a, b = _two_file_pair(tmp_path, make_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _run(b, live=MidSyncEditLive(b.zshrc))
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _write_file(b, EXTRA, b"export B=1\n")
+    return _run(b)
+
+
+def _publish_conflict_report(tmp_path: Path, make_store) -> SyncReport:
+    a, b = _two_file_pair(tmp_path, make_store)
+    _write_live(a, b"one\nFROM A\nthree\n")
+    _run(a)
+    _write_live(b, b"one\nFROM B\nthree\n")
+    _write_file(b, EXTRA, b"export B=1\n")
+    return _run(b)
+
+
+def _finished_report(tmp_path: Path, make_store) -> SyncReport:
+    a, _ = _two_file_pair(tmp_path, make_store)
+    _write_live(a, b"one\nchanged\nthree\n")
+    _write_file(a, EXTRA, b"export A=1\n")
+    return _run(a)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "collected"),
+    [
+        # Before the collect commit: nothing was committed, so nothing is claimed as collected.
+        (_first_sight_report, []),
+        (_stale_conflict_report, []),
+        # After it: the commit was made, so what it holds is reported even though publishing stopped.
+        (_publish_conflict_report, sorted([ZSH, EXTRA])),
+        (_finished_report, sorted([ZSH, EXTRA])),
+    ],
+)
+def test_a_report_claims_files_as_collected_only_where_the_collect_commit_was_made(
+    tmp_path, memory_key_store, scenario, collected
+) -> None:
+    # when
+    report = scenario(tmp_path, memory_key_store)
+
+    # then
+    assert sorted(report.collected) == collected

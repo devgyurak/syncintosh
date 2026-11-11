@@ -393,6 +393,60 @@ class _Collect:
     session_skipped: list[SessionSkipped] = field(default_factory=list)
 
 
+def _collect_report(
+    collected: _Collect,
+    *,
+    committed: bool,
+    notes: tuple[str, ...],
+    deferred: tuple[Deferral, ...] | None = None,
+    symlinks: tuple[str, ...] | None = None,
+    refused: tuple[Refusal, ...] | None = None,
+    unprojectable: tuple[Refusal, ...] | None = None,
+    session_skipped: tuple[SessionSkipped, ...] | None = None,
+    first_sight: tuple[str, ...] = (),
+    conflicts: tuple[PendingConflictRecord, ...] = (),
+    published_commit: str | None = None,
+    backup_commit: str | None = None,
+    restore_points: tuple[RestorePoint, ...] = (),
+    dropped: tuple[DroppedLocal, ...] = (),
+    applied: tuple[str, ...] = (),
+    aborted: tuple[str, ...] = (),
+    invalid: tuple[Refusal, ...] = (),
+    unchanged: bool = False,
+) -> SyncReport:
+    """The report a collect pass fills, under one field policy for every way a cycle can end.
+
+    What collect *observed* is reported on every return: symlinks, skipped paths, refused and unprojectable paths,
+    deferrals, skipped sessions, and the notes. What a cycle *did* is reported only where it made the collect commit:
+    `created`, `collected`, `suppressed`. A return before that commit (first sight, a stale-baseline conflict) would
+    otherwise claim files as collected that were never committed. The observed lists default to what collect found; a
+    later stage passes the merged list where it adds to them. Each field is a named parameter so a misspelt one fails
+    the type check instead of reaching `SyncReport` as a stray keyword.
+    """
+    return SyncReport(
+        symlinks=tuple(collected.symlinks) if symlinks is None else symlinks,
+        skipped=tuple(collected.skipped),
+        refused=tuple(collected.refused) if refused is None else refused,
+        unprojectable=tuple(collected.unprojectable) if unprojectable is None else unprojectable,
+        deferred=tuple(collected.deferred) if deferred is None else deferred,
+        session_skipped=tuple(collected.session_skipped) if session_skipped is None else session_skipped,
+        notes=notes,
+        created=tuple(collected.created) if committed else (),
+        collected=tuple(collected.collected) if committed else (),
+        suppressed=tuple(collected.suppressed) if committed else (),
+        first_sight=first_sight,
+        conflicts=conflicts,
+        published_commit=published_commit,
+        backup_commit=backup_commit,
+        restore_points=restore_points,
+        dropped=dropped,
+        applied=applied,
+        aborted=aborted,
+        invalid=invalid,
+        unchanged=unchanged,
+    )
+
+
 @dataclass(frozen=True)
 class _StaleChange:
     """A local change against a stale ledger baseline, waiting for a content merge.

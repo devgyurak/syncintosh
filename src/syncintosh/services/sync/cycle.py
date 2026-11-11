@@ -26,6 +26,7 @@ from syncintosh.services.sync._shared import (
     SyncPorts,
     SyncReport,
     _baseline_reader,
+    _collect_report,
     _commit,
     _current_generation,
     _object_reader,
@@ -189,13 +190,11 @@ def _cycle(
     )
     if collected.first_sight:
         # Present both sides before anything is written; the user picks with --adopt.
-        return SyncReport(
-            first_sight=tuple(collected.first_sight),
-            symlinks=tuple(collected.symlinks),
-            skipped=tuple(collected.skipped),
-            refused=tuple(collected.refused),
-            unprojectable=tuple(collected.unprojectable),
+        return _collect_report(
+            collected,
+            committed=False,
             notes=(*_carried_notes, *presets.notes(), *view.notes()),
+            first_sight=tuple(collected.first_sight),
         )
     if collected.stale:
         found = _merge_stale(
@@ -222,13 +221,11 @@ def _cycle(
                     conflicts=stale_conflicts,
                 )
             )
-            return SyncReport(
+            return _collect_report(
+                collected,
+                committed=False,
+                notes=(*_carried_notes, *presets.notes(), *view.notes()),
                 conflicts=stale_conflicts,
-                collected=tuple(collected.collected),
-                symlinks=tuple(collected.symlinks),
-                skipped=tuple(collected.skipped),
-                refused=tuple(collected.refused),
-                unprojectable=tuple(collected.unprojectable),
             )
 
     generation = _current_generation(ports.store, head_manifest)
@@ -293,13 +290,12 @@ def _cycle(
                 conflicts=outcome.conflicts,
             )
         )
-        return SyncReport(
+        return _collect_report(
+            collected,
+            committed=True,
+            notes=(*_carried_notes, *presets.notes(), *view.notes()),
             conflicts=outcome.conflicts,
-            created=tuple(collected.created),
-            collected=tuple(collected.collected),
-            skipped=tuple(collected.skipped),
-            refused=tuple(collected.refused),
-            unprojectable=tuple(collected.unprojectable),
+            session_skipped=_one_per_session((*collected.session_skipped, *outcome.session_skipped)),
         )
     if resolution.resolving:
         # The push landed, so the conflicts this run settled are no longer pending.
@@ -353,24 +349,22 @@ def _cycle(
             target=lambda record: _object_reader(view, ports.cipher, target_commit, record),
         )
     )
-    return SyncReport(
+    return _collect_report(
+        collected,
+        committed=True,
         published_commit=outcome.published,
         backup_commit=applied.backup,
         restore_points=applied.restore_points,
         dropped=applied.dropped,
-        created=tuple(collected.created),
-        collected=tuple(collected.collected),
         applied=applied.applied,
         # The same deferral can be found twice (collect lists a profile's borrowed file, and apply meets its
         # record); one row is enough, in the order it first appeared.
         deferred=tuple(dict.fromkeys((*collected.deferred, *applied.deferred))),
-        suppressed=tuple(collected.suppressed),
         symlinks=tuple(dict.fromkeys((*collected.symlinks, *applied.symlinks))),
         aborted=applied.aborted,
         refused=tuple(dict.fromkeys((*collected.refused, *applied.refused))),
         unprojectable=tuple(dict.fromkeys((*collected.unprojectable, *applied.unprojectable))),
         invalid=applied.invalid,
-        skipped=tuple(collected.skipped),
         unchanged=not changed and outcome.published in (None, local_commit),
         notes=(*_carried_notes, *presets.notes(), *view.notes(), *applied.notes),
         # One row per session and reason: collect names the session, apply the file, and they are the same finding.
