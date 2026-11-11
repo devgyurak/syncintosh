@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem
 from syncintosh.core.manifest_codec import loads_manifest
@@ -27,19 +27,14 @@ from syncintosh.core.presets import Preset, PresetFile
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
 from syncintosh.core.sessions import IDLE_SECONDS, MIB, SessionFile, SessionListing, SessionUnit
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import NO_APP_INFO, SyncPorts, SyncReport, sync
-from syncintosh.system.config import load_config, save_config
-from syncintosh.system.deny_list import SystemDenyList
-from syncintosh.system.ledger import JsonLedgerStore
+from syncintosh.services.sync import NO_APP_INFO, SyncReport
+from syncintosh.system.config import save_config
 from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
-from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
 from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.vcs.git import GitCLITransport
@@ -199,33 +194,15 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine, *, store: FakeStore | None = None) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={},
-            catalog=CATALOG,
-            live=SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            apps=NO_APP_INFO,
-            source=SecureFileIdSource(),
-            config=load_config(machine.config_file),
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-            sessions=FakeStore(machine.home, machine.sizes) if store is None else store,
-            activity=machine.activity,
-        )
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        adapters={},
+        catalog=CATALOG,
+        apps=NO_APP_INFO,
+        sessions=FakeStore(machine.home, machine.sizes) if store is None else store,
+        activity=machine.activity,
     )
 
 

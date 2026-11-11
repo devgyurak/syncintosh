@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
 from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.errors import ContentParseError, PolicyMismatch, SyntaxInvalid
@@ -34,21 +34,16 @@ from syncintosh.core.presets import Preset, PresetFile, ValidatorName
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.core.tree import ANY_KEY, Tree
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.sync import DroppedLocal, SyncPorts, SyncReport, sync
+from syncintosh.services.sync import DroppedLocal, SyncReport
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
-from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
-from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
-from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.system.zsh_check import ZshSyntaxValidator
 from syncintosh.vcs.git import GitCLITransport
 
@@ -326,31 +321,13 @@ def _run(
     adapters: Mapping[FileFormat, ContentAdapter] | None = None,
     validators: Mapping[ValidatorName, SyntaxValidator] | None = None,
 ) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
-            catalog=catalog if catalog is not None else KEYED_CATALOG,
-            validators={"zsh": ZshSyntaxValidator()} if validators is None else validators,
-            live=SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            source=SecureFileIdSource(),
-            config=load_config(machine.config_file),
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-        ),
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
+        catalog=catalog if catalog is not None else KEYED_CATALOG,
+        validators={"zsh": ZshSyntaxValidator()} if validators is None else validators,
         adopt=adopt,
     )
 

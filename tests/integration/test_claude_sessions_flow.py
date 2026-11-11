@@ -19,32 +19,27 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.agent_projects import AgentLayout, AgentProject, claude_project_dir_name
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH
 from syncintosh.core.sessions import IDLE_SECONDS
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.claude_memory import CLAUDE_PROJECTS
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import NO_APP_INFO, SyncPorts, SyncReport, sync
+from syncintosh.services.sync import NO_APP_INFO, SyncReport
 from syncintosh.system.agent_project_index import SystemAgentProjectIndex
 from syncintosh.system.claude_sessions import ClaudeSessionActivity, ClaudeSessionStore
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
-from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
-from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
-from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -146,45 +141,28 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
     config = load_config(machine.config_file)
     home = str(machine.home)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={},
-            catalog=CATALOG,
-            live=SystemLiveFiles(),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            apps=NO_APP_INFO,
-            source=SecureFileIdSource(),
-            config=config,
-            home=home,
-            branch=active.branch() or BRANCH,
-            agent_projects=SystemAgentProjectIndex(home, SystemDenyList(), {}),
-            sessions=ClaudeSessionStore(
-                home,
-                config.agent_projects,
-                SystemAgentProjectIndex(home, SystemDenyList(), {}),
-                SystemDenyList(),
-                CATALOG,
-                local_version=lambda: machine.version,
-            ),
-            activity=ClaudeSessionActivity(
-                home, alive=lambda pid: pid in machine.alive, started=lambda pid: "Mon Nov  9 10:00:00 2026"
-            ),
-        )
+    return run_sync(
+        Path(home),
+        machine.store,
+        codec=machine.codec,
+        config=config,
+        adapters={},
+        catalog=CATALOG,
+        apps=NO_APP_INFO,
+        agent_projects=SystemAgentProjectIndex(home, SystemDenyList(), {}),
+        sessions=ClaudeSessionStore(
+            home,
+            config.agent_projects,
+            SystemAgentProjectIndex(home, SystemDenyList(), {}),
+            SystemDenyList(),
+            CATALOG,
+            local_version=lambda: machine.version,
+        ),
+        activity=ClaudeSessionActivity(
+            home, alive=lambda pid: pid in machine.alive, started=lambda pid: "Mon Nov  9 10:00:00 2026"
+        ),
     )
 
 

@@ -332,23 +332,17 @@ def daemon_uninstall() -> None:
 @app.command()
 def doctor() -> None:
     """Check that this machine's install can actually sync. Exits 1 when a check fails."""
-    from syncintosh.presets import BuiltinCatalog, vscode
     from syncintosh.services.profile_paths import (
         agent_project_summary,
         config_dir_summary,
         open_live_paths,
         profile_summary,
     )
-    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
-    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
     from syncintosh.system.daemon import entry_point
-    from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_document_skips
     from syncintosh.system.lock import FileLock
     from syncintosh.system.paths import MachinePaths
     from syncintosh.system.pending import DirectoryPendingStore
-    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.vcs.git import GitCLITransport
 
     paths = MachinePaths.default()
@@ -356,14 +350,9 @@ def doctor() -> None:
         config = load_config(paths.config_file)
         transport = GitCLITransport(paths.repo_dir)
         daemon = _launchd_daemon(paths.home)
-        index = SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles)
+        reads = wiring.machine_reads(paths)
         live_paths = open_live_paths(
-            config,
-            BuiltinCatalog.default(),
-            index,
-            ProductInfoConfigDir(home=paths.home),
-            SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-            open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
+            config, reads.catalog, reads.profiles, reads.config_dirs, reads.agent_projects, reads.documents
         )
         summaries = tuple(
             row
@@ -404,15 +393,8 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     adds a unified diff of the plaintext, which is the explicit opt-in to see the settings.
     """
     from syncintosh.crypto.cipher import EnvelopeCipher
-    from syncintosh.presets import BuiltinCatalog, vscode
-    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
-    from syncintosh.system.app_config_dir import ProductInfoConfigDir
     from syncintosh.system.config import load_config
-    from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_document_skips, open_live_files
-    from syncintosh.system.live_files import SystemLiveFiles
     from syncintosh.system.paths import MachinePaths
-    from syncintosh.system.profile_index import SystemProfileIndex
     from syncintosh.vcs.git import GitCLITransport
 
     paths = MachinePaths.default()
@@ -421,21 +403,22 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
         transport = GitCLITransport(paths.repo_dir)
         # Only the read-only ports: no scanner, so a `diff` on a fresh machine does not materialize
         # the scan allowlist (`load_scan_allow` writes one when it is absent), and no lock.
+        reads = wiring.machine_reads(paths)
         report = diff_repo_service(
             transport=transport,
             cipher=EnvelopeCipher(wiring.key_store(config.remote)),
-            live=open_live_files(SystemLiveFiles(), str(paths.home), BuiltinCatalog.default().documents()),
+            live=reads.live,
             config=config,
             home=str(paths.home),
-            deny=SystemDenyList(),
+            deny=reads.deny,
             branch=transport.branch() or wiring.BRANCH,
-            catalog=BuiltinCatalog.default(),
-            adapters=wiring.adapters(),
-            validators=wiring.validators(),
-            profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
-            config_dirs=ProductInfoConfigDir(home=paths.home),
-            agent_projects=SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-            documents=open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
+            catalog=reads.catalog,
+            adapters=reads.adapters,
+            validators=reads.validators,
+            profiles=reads.profiles,
+            config_dirs=reads.config_dirs,
+            agent_projects=reads.agent_projects,
+            documents=reads.documents,
         )
     except DomainError as exc:
         _fail(exc)

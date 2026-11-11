@@ -59,31 +59,16 @@ from syncintosh.core.ports import (
     SyntaxValidator,
     WhenTag,
 )
-from syncintosh.core.presets import EMPTY_CATALOG, PresetFile, ValidatorName
+from syncintosh.core.presets import PresetFile, ValidatorName
 from syncintosh.core.projection import Carry, DroppedItem, project_text, restore_with_drops
 from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path
 from syncintosh.core.sessions import SessionListing, SessionSkipped
 from syncintosh.core.tree import KeyPath
-from syncintosh.services.keys import NO_ROTATION_MARKER
 from syncintosh.services.policy_gate import PolicyView
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
 # looping forever (``docs/design/01-sync-model.md`` step 13).
 MAX_PUSH_ATTEMPTS = 4
-
-
-# The adapter map a caller with no structural adapters passes: an immutable empty mapping, so the
-# default argument cannot be mutated (``AGENTS.md`` §4).
-NO_ADAPTERS: Mapping[FileFormat, ContentAdapter] = MappingProxyType({})
-
-
-# The validator map a caller with no validators passes, for the same reason.
-NO_VALIDATORS: Mapping[ValidatorName, SyntaxValidator] = MappingProxyType({})
-
-
-# The catalog a caller with no built-in presets passes: the core null object, so the projection
-# is the identity and `knows` makes no claim.
-NO_CATALOG: PresetCatalog = EMPTY_CATALOG
 
 
 class _UnknownApps:
@@ -1086,21 +1071,21 @@ class SyncPorts:
         config: SyncConfig,
         home: str,
         branch: str,
-        adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
-        catalog: PresetCatalog = NO_CATALOG,
-        validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
-        rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
-        apps: AppDetector = NO_APP_INFO,
-        running: RunningApps = NO_RUNNING_INFO,
-        config_dirs: AppConfigDir | None = None,
-        agent_projects: AgentProjectIndex | None = None,
-        documents: DocumentSkips | None = None,
-        sessions: SessionStore = NO_SESSION_STORE,
-        activity: SessionActivity = NO_SESSION_ACTIVITY,
-        profiles: ProfileIndex | None = None,
-        when_tag: WhenTag | None = None,
+        adapters: Mapping[FileFormat, ContentAdapter],
+        catalog: PresetCatalog,
+        validators: Mapping[ValidatorName, SyntaxValidator],
+        rotation_marker: RotationMarkerStore,
+        apps: AppDetector,
+        running: RunningApps,
+        config_dirs: AppConfigDir | None,
+        agent_projects: AgentProjectIndex | None,
+        documents: DocumentSkips | None,
+        sessions: SessionStore,
+        activity: SessionActivity,
+        profiles: ProfileIndex | None,
+        when_tag: WhenTag | None,
     ) -> SyncPorts:
-        """Build the ports; the optional ones default to their null object while a test passes fewer."""
+        """Build the ports. None has a default, so a port a caller forgot is an error, not a silent null object."""
         return cls(
             transport=transport,
             files=files,

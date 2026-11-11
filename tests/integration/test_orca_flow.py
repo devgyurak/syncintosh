@@ -19,33 +19,28 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _harness import run_sync
 
 from syncintosh.adapters.jsonc import JsoncAdapter
-from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
 from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.repo import COMMITMENTS_PATH, MANIFEST_PATH, object_path
 from syncintosh.crypto.cipher import EnvelopeCipher
-from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.orca import BUNDLE_ID, DATABASE, EXCLUDED, SYNCED, VIEW
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import NO_APP_INFO, SyncPorts, SyncReport, sync
+from syncintosh.services.sync import NO_APP_INFO, SyncReport
 from syncintosh.system.config import load_config, save_config
-from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.document_files import open_live_files
 from syncintosh.system.json_check import JsonSyntaxValidator
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
-from syncintosh.system.lock import FileLock
 from syncintosh.system.orca_daemon import DAEMON_DIRECTORY, OrcaDaemonRunningApps
-from syncintosh.system.pending import DirectoryPendingStore
 from syncintosh.system.repo_files import FileRepo
-from syncintosh.system.secret_scan import PatternSecretScanner
 from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
@@ -158,34 +153,18 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine, *, running: Any = None, apps: Any = NO_APP_INFO) -> SyncReport:
-    active = GitCLITransport(machine.repo)
-    cipher = EnvelopeCipher(machine.store)
     config: SyncConfig = load_config(machine.config_file)
-    return sync(
-        SyncPorts.create(
-            transport=active,
-            files=FileRepo(machine.repo),
-            cipher=cipher,
-            scanner=PatternSecretScanner(),
-            store=machine.store,
-            codec=machine.codec,
-            wrapper=cipher,
-            driver=TextMergeDriver(),
-            adapters={"jsonc": JsoncAdapter()},
-            validators={"json": JsonSyntaxValidator()},
-            catalog=CATALOG,
-            live=open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents()),
-            ledger_store=JsonLedgerStore(machine.ledger),
-            pending_store=DirectoryPendingStore(machine.pending),
-            lock=FileLock(machine.lock, timeout_seconds=5),
-            deny=SystemDenyList(),
-            source=SecureFileIdSource(),
-            config=config,
-            home=str(machine.home),
-            branch=active.branch() or BRANCH,
-            apps=apps,
-            running=FakeRunning(False) if running is None else running,
-        )
+    return run_sync(
+        machine.home,
+        machine.store,
+        codec=machine.codec,
+        config=config,
+        adapters={"jsonc": JsoncAdapter()},
+        validators={"json": JsonSyntaxValidator()},
+        catalog=CATALOG,
+        live=open_live_files(SystemLiveFiles(), str(machine.home), CATALOG.documents()),
+        apps=apps,
+        running=FakeRunning(False) if running is None else running,
     )
 
 
