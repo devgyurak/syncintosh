@@ -2320,6 +2320,22 @@ def test_sync_drops_an_unpublished_hygiene_rotation_the_remote_diverged_from(tmp
     assert loads_commitments(GitCLITransport(a.repo).read_blob("HEAD", COMMITMENTS_PATH) or b"").keys() == {1}
 
 
+def test_a_conflict_after_dropping_an_unpublished_rotation_still_reports_the_drop(tmp_path, memory_key_store) -> None:
+    # given — A's rotation never reached the remote, and A and B edited the same line
+    a, b, _ = _pair(tmp_path, memory_key_store)
+    _strand_a_rotation(a, out_of_band=False)
+    _publish_on_generation_one(b, b"one\nFROM B\nthree\n")
+    _write_live(a, b"one\nFROM A\nthree\n")
+
+    # when
+    report = _run(a)
+
+    # then — the cycle stops on the conflict, and the user is still told the key rotation did not happen
+    assert len(report.conflicts) == 1
+    assert any("generation 2" in note and "key rotate --hygiene" in note for note in report.notes)
+    assert a.store.generations() == (1,)
+
+
 def test_sync_recovers_when_the_remote_never_moved_and_still_publishes_the_edit(tmp_path, memory_key_store) -> None:
     # given — the rotation push was cut and nothing else happened, so the local branch is merely ahead of the
     # remote; A edits a file and the daemon's sync collects it on top of the unpublished rotation
