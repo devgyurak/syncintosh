@@ -11,7 +11,9 @@ from syncintosh.core.models import Conflict, TextMerge, TreeMerge
 from syncintosh.core.tree import ABSENT, Array, EmptyObject, Object, Scalar, Tree
 from syncintosh.services.diff import FileDiff
 from syncintosh.services.merge_service import RenderedMerge
-from syncintosh.services.sync import Resolution, _Collect, _Projected, _Settled
+from syncintosh.services.sync import Resolution
+from syncintosh.services.sync._shared import _Collect, _Projected
+from syncintosh.services.sync.merge import _Settled
 from syncintosh.system.scan_allow import ScanAllowEntry
 
 SECRET = "SECRET-PLAINTEXT-XYZ"

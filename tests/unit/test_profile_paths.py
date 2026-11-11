@@ -278,7 +278,7 @@ def test_a_diff_does_not_read_through_a_symlinked_file(tmp_path: Path) -> None:
     # given — a tracked file that is a symlink; the diff must report it instead of reading the target
     from syncintosh.core.manifest import ManifestRecord
     from syncintosh.services.diff import _diff_record
-    from syncintosh.services.sync import _Presets
+    from syncintosh.services.sync._shared import _Presets
     from syncintosh.system.deny_list import SystemDenyList
     from syncintosh.system.live_files import SystemLiveFiles
 

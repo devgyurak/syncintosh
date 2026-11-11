@@ -8,10 +8,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from syncintosh.core.content_merge import ContentMerge
-from syncintosh.services.sync import _MAX_SETTLE_ROUNDS, _settle_content, _Settled
+from syncintosh.services.sync.merge import _MAX_SETTLE_ROUNDS, _settle_content, _Settled
 
-# `syncintosh.services.sync` is also a function name in the package, so the module is taken from `sys.modules`.
-_SYNC = sys.modules["syncintosh.services.sync"]
+# `syncintosh.services.sync` is also a function name in the package, so the `merge` module is taken from `sys.modules`.
+_SYNC = sys.modules["syncintosh.services.sync.merge"]
 
 
 def _chain_merge(chain: list[str]) -> Any:

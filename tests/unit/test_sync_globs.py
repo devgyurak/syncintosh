@@ -22,16 +22,11 @@ from syncintosh.crypto.file_ids import SecureFileIdSource
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths
-from syncintosh.services.sync import (
-    NO_APP_INFO,
-    Backup,
-    _apply,
-    _Collect,
-    _collect,
-    _expand_globs,
-    _Presets,
-    _settle_ledger,
-)
+from syncintosh.services.sync import NO_APP_INFO, Backup
+from syncintosh.services.sync._shared import _Collect, _Presets
+from syncintosh.services.sync.apply import _apply
+from syncintosh.services.sync.collect import _collect, _expand_globs
+from syncintosh.services.sync.ledger import _settle_ledger
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.live_files import SystemLiveFiles
 

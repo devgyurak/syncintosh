@@ -14,7 +14,7 @@ import pytest
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.ignore import IGNORED_SETTINGS_KEY, NO_IGNORES, IgnoreSpec
 from syncintosh.presets import BuiltinCatalog, vscode
-from syncintosh.services.sync import _IGNORE_LIST_UNREADABLE, _read_ignores
+from syncintosh.services.sync._shared import _IGNORE_LIST_UNREADABLE, _read_ignores
 from syncintosh.system.live_files import SystemLiveFiles
 
 
