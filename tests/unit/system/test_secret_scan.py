@@ -1222,6 +1222,8 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         (b"aws_secret_access_key\n" + AWS_KEY_VALUE + b"\n", "toml"),
         (b"SecretAccessKey:\n" + b"anotherReallyLongCamelCaseSettingNameHereXyz: 1\n", "yaml"),
         (b'{"description": "reads aws_secret_access_key from/the/vault/configured/for/this/profile"}', "jsonc"),
+        # Known limit, pinned like the block scalar: indentation cannot tell a wrapped value from a sibling key.
+        (b"aws_secret_access_key:\n  " + AWS_KEY_VALUE + b"\n", "yaml"),
     ],
     ids=[
         "hash-under-other-key",
@@ -1235,6 +1237,7 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         "next-line",
         "next-key-line",
         "path-in-prose",
+        "yaml-indented-next-line",
     ],
 )
 def test_a_value_that_is_not_an_aws_secret_access_key_passes(payload: bytes, fmt: str) -> None:

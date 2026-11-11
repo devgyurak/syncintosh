@@ -56,12 +56,13 @@ _AWS_KEY = (
 #
 # * `:`/`=`/`:=` and the value on the same line;
 # * `:`/`=`/`:=` and a line break, **only when a quote opens the value** (a JSON value wrapped onto the
-#   next line). An unquoted value on the next line is not read: that line is as likely the next key
-#   (`SecretAccessKey:` / `anotherLongSettingName: 1`) as a value;
+#   next line). An unquoted value on the next line is not read, indented or not: in a nested mapping a
+#   sibling key is indented too, so that line is as likely the next key (`SecretAccessKey:` /
+#   `anotherLongSettingName: 1`) as a value. A known limit, pinned by a test like the YAML block scalar;
 # * a bare run of blanks, which is how a command line spells it (`aws configure set aws_secret_access_key
 #   <key>`, `launchctl setenv NAME <key>`). It stays on one line, and the value must hold a digit within
-#   its first 39 characters: a real key is random base64 and nearly always does, while a path or a word in
-#   a sentence (`reads aws_secret_access_key from/the/vault/…`) usually does not.
+#   its first 39 characters: a random base64 key lacks one about 0.13% of the time ((54/64)^39), while a
+#   path or a word in a sentence (`reads aws_secret_access_key from/the/vault/…`) usually does not.
 _AWS_SEPARATOR = (
     rb"\\?[\"']?(?:[ \t]*+(?::=|[:=])[ \t]*+|[ \t]*+(?::=|[:=])\s*+(?=\\?[\"'])"
     rb"|[ \t]++(?=\\?[\"']?[A-Za-z0-9/+=]{0,39}[0-9]))\\?[\"']?"
