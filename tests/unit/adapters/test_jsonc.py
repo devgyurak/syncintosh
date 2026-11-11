@@ -12,11 +12,11 @@ import json
 from pathlib import Path
 
 import pytest
-from hypothesis import example, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters import jsonc
-from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, JsoncAdapter
+from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, VALUE_WITH_NOTE_REFUSED, JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import ContentParseError, RenderRefused
@@ -370,10 +370,10 @@ def test_a_whitespace_only_template_gains_a_valid_object() -> None:
     [
         # The closing brace shares the last member's line, so the whole object is rewritten.
         ('{\n  // theme\n  "theme": "dark" }', '{\n  "theme": "light",\n  "b": 1\n}'),
-        # Two members share a line.
+        # Two members share a line and a key is added: the object cannot be spliced member by member.
         (
             '{\n  "[python]": { // fmt\n    "editor.tabSize": 4, "editor.insertSpaces": true }\n}\n',
-            '{\n  "[python]": { // fmt\n    "editor.tabSize": 8, "editor.insertSpaces": true }\n}\n',
+            '{\n  "[python]": { // fmt\n    "editor.tabSize": 4, "editor.insertSpaces": true, "x": 1 }\n}\n',
         ),
         # A comment-only document is the empty object, but rewriting it would drop the comment.
         ("// nothing yet\n", '{\n  "b": 1\n}'),
@@ -532,6 +532,59 @@ def test_a_single_line_object_with_a_comment_cannot_be_spliced() -> None:
 
 
 @pytest.mark.parametrize(
+    ("template", "tree", "expected"),
+    [
+        # A multi-line array under a first member on the `{` line: only the element changes.
+        ('{"r": [\n    80,\n    100\n]}', {"r": [90, 100]}, '{"r": [\n    90,\n    100\n]}'),
+        # An untouched sibling array keeps its layout when another member changes.
+        (
+            '{"r": [\n    80,\n    100\n], "s": 1}',
+            {"r": [80, 100], "s": 2},
+            '{"r": [\n    80,\n    100\n], "s": 2}',
+        ),
+        ('{"a": 1,\n "b": 2}', {"a": 1, "b": 3}, '{"a": 1,\n "b": 3}'),
+        # The comment that used to refuse the render stays where it was.
+        ('{"a": 1, // note\n "b": 2}', {"a": 1, "b": 3}, '{"a": 1, // note\n "b": 3}'),
+        ('{"o": {\n    "x": 1,\n    "y": 2\n}}', {"o": {"x": 1, "y": 3}}, '{"o": {\n    "x": 1,\n    "y": 3\n}}'),
+        # A comment inside a one-line object.
+        ('{ "a": 1, /* note */ "b": 2 }', {"a": 1, "b": 3}, '{ "a": 1, /* note */ "b": 3 }'),
+        # Two members share a line under a comment.
+        (
+            '{\n  "[python]": { // fmt\n    "editor.tabSize": 4, "editor.insertSpaces": true }\n}\n',
+            {"[python]": {"editor.tabSize": 8, "editor.insertSpaces": True}},
+            '{\n  "[python]": { // fmt\n    "editor.tabSize": 8, "editor.insertSpaces": true }\n}\n',
+        ),
+    ],
+)
+def test_a_value_change_in_a_mixed_layout_object_is_spliced_in_place(template, tree, expected) -> None:
+    # given — the keys are the template's own, so nothing but a value below them changes
+    adapter = JsoncAdapter()
+
+    # when
+    rendered = adapter.render(tree_from_value(tree), template)
+
+    # then — the layout and every comment survive byte for byte
+    assert rendered == expected
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [{"b": 2, "a": 1}, {"a": 1, "b": 3}, {"b": 3, "a": 1}],
+)
+def test_a_mixed_layout_object_keeps_its_own_key_order(tree) -> None:
+    # given — the tree lists the keys in another order than the template
+    adapter = JsoncAdapter()
+    template = '{"a": 1, // note\n "b": 2}'
+
+    # when
+    rendered = adapter.render(tree_from_value(tree), template)
+
+    # then — the file's order stays, as it does for a member-per-line object, and the note is kept
+    assert list(adapter.parse(rendered)) == [("a",), ("b",)]
+    assert "// note" in rendered
+
+
+@pytest.mark.parametrize(
     ("template", "repo", "worked"),
     [
         ('{"a": 1}', {"a": 1}, {"a": 1, "noise": 5}),
@@ -680,9 +733,15 @@ _COMMENT_LISTS_AT_LEAST_ONE = st.lists(
 # A comma alone on its line has no member line to leave with, so the renderer rewrites such an object whole
 # — which refuses when a comment is inside it. That refusal is the right answer, so the two axes are never
 # drawn together: a commented document keeps its commas at the line's end, and an own-line comma has none.
+# `hug` is the mixed layout of issue #64: the first member on the `{` line and the `}` on the last member's line.
+_HUGS = st.sampled_from(["none", "open", "close", "both"])
 _LAYOUT = st.one_of(
-    st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comma": st.just("end"), "comments": _COMMENT_LISTS}),
-    st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comma": st.just("own-line"), "comments": st.just([])}),
+    st.fixed_dictionaries(
+        {**_LAYOUT_FIELDS_INDENTED, "comma": st.just("end"), "comments": _COMMENT_LISTS, "hug": _HUGS}
+    ),
+    st.fixed_dictionaries(
+        {**_LAYOUT_FIELDS_INDENTED, "comma": st.just("own-line"), "comments": st.just([]), "hug": _HUGS}
+    ),
 )
 
 # Where a document has a trailing comma, as the paths of the containers that end in one. The parser
@@ -749,7 +808,7 @@ def _comment_in_first_empty_object(value, text: str, comment_text: str) -> str:
     return text.replace("{}", body, 1)
 
 
-def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comments, comma="end") -> str:
+def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comments, comma="end", hug="none") -> str:
     """One settings file, laid out the way this combination describes.
 
     Comments go where a member edit cannot need to rewrite one: between the *root* members, found
@@ -787,7 +846,48 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
         # After the comments, which find the root's `,\n<indent>"` separators; and only for an indented
         # document, because with no indent a nested member's separator looks like a root one.
         text = text.replace(root_comma, "\n" + unit + "," + "\n" + unit + '"')
+    if isinstance(value, dict) and value and "\n" in text:
+        text = _hugged(text, unit, hug)
     return text if newline == "\n" else text.replace("\n", newline)
+
+
+def _hugged(text: str, unit: str, hug: str) -> str:
+    """The root object with its first member on the `{` line and/or its `}` on the last member's line.
+
+    A `//` comment runs to the end of its line, so a layout that would put a member or the brace after one is
+    left as it was: `{ // note` keeps its newline, and a `}` after a comment line stays on its own line. A
+    block comment is a closed span, so a member or the brace may follow it. Anything else would make the
+    template a different document than the one the property assumes.
+    """
+    opening, _, rest = text.partition("\n")
+    if hug in ("open", "both") and (opening == "{" or (opening.startswith("{ /*") and opening.endswith("*/"))):
+        text = opening + " " + rest.removeprefix(unit)
+    body, found, tail = text.rpartition("\n}")
+    if hug in ("close", "both") and found and not tail and not body.rpartition("\n")[2].lstrip().startswith("//"):
+        text = body + " }"
+    return text
+
+
+def _render_or_known_limit(adapter, tree, template, *, value, how, layout):
+    """The render, or `None` for the one refusal the design documents (`02-base-and-merge.md`, issue #64).
+
+    A key added to or removed from a root whose first member shares the `{` line, or whose `}` shares the last
+    member's line, is rewritten whole, and a comment inside it is refused rather than dropped. Any other refusal
+    still raises: it is a bug, and a tolerated one would hide the very failures the property exists to catch.
+
+    `hugged` compares the template with the same layout un-hugged, because `_hugged` leaves a layout alone when
+    a `//` comment would swallow the member or the brace: the axis asking for a hug is not the template having
+    one. `LONE_COMMA_REFUSED` is not tolerated: a comma on its own line only comes without comments, and a
+    rewrite with no comment in it is never refused.
+    """
+    hugged = template != _fuzz_template(value, **{**layout, "hug": "none"})
+    keys_change = isinstance(value, dict) and set(_mutated(value, how)) != set(value)
+    try:
+        return adapter.render(tree, template)
+    except RenderRefused as refused:
+        if hugged and keys_change and refused.reason == VALUE_WITH_NOTE_REFUSED:
+            return None
+        raise
 
 
 @settings(max_examples=500, deadline=None)
@@ -802,6 +902,7 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
         "pad": False,
         "comma": "end",
         "comments": [("in-empty-object", "// hides **/*.map below")],
+        "hug": "none",
     },
 )
 @given(value=_FUZZ_VALUES, how=_MUTATIONS, layout=_LAYOUT)
@@ -818,8 +919,10 @@ def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout)
 
     # when — nothing here may refuse. The comments sit between root members, where a member edit
     # never needs to rewrite one, so a refusal is a bug and not a verdict — and a tolerated one would
-    # hide the very failures this property exists to catch.
-    rendered = adapter.render(tree, template)
+    # hide the very failures this property exists to catch. The one exception is the documented known
+    # limit: a key added or removed in a hugged, commented root, which the helper turns into `None`.
+    rendered = _render_or_known_limit(adapter, tree, template, value=value, how=how, layout=layout)
+    assume(rendered is not None)
 
     # then — the render must be the tree it was handed, or the merge publishes what no one decided,
     # and it must not invent layout the file did not have: a trailing comma may stay where the
@@ -1275,3 +1378,26 @@ def test_a_crlf_file_whose_lines_end_in_comments_is_still_crlf() -> None:
     # inserted line matches the lines around it
     assert rendered == '{\r\n  "a": 1, // note\r\n  "b": 2, // note\r\n  "c": 3\r\n}\r\n'
     assert adapter.parse(rendered) == tree
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    values=st.lists(st.integers(0, 9), min_size=2, max_size=5),
+    changed=st.lists(st.integers(10, 19), min_size=5, max_size=5),
+    hug=st.sampled_from(["{", "{ /* note */"]),
+)
+def test_a_value_only_change_keeps_every_line_and_comment(values, changed, hug) -> None:
+    # given — the first member shares the `{` line, the rest are one per line
+    adapter = JsoncAdapter()
+    keys = [f"k{index}" for index in range(len(values))]
+    lines = [f'"{key}": {value}' for key, value in zip(keys, values, strict=True)]
+    template = hug + " " + (",\n  ".join(lines)) + "\n}"
+    tree = tree_from_value(dict(zip(keys, changed, strict=False)))
+
+    # when — every value is replaced, no key is added or removed
+    rendered = adapter.render(tree, template)
+
+    # then — nothing but the values moved: same number of lines, same comment, same tree
+    assert adapter.parse(rendered) == tree
+    assert rendered.count("\n") == template.count("\n")
+    assert ("/* note */" in rendered) == ("/* note */" in template)

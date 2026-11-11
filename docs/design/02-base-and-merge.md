@@ -264,9 +264,40 @@ decide about survives:
     When a comment is inside the object the render is refused with its own reason (`LONE_COMMA_REFUSED`)
     rather than dropping the comment (a conflict, not a broken file). Any other edit — a nested change, a
     value change, an add at the end or the head — is made in place and keeps the layout and the notes.
-  - A comma at the **start of its line** (`, "b": 2`) is not spliced at all: every edit of that object
-    rewrites it whole, and a comment inside it is refused with the general `VALUE_WITH_NOTE_REFUSED`.
-    This predates issue #29 and is unchanged.
+  - A comma at the **start of its line** (`, "b": 2`) is not spliced when a member is added or removed:
+    that edit rewrites the object whole, and a comment inside it is refused with the general
+    `VALUE_WITH_NOTE_REFUSED`. This predates issue #29. An edit that only changes a value below it is made
+    in place (see the next item).
+- **Known limit: an object in a mixed layout is edited in place only while its keys stay the same.** A
+  first member on the `{` line, a closing brace after the last member, two members on one line, or a
+  comment inside a one-line object is none of the layouts that are spliced member by member. When the tree
+  has exactly the template's keys, each member's value is edited in its own span and the keys, separators,
+  comments, and line breaks are untouched (issue #64), in the template's key order. Adding or removing a
+  key in such an object still rewrites it whole, and is refused when a comment is inside it. Pinned by
+  `test_a_value_change_in_a_mixed_layout_object_is_spliced_in_place` and
+  `test_a_rewrite_that_would_drop_a_comment_is_refused`.
+
+  This also changes the **sealed** bytes, not only the rendered ones. Where a strip or a carry touches a
+  value below such an object, the projection is now spliced instead of rewritten whole
+  (`test_project_text_keeps_a_mixed_layout_when_it_strips_a_nested_key`), so the stored object for that
+  file differs from the one an older build made. **This is a deliberate exception to the rule that a change in
+  what the code projects raises `policy_epoch`** (`03-manifest.md`, Policy stamp; `AGENTS.md` §3.2): the epoch
+  is not raised and `POLICY_HISTORY` is not appended. The tree is the same, the shape is rare (a first member
+  on the `{` line, or a `}` after the last member), and the cost is bounded to one file. Because the stamp is
+  unchanged, an older build reads it as a match: **no gate stops it**, and the "newer stops the cycle" path
+  does not apply. What was observed:
+  - On the first sync after an upgrade, an unchanged live file of this shape projects to different bytes than
+    the apply ledger holds (the ledger digest is of the projection), so it reads as a local change and is
+    sealed once more with the same tree. The next sync is unchanged.
+  - A machine that has not upgraded refuses to apply the new object for that one file: its restore does not
+    reproduce the object byte for byte, so it stops at the round-trip check (`ProjectionError`). The other
+    files are unaffected. The refusal is an `unprojectable` entry, which is blocking, so `SyncReport.failed`
+    is true and `syncintosh sync` exits 1 on **every** cycle until that machine is upgraded.
+  - That machine does not seal its own bytes back. With the file untouched its projection still equals the
+    ledger entry, so `classify` returns `pending-apply` (`core/ledger.py`), which collects nothing. It seals
+    only when the file is edited there (`local-change`). The upgraded build restores an object an older build
+    made, so the layout follows whichever side wrote last. Pinned by
+    `test_an_older_machine_with_an_unchanged_file_refuses_a_resealed_object_and_does_not_seal_again`.
 
   A member-less object that carries a comment is not part of
   this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block

@@ -176,6 +176,47 @@ def test_project_text_leaves_the_empty_object_when_every_key_is_stripped() -> No
     assert ADAPTER.parse(result).to_value() == {}
 
 
+_MIXED_LAYOUT = [
+    # The first member shares the `{` line: only the stripped member's line goes.
+    (
+        '{"a": 1,\n "x": {\n    "noise": 1,\n    "keep": 2\n }\n}\n',
+        '{"a": 1,\n "x": {\n    "keep": 2\n }\n}\n',
+        '{"a": 1,\n "x": {\n    "noise": 9,\n    "keep": 2\n }\n}\n',
+    ),
+    # The same with a comment after the first member, which used to be refused.
+    (
+        '{"a": 1, // c\n "x": {\n    "noise": 1,\n    "keep": 2\n }\n}\n',
+        '{"a": 1, // c\n "x": {\n    "keep": 2\n }\n}\n',
+        '{"a": 1, // c\n "x": {\n    "noise": 9,\n    "keep": 2\n }\n}\n',
+    ),
+]
+
+
+@pytest.mark.parametrize(("live", "projected", "_restored"), _MIXED_LAYOUT)
+def test_project_text_keeps_a_mixed_layout_when_it_strips_a_nested_key(live, projected, _restored) -> None:
+    # given
+    policy = _policy(noise={("x", "noise")})
+
+    # when
+    result = _project(live, policy)
+
+    # then — the sealed bytes keep the layout and the comment; a stored object made before this was whole-rewritten
+    assert result == projected
+
+
+@pytest.mark.parametrize(("live", "projected", "restored"), _MIXED_LAYOUT)
+def test_restore_text_puts_a_nested_noise_value_back_into_a_mixed_layout(live, projected, restored) -> None:
+    # given — another machine's file: the same layout, a different value for the noise key
+    policy = _policy(noise={("x", "noise")})
+    other = live.replace('"noise": 1', '"noise": 9')
+
+    # when
+    result = restore_text(ADAPTER, projected, other, policy)
+
+    # then — the object is the published one with this machine's value re-attached, layout and comment intact
+    assert result == restored
+
+
 def test_project_text_refuses_a_file_it_cannot_parse() -> None:
     # when & then — fail-closed: the raw file is never sealed as a fallback
     with pytest.raises(ProjectionError):

@@ -519,6 +519,34 @@ def test_a_key_added_to_a_commented_empty_object_converges_beside_a_lone_comma(t
     assert second.unchanged is True
 
 
+def test_a_mixed_layout_settings_file_with_a_comment_merges_without_a_conflict(tmp_path, memory_key_store) -> None:
+    # given — two machines in sync on a file whose first member shares the `{` line, with a note after it, and
+    # a `[python]` whose two members share a line under a comment: layouts that used to be rewritten whole, or
+    # refused for the comment in them, so the merge stayed a conflict
+    original = (
+        b'{"editor.fontSize": 13, // keep in step\n'
+        b'  "editor.wordWrap": "off",\n'
+        b'  "[python]": { // fmt\n'
+        b'    "editor.tabSize": 4, "editor.insertSpaces": true }\n}\n'
+    )
+    a, b = _pair(tmp_path, memory_key_store, original)
+
+    # when — A changes the font size, B changes `[python]` meanwhile, and B syncs twice
+    _write(a, SETTINGS, original.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15'))
+    published = _run(a)
+    _write(b, SETTINGS, original.replace(b'"editor.tabSize": 4', b'"editor.tabSize": 8'))
+    first = _run(b)
+    second = _run(b)
+
+    # then — B holds both changes in its own layout and notes, and there is nothing left to resolve
+    expected = original.replace(b'"editor.fontSize": 13', b'"editor.fontSize": 15').replace(
+        b'"editor.tabSize": 4', b'"editor.tabSize": 8'
+    )
+    assert [published.has_conflicts, first.has_conflicts, second.has_conflicts] == [False, False, False]
+    assert _read(b, SETTINGS) == expected
+    assert second.unchanged is True
+
+
 def test_a_machine_without_vscode_installed_defers(tmp_path, memory_key_store) -> None:
     # given — A published, and B has no VS Code directory at all
     a, _ = _pair(tmp_path, memory_key_store, _fixture("vscode.jsonc"))
