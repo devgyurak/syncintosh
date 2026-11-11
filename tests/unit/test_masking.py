@@ -332,7 +332,7 @@ def test_a_name_that_only_starts_with_a_keyword_is_left_alone(text: str) -> None
     assert masked.text == text
 
 
-def test_a_name_part_after_a_keyword_does_not_unmask_a_neighbouring_key() -> None:
+def test_overlapping_rules_leave_the_aws_key_name_visible() -> None:
     # given — both rules fire on the same line: the keyed rule and the AWS rule overlap on the value only
     text = "AWS_SECRET_ACCESS_KEY=" + AWS_VALUE
 
@@ -352,3 +352,55 @@ def test_an_aws_value_on_a_yaml_block_line_is_a_known_gap() -> None:
 
     # then
     assert AWS_VALUE in masked.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"editor.semanticTokenColorCustomizations": {"enabled": true}',
+        '"tokenColorCustomizations": [1, 2]',
+        '{"auth": {"enabled": true}}',
+    ],
+    ids=["object", "array", "auth-object"],
+)
+def test_an_object_or_array_under_a_credential_like_key_keeps_its_brackets(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then — the opening bracket is structure, not a value
+    assert masked.text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "tail"),
+    [
+        ("<key>SecretAccessKey</key><string>" + AWS_VALUE + "-tail9</string>", "-tail9"),
+        ("<SecretAccessKey>" + AWS_VALUE + "-tail9</SecretAccessKey>", "-tail9"),
+    ],
+    ids=["plist", "element"],
+)
+def test_the_tail_of_an_aws_value_past_the_base64_run_is_masked(text: str, tail: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert tail not in masked.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"SecretAccessKey":\n  "' + AWS_VALUE + '"}',
+        "aws configure set aws_secret_access_key " + AWS_VALUE,
+        "launchctl setenv AWS_SECRET_ACCESS_KEY " + AWS_VALUE,
+        "AWS_SECRET_ACCESS_KEY := " + AWS_VALUE,
+        "<SecretAccessKey>" + AWS_VALUE + "</SecretAccessKey>",
+    ],
+    ids=["wrapped", "cli-config", "launchctl", "make-assign", "element"],
+)
+def test_an_aws_secret_access_key_in_a_variant_spelling_is_masked(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert AWS_VALUE not in masked.text

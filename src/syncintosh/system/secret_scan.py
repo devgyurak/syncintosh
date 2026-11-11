@@ -52,16 +52,20 @@ _AWS_KEY = (
 )
 
 # Shell `=`, JSON `":`, an escaped `\":\"` (JSON inside a JSON string, a keybinding's `args.text`), TOML
-# ` = `, YAML `: `; a quote around the value is optional.
-_AWS_SEPARATOR = rb"\\?[\"']?[ \t]*+[:=][ \t]*+\\?[\"']?"
+# ` = `, YAML `: `, `:=`; a quote around the value is optional. A `:`/`=` may be followed by a line break
+# (a JSON value wrapped onto the next line). A bare run of blanks is a separator too, because that is how
+# a command line spells it (`aws configure set aws_secret_access_key <key>`, `launchctl setenv NAME <key>`);
+# it stays on one line, so a key name at the end of a line never pairs with the next line's text.
+_AWS_SEPARATOR = rb"\\?[\"']?(?:\s*+(?::=|[:=])\s*+|[ \t]++)\\?[\"']?"
 
 # At least 40, not exactly 40: a session token and the 64-hex secret of an AWS-compatible store are the
 # same credential and longer. The class has no `$`, `{` or `(`, so a reference (`$AWS_SECRET`,
 # `${KEY}`, `$(pass show …)`) — the recommended way to keep the key out of a dotfile — never matches,
 # and neither does a short placeholder (`test`, `minioadmin`) or a 39-character value. Possessive, and
 # anchored on the key name, so the match is linear. Only the value is the `secret` group: the masker
-# hides that span and leaves the key name for the model to read (issue #63).
-_AWS_VALUE = rb"(?P<secret>[A-Za-z0-9/+=]{40,}+)"
+# hides that span and leaves the key name for the model to read (issue #63). The group runs on to the end
+# of the token (`[^\s"'<>,;}\]\\]`), so a tail past the base64 run (`-tail`) is hidden with the rest.
+_AWS_VALUE = rb"(?P<secret>[A-Za-z0-9/+=]{40,}+[^\s\"'<>,;}\]\\]*+)"
 
 # `(label, pattern)` — a high-signal, low-false-positive set. This is a heuristic in front of the
 # real gate (CI + review), not a sandbox (``AGENTS.md`` §6); a missed secret is still refused by
@@ -297,6 +301,8 @@ STRUCTURED_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
             rb"<\s*(?i:key)\s*>\s*" + _AWS_KEY + rb"\s*<\s*/\s*(?i:key)\s*>\s*<\s*(?i:string)\s*>\s*" + _AWS_VALUE
         ),
     ),
+    # An element named for the key (`<SecretAccessKey>…</SecretAccessKey>`, the XML form of STS output).
+    (AWS_SECRET_LABEL, re.compile(rb"<\s*" + _AWS_KEY + rb"\s*>\s*" + _AWS_VALUE)),
 )
 
 # A shell file. Two spellings, because the shell decides what a `$` means by the quoting around it:

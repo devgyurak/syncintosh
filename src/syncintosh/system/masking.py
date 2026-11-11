@@ -55,7 +55,9 @@ _KEYED_VALUE: Final = re.compile(
     # not a keyword plus a part. `session_timeout` is masked too; a harmless over-mask beats a leaked key.
     rb"(?:[_-][A-Za-z0-9]+|[A-Z][a-z0-9]*){0,4}"
     rb"[\"']?\s*[:=]\s*"
-    rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n\"',;}\]]+)"
+    # An unquoted value cannot start with `{` or `[`: that is an object or array under the key (`"tokenColors": {`),
+    # whose structure the model needs, and whose members are masked on their own keys.
+    rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s{\[\r\n\"',;}\]][^\r\n\"',;}\]]*)"
 )
 
 

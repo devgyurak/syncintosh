@@ -1175,6 +1175,11 @@ AWS_KEY_OTHER = b"je7MtGbClwBF" + b"/2Zp9Utk/h3yCo8nvbEXAMPLEKEY"
         (b"export MY_AWS_SECRET_ACCESS_KEY='" + AWS_KEY_VALUE + b"'\n", "text"),
         (b"aws_session_token = " + AWS_KEY_VALUE + AWS_KEY_OTHER + b"\n", "toml"),
         (b"aws_security_token = " + AWS_KEY_VALUE + b"\n", "toml"),
+        (b'{"SecretAccessKey":\n  "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"aws configure set aws_secret_access_key " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"launchctl setenv AWS_SECRET_ACCESS_KEY " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"AWS_SECRET_ACCESS_KEY := " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"<SecretAccessKey>" + AWS_KEY_VALUE + b"</SecretAccessKey>", "xml"),
     ],
     ids=[
         "keybinding-args-text",
@@ -1188,6 +1193,11 @@ AWS_KEY_OTHER = b"je7MtGbClwBF" + b"/2Zp9Utk/h3yCo8nvbEXAMPLEKEY"
         "prefixed-quoted",
         "session-token",
         "security-token",
+        "wrapped-value",
+        "cli-config",
+        "launchctl",
+        "make-assign",
+        "xml-element",
     ],
 )
 def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
@@ -1209,6 +1219,7 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         (b"aws_secret_access_key = test\n", "toml"),
         (b"aws_secret_access_key = " + AWS_KEY_VALUE[:39] + b"\n", "toml"),
         (b'{"SecretAccessKeyId": "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"aws_secret_access_key\n" + AWS_KEY_VALUE + b"\n", "toml"),
     ],
     ids=[
         "hash-under-other-key",
@@ -1219,6 +1230,7 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         "test",
         "39-chars",
         "other-key",
+        "next-line",
     ],
 )
 def test_a_value_that_is_not_an_aws_secret_access_key_passes(payload: bytes, fmt: str) -> None:
