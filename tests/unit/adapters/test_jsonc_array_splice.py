@@ -1088,12 +1088,13 @@ def test_a_comment_inside_a_rule_less_inline_array_refuses_with_the_general_reas
 
 
 def test_a_comment_inside_an_object_member_refuses_with_the_general_reason() -> None:
-    # given — an object member with a comment inside it changes its value
+    # given — an object member with a comment inside it gains a key, so it is rewritten whole (a value-only
+    # change is spliced in place and never reaches the refusal)
     template = '{\n  "x": {"a": 1, /* c */ "b": 2}\n}'
 
     # when & then
     with pytest.raises(RenderRefused) as refused:
-        ADAPTER.render(tree_from_value({"x": {"a": 1, "b": 3}}), template)
+        ADAPTER.render(tree_from_value({"x": {"a": 1, "b": 2, "c": 3}}), template)
     assert refused.value.reason == VALUE_WITH_NOTE_REFUSED
 
 

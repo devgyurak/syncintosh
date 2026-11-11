@@ -264,9 +264,18 @@ decide about survives:
     When a comment is inside the object the render is refused with its own reason (`LONE_COMMA_REFUSED`)
     rather than dropping the comment (a conflict, not a broken file). Any other edit — a nested change, a
     value change, an add at the end or the head — is made in place and keeps the layout and the notes.
-  - A comma at the **start of its line** (`, "b": 2`) is not spliced at all: every edit of that object
-    rewrites it whole, and a comment inside it is refused with the general `VALUE_WITH_NOTE_REFUSED`.
-    This predates issue #29 and is unchanged.
+  - A comma at the **start of its line** (`, "b": 2`) is not spliced when a member is added or removed:
+    that edit rewrites the object whole, and a comment inside it is refused with the general
+    `VALUE_WITH_NOTE_REFUSED`. This predates issue #29. An edit that only changes a value below it is made
+    in place (see the next item).
+- **Known limit: an object in a mixed layout is edited in place only while its keys stay the same.** A
+  first member on the `{` line, a closing brace after the last member, two members on one line, or a
+  comment inside a one-line object is none of the layouts that are spliced member by member. When the tree
+  has exactly the template's keys, each member's value is edited in its own span and the keys, separators,
+  comments, and line breaks are untouched (issue #64), in the template's key order. Adding or removing a
+  key in such an object still rewrites it whole, and is refused when a comment is inside it. Pinned by
+  `test_a_value_change_in_a_mixed_layout_object_is_spliced_in_place` and
+  `test_a_rewrite_that_would_drop_a_comment_is_refused`.
 
   A member-less object that carries a comment is not part of
   this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block

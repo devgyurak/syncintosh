@@ -20,8 +20,9 @@ this adapter does the two halves itself (``AGENTS.md`` §2.5):
   notes. A removal that would take a note from an array with no rule is refused with a fixed
   reason (`UNRULED_REMOVAL_REFUSED`), since nothing says which element the note belongs to. A
   value the splice cannot place — an inline array, an array with a comma first on its line, an
-  object that is not laid out member-per-line — is reserialized whole, and refused when a
-  comment inside it would be lost.
+  object that is not laid out member-per-line and gains or loses a key — is reserialized whole,
+  and refused when a comment inside it would be lost. An object whose keys do not change is
+  edited member by member whatever its layout.
 
 A value named by `Verbatim` is the exception to re-serializing: it is copied from the other
 document's text, span for span. `json.dumps` would turn `1e3` into `1000` and drop a comment inside
@@ -484,6 +485,14 @@ class _Diff:
         if clean and not lone:
             self._object(node, path, edits)
             return
+        if self._same_members(node, path):
+            # Only values below this object changed, so each member is edited in its own span and the keys,
+            # separators, comments, and line breaks between them stay as written. This keeps a layout the
+            # two paths around it do not recognise (the first member on the `{` line, a comment inside a
+            # one-line object) from being rewritten whole, or refused for the comment in it.
+            for member in node.members:
+                self._render(member.value, (*path, member.key), edits)
+            return
         if self._splice_inline(node, path, edits):
             return
         # A one-line object with a comment inside it cannot be spliced member by member, and
@@ -491,6 +500,14 @@ class _Diff:
         # span holds a comment, so a comment is never silently dropped). The same goes for a line
         # edit that would strand a comma on a line of its own.
         self._rewrite(node, self._subtree(path, len(path)), edits, LONE_COMMA_REFUSED if lone else None)
+
+    def _same_members(self, node: _ObjectNode, path: KeyPath) -> bool:
+        """True when the template object has exactly the members the tree wants, so no key is added or removed.
+
+        The template's own member order is kept, as `_object` and `_splice_inline` already do.
+        """
+        names = [member.key for member in node.members]
+        return len(set(names)) == len(names) and set(names) == set(self._children(path))
 
     def _lone_comma_touched(self, node: _ObjectNode, path: KeyPath) -> bool:
         """True when a line edit of this object would strand a comma that sits alone on its line.
