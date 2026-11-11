@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Reading and writing `config.json`.
 
-`pydantic-settings.BaseSettings()` reads environment variables and files the moment it is
-instantiated, so it must be constructed only inside a factory (``AGENTS.md`` §2.6). This module
-is that factory boundary: `load_config` does the I/O and returns a frozen `SyncConfig` built by
-its single `create` classmethod, and a missing or malformed file is a `ConfigError`, never a
-bare exception.
+A settings object must not read anything when it is constructed (``AGENTS.md`` §2.6). This module
+is the factory boundary: `load_config` reads `config.json` and parses it with `json` directly, then
+returns a frozen `SyncConfig` built by its single `create` classmethod, and a missing or malformed
+file is a `ConfigError`, never a bare exception.
 """
 
 from __future__ import annotations

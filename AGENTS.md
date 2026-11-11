@@ -51,12 +51,14 @@ src/syncintosh/
 ├── cli/          Typer entrypoints + Rich rendering. Wiring only — no business logic.
 ├── core/         Pure domain: models, manifest schema, merge engine, conflict rules, ports.
 ├── services/     Use-cases: collect · diff · merge · apply · sync · resolve · key-rotate.
-├── adapters/     Format adapters: jsonc · toml · yaml · xml · plist · text · binary.
+├── adapters/     Format adapters: jsonc · xml · text_merge · plist (toml · yaml · binary are planned).
 ├── presets/      Built-in preset catalog: paths, noise keys, bundle IDs, download URLs, casks.
 ├── crypto/       AES-256-GCM envelope, HKDF, manifest encryption, key wrapping, keyring.
 ├── vcs/          git CLI subprocess transport (commit / push / pull).
-├── system/       Collection, app detection, launchd, watchdog, secret scan.
-└── llm/          OpenAI-compatible client, masking, output validation.
+├── system/       Collection, app detection, launchd, watchdog, secret scan, masking (`masking.py`).
+└── llm/          OpenAI-compatible client and key lookup. The placeholder token shape, response
+                  parsing, and token restore are in `core/advice.py`; proposal validation
+                  (`proposal_problem`) is in `services/resolve.py`.
 ```
 
 ### Rules you must keep
@@ -79,17 +81,18 @@ src/syncintosh/
    symlinks and silently stop tracking. Do not reintroduce symlinks.
 
 5. **Format adapters preserve comments, key order, and formatting.** Adapters round-trip:
-   parse → edit → serialize returns the file with only the intended change. `tomlkit`
-   (TOML), `ruamel.yaml` (YAML), and `lxml` (XML) are chosen for this. For JSONC, prefer
+   parse → edit → serialize returns the file with only the intended change. `lxml` (XML)
+   is in use; `tomlkit` (TOML) and `ruamel.yaml` (YAML) are introduced when those adapters
+   land, not before. For JSONC, prefer
    **minimal text edits against the original** over full re-serialization, because no
    library reliably preserves comments *and* trailing commas while rewriting.
 
 6. **No I/O in constructors.** Building a service, adapter, or settings object must not
    touch the network, keychain, or disk. Use explicit factory functions
    (`load_config()`, `open_vault()`), the way `Korail()` avoids I/O in pykorail.
-   `pydantic-settings`'s `BaseSettings()` reads environment variables and files the moment it
-   is **instantiated**, so construct it only inside `load_config()`; the settings model's
-   fields are `frozen=True`.
+   `load_config()` reads and parses `config.json` with `json` directly and returns a frozen
+   `SyncConfig` built by its single `create` classmethod; nothing is read at import or
+   construction time.
 
 7. **Immutability at boundaries.** Parsed settings and manifest records are frozen
    dataclasses built by a single classmethod. Do not assemble an object and then assign

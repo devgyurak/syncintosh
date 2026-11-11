@@ -41,7 +41,9 @@ round-trip is treated as a conflict, so an adapter cannot publish a partially re
    both comments and trailing commas while rewriting, so edit the original text at the
    changed key. See the "why" note in `AGENTS.md` §2.5.
 3. **Use the round-trip libraries**: `tomlkit` (TOML), `ruamel.yaml` (YAML), `lxml` (XML),
-   `plistlib` (plist). Import them **lazily** so CLI startup stays fast.
+   `plistlib` (plist). `tomlkit` and `ruamel.yaml` are not dependencies today (nothing imports them):
+   the adapter that first needs one adds it with `uv add` in the same PR. Import them **lazily** so
+   CLI startup stays fast.
 4. **Key-level, not line-level.** The unit of comparison is a key (or a nested key path),
    not a line. A changed key on one side wins; only a both-sides change conflicts.
 5. **Unknown/binary formats have no merge.** `binary` maps to "choose a side" — do not
