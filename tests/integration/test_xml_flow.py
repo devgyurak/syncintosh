@@ -161,8 +161,6 @@ def _run(
     decide: Decide | None = None,
     resolving: bool = False,
 ) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

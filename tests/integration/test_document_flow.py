@@ -151,8 +151,6 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine, *, wrap: Callable[[LiveFiles], LiveFiles] = lambda live: live) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     config: SyncConfig = load_config(machine.config_file)
     return run_sync(
         machine.home,

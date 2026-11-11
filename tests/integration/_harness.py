@@ -73,10 +73,13 @@ def sync_ports(
             # Spotlight is the default locator; nothing may ask it from a test.
             "config_dirs": None,
             # The real session stores run `claude --version`, `codex --version` and `ps`, and the real agent project
-            # index reads `CLAUDE_CONFIG_DIR` from the process environment: a test that wants either passes its own.
+            # index reads `CLAUDE_CONFIG_DIR` from the process environment: a test that wants one passes its own.
             "sessions": NO_SESSION_STORE,
             "activity": NO_SESSION_ACTIVITY,
             "agent_projects": None,
+            # The default `documents` is built from the full catalog, so an iTerm2 view a test happens to
+            # track would read the real `defaults` domain: a test that wants one passes its own.
+            "documents": None,
             **ports,
         },
     )

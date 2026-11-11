@@ -321,8 +321,6 @@ def _run(
     adapters: Mapping[FileFormat, ContentAdapter] | None = None,
     validators: Mapping[ValidatorName, SyntaxValidator] | None = None,
 ) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

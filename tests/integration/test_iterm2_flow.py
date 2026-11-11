@@ -22,7 +22,6 @@ from syncintosh.core.config import SyncConfig
 from syncintosh.core.ports import AppDetector
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.core.resolution import Decide
-from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.crypto.key_material import KeyMaterial
 from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
@@ -148,8 +147,6 @@ def _run(
     decide: Decide | None = None,
     resolving: bool = False,
 ) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

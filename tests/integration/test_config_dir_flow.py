@@ -186,8 +186,6 @@ def _run(
     catalog: PresetCatalog = CATALOG,
     locate: tuple[str, ...] | None = None,
 ) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     found = (str(machine.app),) if locate is None else locate
     return run_sync(
         machine.home,

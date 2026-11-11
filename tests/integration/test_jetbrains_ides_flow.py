@@ -29,11 +29,9 @@ from test_datagrip_preset import (
 )
 
 from syncintosh.adapters.xml import XmlAdapter
-from syncintosh.crypto.cipher import EnvelopeCipher
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.sync import SyncReport
 from syncintosh.system.app_config_dir import ProductInfoConfigDir
-from syncintosh.vcs.git import GitCLITransport
 
 pytestmark = pytest.mark.integration
 
@@ -73,8 +71,6 @@ def _machine(
 
 
 def _run(machine: Machine) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

@@ -133,8 +133,6 @@ def _initialize(machine: Machine, *, import_from: Path | None = None, extra: tup
 
 
 def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog: PresetCatalog | None = None) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

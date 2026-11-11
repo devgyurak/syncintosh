@@ -135,8 +135,6 @@ def _initialize(machine: Machine, *, import_from: Path | None = None, project: s
 
 
 def _run(machine: Machine) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

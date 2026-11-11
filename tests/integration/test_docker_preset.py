@@ -125,8 +125,6 @@ def _initialize(machine: Machine, config: SyncConfig, *, import_from: Path | Non
 
 
 def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     return run_sync(
         machine.home,
         machine.store,

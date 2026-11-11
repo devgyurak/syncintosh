@@ -141,8 +141,6 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
 
 
 def _run(machine: Machine) -> SyncReport:
-    GitCLITransport(machine.repo)
-    EnvelopeCipher(machine.store)
     config = load_config(machine.config_file)
     home = str(machine.home)
     return run_sync(
