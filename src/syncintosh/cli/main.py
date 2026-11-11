@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import typer
 from rich.console import Console
 
+from syncintosh.cli import wiring
 from syncintosh.core.errors import DomainError
 from syncintosh.core.ports import WhenTag
 from syncintosh.core.tree import path_label
@@ -37,10 +38,8 @@ from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 if TYPE_CHECKING:  # these names appear only in annotations
     from collections.abc import Callable
 
-    from syncintosh.core.manifest import FileFormat
-    from syncintosh.core.ports import ContentAdapter, SyntaxValidator
-    from syncintosh.core.presets import ValidatorName
     from syncintosh.core.resolution import Choice, ConflictView, NamedChoice, Picks
+    from syncintosh.services import SyncPorts
     from syncintosh.services.keys import RotationMode
     from syncintosh.services.resolve import Suggestion
 
@@ -49,9 +48,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-
-# The one branch syncintosh uses. One branch keeps the merge-base model simple.
-BRANCH = "main"
 
 # Environment override for non-interactive runs (tests, the daemon). A passphrase on argv would
 # land in shell history, so it is read from the environment or prompted, never from an option.
@@ -84,13 +80,6 @@ def _passphrase() -> str:
     if from_env:
         return from_env
     return typer.prompt("Recovery passphrase", hide_input=True, confirmation_prompt=True)
-
-
-def _key_store(remote: str):
-    """The per-repo key ring, namespaced so two repos on one Mac do not share keys."""
-    from syncintosh.crypto.keyring_store import KeyringKeyStore
-
-    return KeyringKeyStore(f"syncintosh:{remote}")
 
 
 def _launchd_daemon(home):
@@ -126,35 +115,6 @@ def _selectable(path: str) -> str:
 def _fail(exc: DomainError) -> None:
     typer.echo(f"error: {exc}", err=True)
     raise typer.Exit(code=1)
-
-
-def _adapters() -> dict[FileFormat, ContentAdapter]:
-    """Every structural adapter, by the format a preset file names.
-
-    Wired for `sync`, `watch` and `diff` alike so the three cannot disagree on which formats merge key by key. A
-    format with no entry falls back to the line-level driver. Imported here so CLI startup does not parse any
-    format's machinery (``AGENTS.md`` §4); `lxml` itself loads only inside the XML adapter's first parse.
-    """
-    from syncintosh.adapters.jsonc import JsoncAdapter
-    from syncintosh.adapters.plist import PlistAdapter
-    from syncintosh.adapters.xml import XmlAdapter
-
-    return {"jsonc": JsoncAdapter(), "xml": XmlAdapter(), "plist": PlistAdapter()}
-
-
-def validators() -> dict[ValidatorName, SyntaxValidator]:
-    """Every syntax check a preset may name, wired to its implementation.
-
-    A preset names a check by the string in `ValidatorName`; a name with no implementation is
-    **refused** at the write, so a missing entry here stops the file from ever being applied on this
-    machine. `tests/unit/test_cli.py` compares this map against the literal, so adding a name without
-    wiring it fails in CI rather than on a user's machine.
-    """
-    from syncintosh.system.ghostty_check import GhosttySyntaxValidator
-    from syncintosh.system.json_check import JsonSyntaxValidator
-    from syncintosh.system.zsh_check import ZshSyntaxValidator
-
-    return {"json": JsonSyntaxValidator(), "zsh": ZshSyntaxValidator(), "ghostty": GhosttySyntaxValidator()}
 
 
 # The allowlist's own command group. `scan` itself does nothing; `allow` is the whole surface, kept
@@ -221,21 +181,21 @@ def key_rotate(
     paths = MachinePaths.default()
     try:
         config = load_config(paths.config_file)
-        ports = _sync_ports(config, paths)
+        ports = wiring.machine_ports(config, paths)
         generation = rotate_repo_service(
-            transport=ports["transport"],
-            files=ports["files"],
-            cipher=ports["cipher"],
-            wrapper=ports["wrapper"],
-            scanner=ports["scanner"],
-            store=ports["store"],
-            codec=ports["codec"],
-            lock=ports["lock"],
-            pending=ports["pending_store"],
+            transport=ports.transport,
+            files=ports.files,
+            cipher=ports.cipher,
+            wrapper=ports.wrapper,
+            scanner=ports.scanner,
+            store=ports.store,
+            codec=ports.codec,
+            lock=ports.lock,
+            pending=ports.pending_store,
             remote=config.remote,
-            branch=ports["branch"],
+            branch=ports.branch,
             mode=mode,
-            marker=ports["rotation_marker"],
+            marker=ports.rotation_marker,
         )
     except DomainError as exc:
         _fail(exc)
@@ -257,7 +217,7 @@ def key_export(path: Path = typer.Argument(..., help="where to write the wrapped
     try:
         config = load_config(paths.config_file)
         export_ring_service(
-            store=_key_store(config.remote),
+            store=wiring.key_store(config.remote),
             codec=KeyMaterial(),
             live=SystemLiveFiles(),
             path=str(path),
@@ -283,11 +243,11 @@ def key_import(path: Path = typer.Argument(..., help="a wrapped ring written by 
         config = load_config(paths.config_file)
         transport = GitCLITransport(paths.repo_dir)
         import_ring_service(
-            store=_key_store(config.remote),
+            store=wiring.key_store(config.remote),
             codec=KeyMaterial(),
             blob=path.read_bytes(),
             passphrase=_passphrase(),
-            published=remote_commitments_service(transport, config.remote, transport.branch() or BRANCH),
+            published=remote_commitments_service(transport, config.remote, transport.branch() or wiring.BRANCH),
             lock=FileLock(paths.lock_file),
         )
     except DomainError as exc:
@@ -312,13 +272,13 @@ def key_prune(generation: int = typer.Argument(..., help="the generation id to d
     paths = MachinePaths.default()
     try:
         config = load_config(paths.config_file)
-        ports = _sync_ports(config, paths)
+        ports = wiring.machine_ports(config, paths)
         prune_generation_service(
-            transport=ports["transport"],
-            store=ports["store"],
-            lock=ports["lock"],
+            transport=ports.transport,
+            store=ports.store,
+            lock=ports.lock,
             remote=config.remote,
-            branch=ports["branch"],
+            branch=ports.branch,
             generation=generation,
         )
     except DomainError as exc:
@@ -416,12 +376,12 @@ def doctor() -> None:
         )
         report = doctor_service(
             transport=transport,
-            store=_key_store(config.remote),
+            store=wiring.key_store(config.remote),
             # A short wait: doctor asks whether the lock is held, not to take it for a long while.
             lock=FileLock(paths.lock_file, timeout_seconds=0.5),
             pending=DirectoryPendingStore(paths.pending_dir),
             remote=config.remote,
-            branch=transport.branch() or BRANCH,
+            branch=transport.branch() or wiring.BRANCH,
             plist_entry_point=daemon.recorded_entry_point(),
             expected_entry_point=entry_point(),
             job_loaded=daemon.is_loaded(),
@@ -463,15 +423,15 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
         # the scan allowlist (`load_scan_allow` writes one when it is absent), and no lock.
         report = diff_repo_service(
             transport=transport,
-            cipher=EnvelopeCipher(_key_store(config.remote)),
+            cipher=EnvelopeCipher(wiring.key_store(config.remote)),
             live=open_live_files(SystemLiveFiles(), str(paths.home), BuiltinCatalog.default().documents()),
             config=config,
             home=str(paths.home),
             deny=SystemDenyList(),
-            branch=transport.branch() or BRANCH,
+            branch=transport.branch() or wiring.BRANCH,
             catalog=BuiltinCatalog.default(),
-            adapters=_adapters(),
-            validators=validators(),
+            adapters=wiring.adapters(),
+            validators=wiring.validators(),
             profiles=SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
             config_dirs=ProductInfoConfigDir(home=paths.home),
             agent_projects=SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
@@ -635,7 +595,7 @@ def init(
             catalog=BuiltinCatalog.default(),
         )
         transport = GitCLITransport(paths.repo_dir)
-        store = _key_store(remote)
+        store = wiring.key_store(remote)
         codec = KeyMaterial()
         if import_file is not None:
             transport.clone(remote)
@@ -675,7 +635,7 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
     paths = MachinePaths.default()
     try:
         config = load_config(paths.config_file)
-        report = sync_service(**_sync_ports(config, paths), adopt=adopt)
+        report = sync_service(wiring.machine_ports(config, paths), adopt=adopt)
     except DomainError as exc:
         _fail(exc)
         return
@@ -726,8 +686,8 @@ def resolve(
         if llm and yes and config.llm.auto_apply:
             # --yes skips the approval screen, the only place an auto-applied proposal is seen.
             raise typer.BadParameter("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
-        ports = _sync_ports(config, machine)
-        when_tag = ports["when_tag"]
+        ports = wiring.machine_ports(config, machine)
+        when_tag = ports.when_tag
         approve = None if yes else partial(_confirm_resolution, when_tag=when_tag)
         if take is not None:
             choose = take_chooser(take)
@@ -737,7 +697,7 @@ def resolve(
             choose = _assisted_choice(config, machine, ports)
         else:
             choose = partial(_ask_choice, when_tag=when_tag)
-        report = sync_service(**ports, resolving=True, decide=decision(choose, approve=approve))
+        report = sync_service(ports, resolving=True, decide=decision(choose, approve=approve))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     except DomainError as exc:
@@ -749,7 +709,7 @@ def resolve(
         raise typer.Exit(code=1)
 
 
-def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], Choice | None]:
+def _assisted_choice(config, machine, ports: SyncPorts) -> Callable[[ConflictView], Choice | None]:
     """The chooser for `--llm`: the configured model first, the person by hand whenever it has no usable answer.
 
     The endpoint is confirmed before the first call when it is not a loopback or private-network address,
@@ -770,7 +730,7 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     if urlsplit(llm.base_url).scheme == "http" and is_public_endpoint(llm.base_url, llm.internal_domains):
         # The key and the conflicting values would travel in clear to a host off the network.
         raise typer.BadParameter("llm.base_url over plain http may not name a public host; use https")
-    shell = shell_presets(ports["catalog"], llm.auto_apply)
+    shell = shell_presets(ports.catalog, llm.auto_apply)
     if shell:
         # A shell file is code the next shell runs. A model's change to it is always shown, never applied unasked.
         raise typer.BadParameter(f"llm.auto_apply names shell presets, which are always asked: {', '.join(shell)}")
@@ -780,14 +740,14 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
         default=False,
     ):
         raise typer.Exit(code=1)
-    catalog, adapters, validators = ports["catalog"], ports["adapters"], ports["validators"]
+    catalog, adapters, validators = ports.catalog, ports.adapters, ports.validators
     return advised_chooser(
         advisor=OpenAIAdvisor(
             OpenAIChatTransport(base_url=llm.base_url, model=llm.model, api_key=llm_api_key(), timeout=60.0)
         ),
         masker=TextMasker(home=str(machine.home), username=getuser(), internal_domains=llm.internal_domains),
-        fallback=partial(_ask_choice, when_tag=ports["when_tag"]),
-        present=partial(_present_suggestion, when_tag=ports["when_tag"]),
+        fallback=partial(_ask_choice, when_tag=ports.when_tag),
+        present=partial(_present_suggestion, when_tag=ports.when_tag),
         auto_apply=auto_apply_for(catalog, frozenset(llm.auto_apply)),
         check=lambda view, text: proposal_problem(
             view, text, catalog=catalog, adapters=adapters, validators=validators
@@ -795,7 +755,7 @@ def _assisted_choice(config, machine, ports: dict) -> Callable[[ConflictView], C
     )
 
 
-def _present_suggestion(suggestion: Suggestion, *, when_tag: WhenTag) -> bool:
+def _present_suggestion(suggestion: Suggestion, *, when_tag: WhenTag | None) -> bool:
     """Show a model's suggestion with its rationale, the change it would make, and any new URL; read the accept.
 
     A refused suggestion is shown with the reason and declined without asking. A URL the proposal
@@ -830,7 +790,7 @@ def _present_suggestion(suggestion: Suggestion, *, when_tag: WhenTag) -> bool:
     return typer.confirm("  accept this suggestion?", default=False)
 
 
-def _ask_choice(view: ConflictView, *, when_tag: WhenTag) -> Choice:
+def _ask_choice(view: ConflictView, *, when_tag: WhenTag | None) -> Choice:
     """Show one conflict with its values and read the operator's choice for it.
 
     Values are shown by default: resolving a conflict means comparing the two sides, and the values
@@ -847,7 +807,7 @@ def _ask_choice(view: ConflictView, *, when_tag: WhenTag) -> Choice:
     return by_name[answer]
 
 
-def _show_conflict(console: Console, view: ConflictView, *, when_tag: WhenTag) -> None:
+def _show_conflict(console: Console, view: ConflictView, *, when_tag: WhenTag | None) -> None:
     """Print one conflict's place and its values. Every value is escaped, so file text is never markup."""
     from rich.markup import escape
 
@@ -870,7 +830,7 @@ def _show_conflict(console: Console, view: ConflictView, *, when_tag: WhenTag) -
             console.print(f"  {escape(view.diff)}")
 
 
-def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks, *, when_tag: WhenTag) -> bool:
+def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks, *, when_tag: WhenTag | None) -> bool:
     """Show what will be published, in full, and ask before anything is written to the remote.
 
     A value a model proposed is shown as its text, never as the repr of its carrier, and every control
@@ -883,7 +843,7 @@ def _confirm_resolution(views: tuple[ConflictView, ...], picks: Picks, *, when_t
     return typer.confirm("Publish these choices?", default=False)
 
 
-def _pick_lines(view: ConflictView, pick: Choice, *, when_tag: WhenTag) -> list[str]:
+def _pick_lines(view: ConflictView, pick: Choice, *, when_tag: WhenTag | None) -> list[str]:
     """One pick as the lines a person reads before publishing: its place, then the change it makes."""
     from difflib import unified_diff
 
@@ -899,114 +859,6 @@ def _pick_lines(view: ConflictView, pick: Choice, *, when_tag: WhenTag) -> list[
         change = unified_diff(view.local_text.splitlines(), pick.text.splitlines(), "local", "proposed", lineterm="")
         return [f"{place}  ->  proposed by the model", *(f"    {visible(line)}" for line in change)]
     return [f"{place}  ->  proposed by the model", f"    {visible(pick.text)}"]
-
-
-def _sync_ports(config, paths) -> dict:
-    """Every port one `sync` cycle needs, from this machine's paths and config.
-
-    Shared by `sync` and `watch`, so the two cannot drift on which catalog, scanner, or adapter map
-    they wire (``AGENTS.md`` §7). The imports stay inside, so CLI startup does not pay for a heavy
-    dependency (``AGENTS.md`` §4).
-    """
-    from syncintosh.adapters.text_merge import TextMergeDriver
-    from syncintosh.crypto.cipher import EnvelopeCipher
-    from syncintosh.crypto.file_ids import SecureFileIdSource
-    from syncintosh.crypto.key_material import KeyMaterial
-    from syncintosh.presets import BuiltinCatalog, vscode
-    from syncintosh.presets.orca import BUNDLE_ID as ORCA_BUNDLE_ID
-    from syncintosh.system.agent_project_index import SystemAgentProjectIndex
-    from syncintosh.system.agent_sessions import CombinedSessionActivity, CombinedSessionStore
-    from syncintosh.system.app_config_dir import ProductInfoConfigDir
-    from syncintosh.system.app_detector import MdfindAppDetector
-    from syncintosh.system.claude_sessions import ClaudeSessionActivity, ClaudeSessionStore
-    from syncintosh.system.codex_sessions import CodexSessionActivity, CodexSessionStore
-    from syncintosh.system.deny_list import SystemDenyList
-    from syncintosh.system.document_files import open_document_skips, open_live_files
-    from syncintosh.system.ledger import JsonLedgerStore
-    from syncintosh.system.live_files import SystemLiveFiles
-    from syncintosh.system.lock import FileLock
-    from syncintosh.system.orca_daemon import OrcaDaemonRunningApps
-    from syncintosh.system.pending import DirectoryPendingStore
-    from syncintosh.system.profile_index import SystemProfileIndex
-    from syncintosh.system.repo_files import FileRepo
-    from syncintosh.system.rotation_marker import FileRotationMarker
-    from syncintosh.system.running_apps import LsappinfoRunningApps
-    from syncintosh.system.scan_allow import load_scan_allow, when_tag_for
-    from syncintosh.system.secret_scan import PatternSecretScanner
-    from syncintosh.vcs.git import GitCLITransport
-
-    store = _key_store(config.remote)
-    transport = GitCLITransport(paths.repo_dir)
-    # One object is both the `Cipher` and the `GenerationWrap`: the fetch absorbs a distributed
-    # generation through the same ring the objects are opened with.
-    cipher = EnvelopeCipher(store)
-    # Loaded once, before the dict: a corrupt allowlist fails here, and the `when` tagger is keyed by the same key the
-    # scanner uses rather than a second read of the file.
-    allow = load_scan_allow(paths.scan_allow_file)
-    # Both agents' sessions in one store; the activity probe asks the agent that owns a session.
-    combined_sessions = CombinedSessionStore(
-        (
-            ClaudeSessionStore(
-                str(paths.home),
-                config.agent_projects,
-                SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-                SystemDenyList(),
-                BuiltinCatalog.default(),
-            ),
-            CodexSessionStore(
-                str(paths.home),
-                config.agent_projects,
-                SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-                SystemDenyList(),
-                BuiltinCatalog.default(),
-            ),
-        )
-    )
-    return {
-        "transport": transport,
-        "files": FileRepo(paths.repo_dir),
-        "cipher": cipher,
-        "wrapper": cipher,
-        # The local allowlist lets a user pass a line the heuristic cannot classify (#25); it lives
-        # outside the repo, so it never leaves this machine.
-        "scanner": PatternSecretScanner(allow),
-        "store": store,
-        "codec": KeyMaterial(),
-        "driver": TextMergeDriver(),
-        "adapters": _adapters(),
-        "catalog": BuiltinCatalog.default(),
-        "validators": validators(),
-        # A settings document kept in a database row is shown to the sync as a virtual file (`core/documents.py`).
-        "live": open_live_files(SystemLiveFiles(), str(paths.home), BuiltinCatalog.default().documents()),
-        "ledger_store": JsonLedgerStore(paths.ledger_file),
-        "pending_store": DirectoryPendingStore(paths.pending_dir),
-        # A rotation whose push outcome is unknown: the evidence `sync` needs to settle it (never holds a key).
-        "rotation_marker": FileRotationMarker(paths.rotation_marker_file),
-        "lock": FileLock(paths.lock_file),
-        "deny": SystemDenyList(),
-        "apps": MdfindAppDetector(),
-        # Whether a preset's app is open right now: a file of a preset that defers while running waits for it to quit.
-        # Orca's terminal host outlives its window, so for Orca that process counts as the app running too.
-        "running": OrcaDaemonRunningApps(LsappinfoRunningApps(), home=str(paths.home), bundle_id=ORCA_BUNDLE_ID),
-        # The release folder the installed app says its settings live in (product-info.json), read once per cycle.
-        "config_dirs": ProductInfoConfigDir(home=paths.home),
-        # Where each project mapped in `agent_projects` keeps the agent's data, one read per cycle.
-        "agent_projects": SystemAgentProjectIndex(str(paths.home), SystemDenyList()),
-        # A document the app manages itself (iTerm2 loading its prefs from a custom folder) is left alone this cycle.
-        "documents": open_document_skips(str(paths.home), BuiltinCatalog.default().documents()),
-        # Claude Code's sessions for the projects mapped with `claude-sessions`, and its own open-session signal.
-        "sessions": combined_sessions,
-        "activity": CombinedSessionActivity(
-            combined_sessions, (ClaudeSessionActivity(str(paths.home)), CodexSessionActivity(str(paths.home)))
-        ),
-        # Reads the app's own profile list in memory, one read per cycle; it never writes or seals that file.
-        "profiles": SystemProfileIndex(str(paths.home), SystemDenyList(), vscode.read_profiles),
-        "source": SecureFileIdSource(),
-        "config": config,
-        "home": str(paths.home),
-        "branch": transport.branch() or BRANCH,
-        "when_tag": when_tag_for(allow.key),
-    }
 
 
 @app.command()
@@ -1035,16 +887,14 @@ def watch(
     paths = MachinePaths.default()
     try:
         config = load_config(paths.config_file)
-        ports = _sync_ports(config, paths)
+        ports = wiring.machine_ports(config, paths)
     except DomainError as exc:
         _fail(exc)
         return
 
     # Re-read after every sync: a profile created in the app (or one the other Mac sent) adds files to
     # watch, and the app's own profile list is followed too.
-    current_targets = functools.partial(
-        watch_targets, config, ports["catalog"], ports["profiles"], ports["config_dirs"]
-    )
+    current_targets = functools.partial(watch_targets, config, ports.catalog, ports.profiles, ports.config_dirs)
 
     try:
         targets = current_targets()
@@ -1053,7 +903,7 @@ def watch(
         return
 
     def run() -> SyncReport:
-        return sync_service(**ports)
+        return sync_service(ports)
 
     def error(exc: Exception) -> None:
         # Anything a **cycle** can fail with — another sync's lock, a pending conflict, a network

@@ -31,17 +31,31 @@ from syncintosh.core.manifest_codec import loads_manifest
 from syncintosh.core.models import LedgerEntry, Scope
 from syncintosh.core.models import PendingConflict as PendingConflictRecord
 from syncintosh.core.ports import (
+    AgentProjectIndex,
+    AppConfigDir,
     AppDetector,
     Cipher,
     ContentAdapter,
     DenyList,
+    DocumentSkips,
+    FileIdSource,
+    GenerationWrap,
     GitTransport,
     KeyStore,
+    LedgerStore,
     LiveFiles,
+    MergeDriver,
+    PendingStore,
     PresetCatalog,
+    ProfileIndex,
+    RepoFiles,
+    RingCodec,
+    RotationMarkerStore,
     RunningApps,
+    SecretScanner,
     SessionActivity,
     SessionStore,
+    SyncLock,
     SyntaxValidator,
     WhenTag,
 )
@@ -50,6 +64,7 @@ from syncintosh.core.projection import Carry, DroppedItem, project_text, restore
 from syncintosh.core.repo import MANIFEST_PATH, TRACKED_PATHS, object_path
 from syncintosh.core.sessions import SessionListing, SessionSkipped
 from syncintosh.core.tree import KeyPath
+from syncintosh.services.keys import NO_ROTATION_MARKER
 from syncintosh.services.policy_gate import PolicyView
 
 # A push race is expected to settle in one or two tries; the cap stops a pathological fight from
@@ -1008,3 +1023,113 @@ def _decision(
     if baseline is None:
         return _WRITE if _sha256(live_bytes if ledger_view is None else ledger_view) == entry.sha256 else _ABORT
     return _WRITE if live_bytes == baseline else _ABORT
+
+
+@dataclass(frozen=True)
+class SyncPorts:
+    """Every port one sync cycle runs against, built by `create` and handed to `sync` whole.
+
+    One object instead of thirty keyword arguments, so `sync`, `watch` and `resolve` take the same
+    wiring and a caller cannot drop a port by forgetting a keyword (``AGENTS.md`` §2.7). What differs
+    from run to run (`adopt`, `resolving`, `decide`) stays an argument of `sync`.
+    """
+
+    transport: GitTransport
+    files: RepoFiles
+    cipher: Cipher
+    wrapper: GenerationWrap
+    scanner: SecretScanner
+    store: KeyStore
+    codec: RingCodec
+    driver: MergeDriver
+    adapters: Mapping[FileFormat, ContentAdapter]
+    catalog: PresetCatalog
+    validators: Mapping[ValidatorName, SyntaxValidator]
+    live: LiveFiles
+    ledger_store: LedgerStore
+    pending_store: PendingStore
+    rotation_marker: RotationMarkerStore
+    lock: SyncLock
+    deny: DenyList
+    apps: AppDetector
+    running: RunningApps
+    config_dirs: AppConfigDir | None
+    agent_projects: AgentProjectIndex | None
+    documents: DocumentSkips | None
+    sessions: SessionStore
+    activity: SessionActivity
+    profiles: ProfileIndex | None
+    source: FileIdSource
+    config: SyncConfig
+    home: str
+    branch: str
+    when_tag: WhenTag | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        transport: GitTransport,
+        files: RepoFiles,
+        cipher: Cipher,
+        wrapper: GenerationWrap,
+        scanner: SecretScanner,
+        store: KeyStore,
+        codec: RingCodec,
+        driver: MergeDriver,
+        live: LiveFiles,
+        ledger_store: LedgerStore,
+        pending_store: PendingStore,
+        lock: SyncLock,
+        deny: DenyList,
+        source: FileIdSource,
+        config: SyncConfig,
+        home: str,
+        branch: str,
+        adapters: Mapping[FileFormat, ContentAdapter] = NO_ADAPTERS,
+        catalog: PresetCatalog = NO_CATALOG,
+        validators: Mapping[ValidatorName, SyntaxValidator] = NO_VALIDATORS,
+        rotation_marker: RotationMarkerStore = NO_ROTATION_MARKER,
+        apps: AppDetector = NO_APP_INFO,
+        running: RunningApps = NO_RUNNING_INFO,
+        config_dirs: AppConfigDir | None = None,
+        agent_projects: AgentProjectIndex | None = None,
+        documents: DocumentSkips | None = None,
+        sessions: SessionStore = NO_SESSION_STORE,
+        activity: SessionActivity = NO_SESSION_ACTIVITY,
+        profiles: ProfileIndex | None = None,
+        when_tag: WhenTag | None = None,
+    ) -> SyncPorts:
+        """Build the ports; the optional ones default to their null object while a test passes fewer."""
+        return cls(
+            transport=transport,
+            files=files,
+            cipher=cipher,
+            wrapper=wrapper,
+            scanner=scanner,
+            store=store,
+            codec=codec,
+            driver=driver,
+            adapters=adapters,
+            catalog=catalog,
+            validators=validators,
+            live=live,
+            ledger_store=ledger_store,
+            pending_store=pending_store,
+            rotation_marker=rotation_marker,
+            lock=lock,
+            deny=deny,
+            apps=apps,
+            running=running,
+            config_dirs=config_dirs,
+            agent_projects=agent_projects,
+            documents=documents,
+            sessions=sessions,
+            activity=activity,
+            profiles=profiles,
+            source=source,
+            config=config,
+            home=home,
+            branch=branch,
+            when_tag=when_tag,
+        )

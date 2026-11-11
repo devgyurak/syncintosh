@@ -40,7 +40,7 @@ from syncintosh.crypto.ring_export import ScryptParams
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.diff import diff_repo
 from syncintosh.services.keys import import_ring, init_new_repo
-from syncintosh.services.sync import DroppedLocal, SyncReport, sync
+from syncintosh.services.sync import DroppedLocal, SyncPorts, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -329,26 +329,28 @@ def _run(
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
-        catalog=catalog if catalog is not None else KEYED_CATALOG,
-        validators={"zsh": ZshSyntaxValidator()} if validators is None else validators,
-        live=SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        source=SecureFileIdSource(),
-        config=load_config(machine.config_file),
-        home=str(machine.home),
-        branch=active.branch() or BRANCH,
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={"jsonc": JsoncAdapter()} if adapters is None else adapters,
+            catalog=catalog if catalog is not None else KEYED_CATALOG,
+            validators={"zsh": ZshSyntaxValidator()} if validators is None else validators,
+            live=SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            source=SecureFileIdSource(),
+            config=load_config(machine.config_file),
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+        ),
         adopt=adopt,
     )
 

@@ -35,7 +35,7 @@ from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.codex_sessions import CODEX_PROJECTS
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
+from syncintosh.services.sync import NO_APP_INFO, SyncPorts, SyncReport, sync
 from syncintosh.system.agent_project_index import SystemAgentProjectIndex
 from syncintosh.system.codex_sessions import CodexSessionActivity, CodexSessionStore
 from syncintosh.system.config import load_config, save_config
@@ -170,36 +170,38 @@ def _run(machine: Machine) -> SyncReport:
     config = load_config(machine.config_file)
     home = str(machine.home)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={},
-        catalog=CATALOG,
-        live=SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        apps=NO_APP_INFO,
-        source=SecureFileIdSource(),
-        config=config,
-        home=home,
-        branch=active.branch() or BRANCH,
-        agent_projects=SystemAgentProjectIndex(home, SystemDenyList(), machine.environ),
-        sessions=CodexSessionStore(
-            home,
-            config.agent_projects,
-            SystemAgentProjectIndex(home, SystemDenyList(), machine.environ),
-            SystemDenyList(),
-            CATALOG,
-            local_version=lambda: machine.version,
-        ),
-        activity=CodexSessionActivity(home),
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={},
+            catalog=CATALOG,
+            live=SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            apps=NO_APP_INFO,
+            source=SecureFileIdSource(),
+            config=config,
+            home=home,
+            branch=active.branch() or BRANCH,
+            agent_projects=SystemAgentProjectIndex(home, SystemDenyList(), machine.environ),
+            sessions=CodexSessionStore(
+                home,
+                config.agent_projects,
+                SystemAgentProjectIndex(home, SystemDenyList(), machine.environ),
+                SystemDenyList(),
+                CATALOG,
+                local_version=lambda: machine.version,
+            ),
+            activity=CodexSessionActivity(home),
+        )
     )
 
 

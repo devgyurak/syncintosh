@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import types
+from typing import cast
 
 import pytest
 import typer
@@ -17,8 +18,14 @@ from syncintosh.core.errors import SyntaxInvalid
 from syncintosh.core.resolution import ConflictKind, ConflictView, Proposal
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.vscode import KEYBINDINGS
+from syncintosh.services import SyncPorts
 from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
 from syncintosh.system.masking import TextMasker
+
+
+def _ports(**fields) -> SyncPorts:
+    """Only the ports the chooser reads; a port the test leaves out raises if the code reaches for it."""
+    return cast(SyncPorts, types.SimpleNamespace(**fields))
 
 
 def _tag(text: str) -> str:
@@ -321,7 +328,7 @@ def test_a_public_endpoint_is_confirmed_before_any_conflict_is_sent(monkeypatch)
 
     # when & then — exits before the model is touched
     with pytest.raises(typer.Exit):
-        _assisted_choice(config, None, {"catalog": BuiltinCatalog.default(), "adapters": {}, "validators": {}})
+        _assisted_choice(config, None, _ports(catalog=BuiltinCatalog.default(), adapters={}, validators={}))
 
 
 def test_resolve_llm_needs_a_configured_endpoint() -> None:
@@ -333,7 +340,7 @@ def test_resolve_llm_needs_a_configured_endpoint() -> None:
 
     # when & then
     with pytest.raises(typer.BadParameter, match=r"llm\.base_url"):
-        _assisted_choice(config, None, {})
+        _assisted_choice(config, None, _ports())
 
 
 def test_a_proposal_for_an_untracked_path_has_no_pre_check() -> None:
@@ -420,7 +427,7 @@ def test_a_plain_http_endpoint_to_a_public_host_is_refused_at_resolve_time() -> 
 
     # when & then — refused before any call, and named as the reason
     with pytest.raises(typer.BadParameter, match="plain http"):
-        _assisted_choice(config, None, {})
+        _assisted_choice(config, None, _ports())
 
 
 def test_a_new_host_in_a_proposal_is_asked_even_when_auto_apply_allows_it() -> None:
@@ -478,7 +485,7 @@ def test_resolve_llm_refuses_a_shell_preset_in_auto_apply_at_resolve_time() -> N
 
     # when & then
     with pytest.raises(typer.BadParameter, match="always asked"):
-        _assisted_choice(config, None, {"catalog": Builtin.default(), "adapters": {}, "validators": {}})
+        _assisted_choice(config, None, _ports(catalog=Builtin.default(), adapters={}, validators={}))
 
 
 def test_resolve_llm_with_yes_and_auto_apply_is_refused_before_anything_is_published(monkeypatch) -> None:

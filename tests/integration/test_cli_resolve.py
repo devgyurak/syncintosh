@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.cli import wiring as wiring_module
 
 pytestmark = pytest.mark.integration
 
@@ -53,7 +54,7 @@ def _conflicting_homes(tmp_path: Path, monkeypatch, memory_key_store) -> tuple[P
     stores = {str(home_a): memory_key_store(), str(home_b): memory_key_store()}
     remote = _bare_remote(tmp_path)
     monkeypatch.setenv("SYNCINTOSH_PASSPHRASE", PASSPHRASE)
-    monkeypatch.setattr(main_module, "_key_store", lambda _remote: stores[os.environ["HOME"]])
+    monkeypatch.setattr(wiring_module, "key_store", lambda _remote: stores[os.environ["HOME"]])
 
     _activate(monkeypatch, home_a)
     _write(home_a / ".zshrc", BASE)

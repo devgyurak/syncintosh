@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.cli import wiring as wiring_module
 from syncintosh.core.presets import ValidatorName
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services import Deferral, DroppedLocal, Refusal, SyncReport
@@ -163,7 +164,7 @@ def test_sync_exits_1_for_a_path_it_could_not_write(report, expected, tmp_path, 
         paths.config_file,
     )
     monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
-    monkeypatch.setattr(main_module, "sync_service", lambda **_kwargs: report)
+    monkeypatch.setattr(main_module, "sync_service", lambda *_args, **_kwargs: report)
 
     # when
     result = runner.invoke(main_module.app, ["sync"])
@@ -190,7 +191,7 @@ def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeyp
     monkeypatch.setattr(
         main_module,
         "sync_service",
-        lambda **_kwargs: SyncReport(
+        lambda *_args, **_kwargs: SyncReport(
             refused=(
                 Refusal(
                     "Library/Application Support/Code/User/settings.json",
@@ -215,7 +216,7 @@ def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeyp
 
 def test_every_validator_name_is_wired_to_an_implementation() -> None:
     # when — a preset names its syntax check by the string in `ValidatorName`
-    wired = main_module.validators()
+    wired = wiring_module.validators()
     declared = get_args(ValidatorName)
 
     # then — each name this build declares has something to run it. A name with no implementation is
@@ -226,7 +227,7 @@ def test_every_validator_name_is_wired_to_an_implementation() -> None:
 
 def test_the_cli_wires_the_jsonc_xml_and_plist_adapters() -> None:
     # when — a format with no adapter falls back to a line-level merge, which can break XML syntax
-    wired = main_module._adapters()
+    wired = wiring_module.adapters()
 
     # then
     assert {"jsonc", "xml", "plist"} == set(wired)
@@ -242,7 +243,7 @@ def test_every_preset_validator_is_wired() -> None:
     }
 
     # then
-    assert used - set(main_module.validators()) == set()
+    assert used - set(wiring_module.validators()) == set()
 
 
 def test_merge_names_a_whole_document_conflict(tmp_path) -> None:
@@ -326,7 +327,7 @@ def test_sync_names_the_local_values_an_apply_removed_without_printing_any_value
     monkeypatch.setattr(
         main_module,
         "sync_service",
-        lambda **_kwargs: SyncReport(
+        lambda *_args, **_kwargs: SyncReport(
             dropped=(DroppedLocal(".config/zed/settings.json", "context_servers.gi[red]thub\x1b", 2),),
         ),
     )
@@ -356,7 +357,7 @@ def test_sync_prints_a_deferrals_reason_and_install_hint(tmp_path, monkeypatch) 
     monkeypatch.setattr(
         main_module,
         "sync_service",
-        lambda **_kwargs: SyncReport(
+        lambda *_args, **_kwargs: SyncReport(
             deferred=(
                 Deferral(
                     "Library/Application Support/Code/User/settings.json",
@@ -393,7 +394,7 @@ def test_watch_wires_the_loop_and_runs_it(tmp_path, monkeypatch) -> None:
         paths.config_file,
     )
     monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
-    monkeypatch.setattr(main_module, "sync_service", lambda **_kwargs: SyncReport())
+    monkeypatch.setattr(main_module, "sync_service", lambda *_args, **_kwargs: SyncReport())
     ran: dict[str, object] = {}
     monkeypatch.setattr("syncintosh.services.watch", lambda **kwargs: ran.update(kwargs))
 
@@ -574,7 +575,7 @@ def test_diff_warns_about_a_policy_it_cannot_judge_and_still_exits_zero(monkeypa
     monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
     warning = str(PolicyMismatch("zsh", "newer"))
     report = DiffReport(entries=(FileDiff(".zshrc", "in-sync"),), policy_warnings=(warning,))
-    monkeypatch.setattr(main_module, "diff_repo_service", lambda **_kwargs: report)
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda *_args, **_kwargs: report)
 
     # when
     result = runner.invoke(main_module.app, ["diff"])

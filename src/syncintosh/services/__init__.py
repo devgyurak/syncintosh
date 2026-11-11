@@ -21,7 +21,7 @@ from syncintosh.services.keys import (
 from syncintosh.services.merge_service import RenderedMerge, merge_text
 from syncintosh.services.repo_writer import write_repo
 from syncintosh.services.setup import mint_machine_id, new_machine_config
-from syncintosh.services.sync import Deferral, DroppedLocal, SyncReport, sync
+from syncintosh.services.sync import Deferral, DroppedLocal, SyncPorts, SyncReport, sync
 from syncintosh.services.sync._shared import Refusal
 from syncintosh.services.watch import watch
 
@@ -34,6 +34,7 @@ __all__ = [
     "FileDiff",
     "Refusal",
     "RenderedMerge",
+    "SyncPorts",
     "SyncReport",
     "diff_repo",
     "doctor",

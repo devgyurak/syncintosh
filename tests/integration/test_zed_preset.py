@@ -32,7 +32,7 @@ from syncintosh.presets import BuiltinCatalog
 from syncintosh.presets.zed import KEYMAP, SETTINGS, SNIPPETS
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
-from syncintosh.services.sync import NO_APP_INFO, SyncReport, sync
+from syncintosh.services.sync import NO_APP_INFO, SyncPorts, SyncReport, sync
 from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
@@ -158,28 +158,30 @@ def _run(
     active = GitCLITransport(machine.repo)
     cipher = EnvelopeCipher(machine.store)
     return sync(
-        transport=active,
-        files=FileRepo(machine.repo),
-        cipher=cipher,
-        scanner=PatternSecretScanner(),
-        store=machine.store,
-        codec=machine.codec,
-        wrapper=cipher,
-        driver=TextMergeDriver(),
-        adapters={"jsonc": JsoncAdapter()},
-        catalog=BuiltinCatalog.default(),
-        live=SystemLiveFiles(),
-        ledger_store=JsonLedgerStore(machine.ledger),
-        pending_store=DirectoryPendingStore(machine.pending),
-        lock=FileLock(machine.lock, timeout_seconds=5),
-        deny=SystemDenyList(),
-        apps=NO_APP_INFO if apps is None else apps,
-        source=SecureFileIdSource(),
-        config=load_config(machine.config_file),
-        home=str(machine.home),
+        SyncPorts.create(
+            transport=active,
+            files=FileRepo(machine.repo),
+            cipher=cipher,
+            scanner=PatternSecretScanner(),
+            store=machine.store,
+            codec=machine.codec,
+            wrapper=cipher,
+            driver=TextMergeDriver(),
+            adapters={"jsonc": JsoncAdapter()},
+            catalog=BuiltinCatalog.default(),
+            live=SystemLiveFiles(),
+            ledger_store=JsonLedgerStore(machine.ledger),
+            pending_store=DirectoryPendingStore(machine.pending),
+            lock=FileLock(machine.lock, timeout_seconds=5),
+            deny=SystemDenyList(),
+            apps=NO_APP_INFO if apps is None else apps,
+            source=SecureFileIdSource(),
+            config=load_config(machine.config_file),
+            home=str(machine.home),
+            branch=active.branch() or BRANCH,
+        ),
         decide=decide,
         resolving=resolving,
-        branch=active.branch() or BRANCH,
         adopt=adopt,
     )
 

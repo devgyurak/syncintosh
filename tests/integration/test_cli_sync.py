@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.cli import wiring as wiring_module
 
 pytestmark = pytest.mark.integration
 
@@ -51,7 +52,7 @@ def test_init_then_sync_on_a_second_machine(tmp_path, monkeypatch, memory_key_st
     stores = {str(home_a): memory_key_store(), str(home_b): memory_key_store()}
     remote = _bare_remote(tmp_path)
     monkeypatch.setenv("SYNCINTOSH_PASSPHRASE", PASSPHRASE)
-    monkeypatch.setattr(main_module, "_key_store", lambda _remote: stores[os.environ["HOME"]])
+    monkeypatch.setattr(wiring_module, "key_store", lambda _remote: stores[os.environ["HOME"]])
 
     # when — A initializes and publishes its file
     _activate(monkeypatch, home_a)
@@ -82,7 +83,7 @@ def test_a_first_connect_exits_1_until_a_side_is_adopted(tmp_path, monkeypatch, 
     stores = {str(home_a): memory_key_store(), str(home_b): memory_key_store()}
     remote = _bare_remote(tmp_path)
     monkeypatch.setenv("SYNCINTOSH_PASSPHRASE", PASSPHRASE)
-    monkeypatch.setattr(main_module, "_key_store", lambda _remote: stores[os.environ["HOME"]])
+    monkeypatch.setattr(wiring_module, "key_store", lambda _remote: stores[os.environ["HOME"]])
     _activate(monkeypatch, home_a)
     _write(home_a / ".zshrc", b"from A\n")
     runner.invoke(main_module.app, ["init", "--remote", remote])
