@@ -49,8 +49,15 @@ _URL_HOST: Final = re.compile(URL_HOST_PATTERN.encode("ascii"))
 # a value under another key name is still sent, and the design note says so.
 _KEYED_VALUE: Final = re.compile(
     rb"(?i:password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|private[_-]?key"
-    rb"|auth|authorization|bearer|cookie|session|pass)[\"']?\s*[:=]\s*"
-    rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n\"',;}\]]+)"
+    rb"|auth|authorization|bearer|cookie|session|pass)"
+    # Up to four more name parts (`secret_access_key`, `SECRET_ACCESS_KEY`, `secretAccessKey`). Outside the
+    # `(?i)` on purpose: a camelCase part has to start with a capital, so `authorName` and `tokenizer` are
+    # not a keyword plus a part. `session_timeout` is masked too; a harmless over-mask beats a leaked key.
+    rb"(?:[_-][A-Za-z0-9]+|[A-Z][a-z0-9]*){0,4}"
+    rb"[\"']?\s*[:=]\s*"
+    # An unquoted value cannot start with `{` or `[`: that is an object or array under the key (`"tokenColors": {`),
+    # whose structure the model needs, and whose members are masked on their own keys.
+    rb"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s{\[\r\n\"',;}\]][^\r\n\"',;}\]]*)"
 )
 
 
@@ -90,7 +97,7 @@ class TextMasker:
     def _spans(self, data: bytes) -> list[tuple[int, int]]:
         found: list[tuple[int, int]] = []
         for _, pattern in _SECRET_PATTERNS:
-            found.extend(match.span() for match in pattern.finditer(data))
+            found.extend(_secret_span(match) for match in pattern.finditer(data))
         for _, pattern, check in CHECKED_PATTERNS:
             # The pattern stops at its width cap; the rest of the run is still the credential's tail.
             found.extend(
@@ -127,6 +134,15 @@ class TextMasker:
         for match in _KEYED_VALUE.finditer(data):
             spans.append(match.span(1))
         return spans
+
+
+def _secret_span(match: re.Match[bytes]) -> tuple[int, int]:
+    """The span to hide: the pattern's `secret` group when it has one, else the whole match.
+
+    A rule anchored on a key name (`AWS_SECRET_ACCESS_KEY=`) marks only the value, so the model still
+    sees which setting it is merging.
+    """
+    return match.span("secret") if "secret" in match.re.groupindex else match.span()
 
 
 def _run_end(data: bytes, end: int) -> int:

@@ -23,6 +23,7 @@ from syncintosh.system import secret_scan
 from syncintosh.system.scan_allow import (
     ALLOWABLE_LABELS,
     AUTHORIZATION_LABEL,
+    AWS_SECRET_LABEL,
     BASIC_LABEL,
     ScanAllow,
     ScanAllowEntry,
@@ -1151,3 +1152,125 @@ def test_a_capped_plain_value_does_not_walk_its_region(monkeypatch: pytest.Monke
     # then — walking a plain value's whole region makes a staircase of keys quadratic, and a timing bound on
     # an input small enough to be fast on CI cannot see that
     assert calls == []
+
+
+# --------------------------------------------------------------------------- AWS secret access key (#63)
+
+# The 40-character example key from AWS's documentation, in two pieces so no source line is key-shaped.
+AWS_KEY_VALUE = b"wJalrXUtnFEMI" + b"/K7MDENG/bPxRfiCYEXAMPLEKEY"
+AWS_KEY_OTHER = b"je7MtGbClwBF" + b"/2Zp9Utk/h3yCo8nvbEXAMPLEKEY"
+
+
+@pytest.mark.parametrize(
+    ("payload", "fmt"),
+    [
+        (b'{"args": {"text": "export AWS_SECRET_ACCESS_KEY=' + AWS_KEY_VALUE + b'\\u000D"}}', "jsonc"),
+        (b"export AWS_SECRET_ACCESS_KEY=" + AWS_KEY_VALUE + b"\n", "text"),
+        (b'{"aws_secret_access_key": "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"aws_secret_access_key = " + AWS_KEY_VALUE + b"\n", "toml"),
+        (b"aws_secret_access_key: " + AWS_KEY_VALUE + b"\n", "yaml"),
+        (b"<key>SecretAccessKey</key>\n<string>" + AWS_KEY_VALUE + b"</string>", "plist"),
+        (b'{"SecretAccessKey": "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"export TF_VAR_aws_secret_access_key=" + AWS_KEY_VALUE + b"\n", "text"),
+        (b"export MY_AWS_SECRET_ACCESS_KEY='" + AWS_KEY_VALUE + b"'\n", "text"),
+        (b"aws_session_token = " + AWS_KEY_VALUE + AWS_KEY_OTHER + b"\n", "toml"),
+        (b"aws_security_token = " + AWS_KEY_VALUE + b"\n", "toml"),
+        (b'{"SecretAccessKey":\n  "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"aws configure set aws_secret_access_key " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"launchctl setenv AWS_SECRET_ACCESS_KEY " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"AWS_SECRET_ACCESS_KEY := " + AWS_KEY_VALUE + b"\n", "text"),
+        (b"<SecretAccessKey>" + AWS_KEY_VALUE + b"</SecretAccessKey>", "xml"),
+    ],
+    ids=[
+        "keybinding-args-text",
+        "shell",
+        "json",
+        "toml",
+        "yaml",
+        "plist",
+        "camel-case",
+        "prefixed-terraform",
+        "prefixed-quoted",
+        "session-token",
+        "security-token",
+        "wrapped-value",
+        "cli-config",
+        "launchctl",
+        "make-assign",
+        "xml-element",
+    ],
+)
+def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
+    # when & then
+    with pytest.raises(SecretScanError) as caught:
+        PatternSecretScanner().scan(payload, subject="settings", format=fmt)
+    assert AWS_SECRET_LABEL in str(caught.value)
+    assert AWS_KEY_VALUE.decode() not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("payload", "fmt"),
+    [
+        (b'{"commit": "' + b"0123456789abcdef" * 2 + b"01234567" + b'"}', "jsonc"),
+        (b"export AWS_SECRET_ACCESS_KEY=$(pass show aws)\n", "text"),
+        (b"export AWS_SECRET_ACCESS_KEY=${SECRET_FROM_VAULT}\n", "text"),
+        (b"export AWS_SECRET_ACCESS_KEY=$VAULT_SECRET\n", "text"),
+        (b"aws_secret_access_key = minioadmin\n", "toml"),
+        (b"aws_secret_access_key = test\n", "toml"),
+        (b"aws_secret_access_key = " + AWS_KEY_VALUE[:39] + b"\n", "toml"),
+        (b'{"SecretAccessKeyId": "' + AWS_KEY_VALUE + b'"}', "jsonc"),
+        (b"aws_secret_access_key\n" + AWS_KEY_VALUE + b"\n", "toml"),
+        (b"SecretAccessKey:\n" + b"anotherReallyLongCamelCaseSettingNameHereXyz: 1\n", "yaml"),
+        (b'{"description": "reads aws_secret_access_key from/the/vault/configured/for/this/profile"}', "jsonc"),
+        # Known limit, pinned like the block scalar: indentation cannot tell a wrapped value from a sibling key.
+        (b"aws_secret_access_key:\n  " + AWS_KEY_VALUE + b"\n", "yaml"),
+    ],
+    ids=[
+        "hash-under-other-key",
+        "command",
+        "braced-reference",
+        "variable",
+        "minioadmin",
+        "test",
+        "39-chars",
+        "other-key",
+        "next-line",
+        "next-key-line",
+        "path-in-prose",
+        "yaml-indented-next-line",
+    ],
+)
+def test_a_value_that_is_not_an_aws_secret_access_key_passes(payload: bytes, fmt: str) -> None:
+    # when
+    result = PatternSecretScanner().scan(payload, subject="settings", format=fmt)
+
+    # then
+    assert result is None
+
+
+def test_the_aws_secret_label_is_allowable_and_binds_one_value() -> None:
+    # given — allow the first key's line only
+    payload = b"aws_secret_access_key = " + AWS_KEY_VALUE + b"\n"
+    digest = _fingerprint_of(payload, ALLOW_KEY)
+    entry = ScanAllowEntry("settings.json", AWS_SECRET_LABEL, digest)
+    scanner = PatternSecretScanner(ScanAllow(key=ALLOW_KEY, entries=frozenset({entry})))
+
+    # when
+    allowed = scanner.scan(payload, subject="settings.json", format="jsonc")
+
+    # then — and a different key under the same name is still refused
+    assert allowed is None
+    with pytest.raises(SecretScanError):
+        scanner.scan(b"aws_secret_access_key = " + AWS_KEY_OTHER + b"\n", subject="settings.json", format="jsonc")
+
+
+def test_a_yaml_block_scalar_aws_secret_access_key_is_a_known_gap() -> None:
+    # given — D6: the value sits on the line after `|`, which the key-anchored pattern cannot see. Pinned so
+    # a change to that is a decision, not an accident (issue #63).
+    payload = b"aws_secret_access_key: |\n  " + AWS_KEY_VALUE + b"\n"
+
+    # when
+    result = PatternSecretScanner().scan(payload, subject="settings.yaml", format="yaml")
+
+    # then
+    assert result is None

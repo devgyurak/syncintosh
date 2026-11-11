@@ -293,3 +293,114 @@ def test_the_tail_of_a_basic_credential_past_the_width_cap_is_masked() -> None:
 
     # then
     assert token[-8:] not in masked.text
+
+
+# --------------------------------------------------------------------------- AWS secret access key (#63)
+
+AWS_VALUE = "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ('{"args": {"text": "export AWS_SECRET_ACCESS_KEY=' + AWS_VALUE + '\\u000D"}}', "AWS_SECRET_ACCESS_KEY"),
+        ("export AWS_SECRET_ACCESS_KEY=" + AWS_VALUE + "\n", "AWS_SECRET_ACCESS_KEY"),
+        ('{"aws_secret_access_key": "' + AWS_VALUE + '"}', "aws_secret_access_key"),
+        ("aws_secret_access_key = " + AWS_VALUE + "\n", "aws_secret_access_key"),
+        ("<key>SecretAccessKey</key>\n<string>" + AWS_VALUE + "</string>", "SecretAccessKey"),
+        ('{"SecretAccessKey": "' + AWS_VALUE + '"}', "SecretAccessKey"),
+        ("export TF_VAR_aws_secret_access_key=" + AWS_VALUE + "\n", "TF_VAR_aws_secret_access_key"),
+        ("aws_session_token = " + AWS_VALUE + AWS_VALUE + "\n", "aws_session_token"),
+        ("secretAccessKey: " + AWS_VALUE + "\n", "secretAccessKey"),
+    ],
+    ids=["keybinding", "shell", "json", "toml", "plist", "camel-case", "prefixed", "session-token", "yaml-camel"],
+)
+def test_an_aws_secret_access_key_is_masked_and_its_name_stays_visible(text: str, name: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then — the value is hidden, the key name is not (the model has to know what it merges)
+    assert (AWS_VALUE in masked.text, name in masked.text) == (False, True)
+
+
+@pytest.mark.parametrize("text", ["tokenizer: whitespace", "passthrough: true", "authorName: Jane Doe"])
+def test_a_name_that_only_starts_with_a_keyword_is_left_alone(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert masked.text == text
+
+
+def test_overlapping_rules_leave_the_aws_key_name_visible() -> None:
+    # given — both rules fire on the same line: the keyed rule and the AWS rule overlap on the value only
+    text = "AWS_SECRET_ACCESS_KEY=" + AWS_VALUE
+
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then — the merged span starts at the value, so the name is intact and exactly one token replaces it
+    assert masked.text.startswith("AWS_SECRET_ACCESS_KEY=") and len(masked.values) == 1
+
+
+def test_an_aws_value_on_a_yaml_block_line_is_a_known_gap() -> None:
+    # given — D6: the value is on the line after `|`; neither rule reaches it
+    text = "aws_secret_access_key: |\n  " + AWS_VALUE + "\n"
+
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert AWS_VALUE in masked.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"editor.semanticTokenColorCustomizations": {"enabled": true}',
+        '"tokenColorCustomizations": [1, 2]',
+        '{"auth": {"enabled": true}}',
+    ],
+    ids=["object", "array", "auth-object"],
+)
+def test_an_object_or_array_under_a_credential_like_key_keeps_its_brackets(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then — the opening bracket is structure, not a value
+    assert masked.text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "tail"),
+    [
+        ("<key>SecretAccessKey</key><string>" + AWS_VALUE + "-tail9</string>", "-tail9"),
+        ("<SecretAccessKey>" + AWS_VALUE + "-tail9</SecretAccessKey>", "-tail9"),
+    ],
+    ids=["plist", "element"],
+)
+def test_the_tail_of_an_aws_value_past_the_base64_run_is_masked(text: str, tail: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert tail not in masked.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"SecretAccessKey":\n  "' + AWS_VALUE + '"}',
+        "aws configure set aws_secret_access_key " + AWS_VALUE,
+        "launchctl setenv AWS_SECRET_ACCESS_KEY " + AWS_VALUE,
+        "AWS_SECRET_ACCESS_KEY := " + AWS_VALUE,
+        "<SecretAccessKey>" + AWS_VALUE + "</SecretAccessKey>",
+    ],
+    ids=["wrapped", "cli-config", "launchctl", "make-assign", "element"],
+)
+def test_an_aws_secret_access_key_in_a_variant_spelling_is_masked(text: str) -> None:
+    # when
+    (masked,) = _masker().mask(text)
+
+    # then
+    assert AWS_VALUE not in masked.text

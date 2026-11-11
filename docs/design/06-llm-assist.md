@@ -28,7 +28,10 @@ file (empty for a whole file), and the base, local and remote values. Before the
 - every secret pattern the scanner knows, both its structured and its shell table, so a credential
   the scanner would refuse is masked here too;
 - a value written under a credential-like key: `password`, `passwd`, `pwd`, `secret`, `token`,
-  `api_key`, `apikey`, `credential`, `private_key`, in JSON, shell, and YAML spellings;
+  `api_key`, `apikey`, `credential`, `private_key`, in JSON, shell, and YAML spellings. A key with more
+  name parts after the keyword counts too (`secret_access_key`, `SECRET_ACCESS_KEY`, `secretAccessKey`),
+  up to four parts; `tokenizer` and `authorName` do not. A rule keyed on a name, such as the AWS secret
+  access key, hides only the value and leaves the key name for the model to read;
 - the home directory path, and the username as a whole word;
 - internal hostnames and IP addresses, and the host of any URL, by the built-in rule (`.local`,
   `.internal`, `.lan`, `.corp`, `home.arpa`, `localhost`, a single-label name, loopback, link-local,
@@ -37,7 +40,7 @@ file (empty for a whole file), and the base, local and remote values. Before the
 **This is not "every value".** A value under a key name outside that list, in a format the patterns
 do not recognise, is sent as it is. A value nested under a credential-looking object is covered only
 when its own key is on the list: `{"auth": {"user": "u", "pass": "x"}}` hides `pass`, but a nested key
-such as `"secret_phrase"` is sent. The model needs the values to merge them: a conflict with every
+such as `"mnemonic"` is sent. The model needs the values to merge them: a conflict with every
 value masked gives it nothing to choose between. The trade-off is deliberate, and it is why the
 approval screen shows what will be published, in full. Narrowing it further is a decision for the
 person who owns the settings, not a default.
