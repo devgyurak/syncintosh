@@ -56,8 +56,9 @@ src/syncintosh/
 ├── crypto/       AES-256-GCM envelope, HKDF, manifest encryption, key wrapping, keyring.
 ├── vcs/          git CLI subprocess transport (commit / push / pull).
 ├── system/       Collection, app detection, launchd, watchdog, secret scan, masking (`masking.py`).
-└── llm/          OpenAI-compatible client and key lookup. The placeholder token shape and proposal
-                  validation are in `core/advice.py`.
+└── llm/          OpenAI-compatible client and key lookup. The placeholder token shape, response
+                  parsing, and token restore are in `core/advice.py`; proposal validation
+                  (`proposal_problem`) is in `services/resolve.py`.
 ```
 
 ### Rules you must keep
