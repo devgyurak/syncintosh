@@ -277,6 +277,25 @@ decide about survives:
   `test_a_value_change_in_a_mixed_layout_object_is_spliced_in_place` and
   `test_a_rewrite_that_would_drop_a_comment_is_refused`.
 
+  This also changes the **sealed** bytes, not only the rendered ones. Where a strip or a carry touches a
+  value below such an object, the projection is now spliced instead of rewritten whole
+  (`test_project_text_keeps_a_mixed_layout_when_it_strips_a_nested_key`), so the stored object for that
+  file differs from the one an older build made. **This is a deliberate exception to the rule that a change in
+  what the code projects raises `policy_epoch`** (`03-manifest.md`, Policy stamp; `AGENTS.md` §3.2): the epoch
+  is not raised and `POLICY_HISTORY` is not appended. The tree is the same, the shape is rare (a first member
+  on the `{` line, or a `}` after the last member), and the cost is bounded to one file. Because the stamp is
+  unchanged, an older build reads it as a match: **no gate stops it**, and the "newer stops the cycle" path
+  does not apply. What was observed:
+  - On the first sync after an upgrade, an unchanged live file of this shape projects to different bytes than
+    the apply ledger holds (the ledger digest is of the projection), so it reads as a local change and is
+    sealed once more with the same tree. The next sync is unchanged.
+  - A machine that has not upgraded refuses to apply the new object for that one file: its restore does not
+    reproduce the object byte for byte, so it stops at the round-trip check (`ProjectionError`, reported like
+    any file that cannot be applied). The other files are unaffected.
+  - Not tested: an older build that still has its own live file of this shape projects it to the old bytes
+    and may seal them again, so a fleet running mixed builds could see this one file change back and forth
+    until every machine is upgraded.
+
   A member-less object that carries a comment is not part of
   this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block
   comment that shares the closing brace's line keeps the member out of the comment and moves `}` to its own

@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from hypothesis import example, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters import jsonc
@@ -733,9 +733,15 @@ _COMMENT_LISTS_AT_LEAST_ONE = st.lists(
 # A comma alone on its line has no member line to leave with, so the renderer rewrites such an object whole
 # — which refuses when a comment is inside it. That refusal is the right answer, so the two axes are never
 # drawn together: a commented document keeps its commas at the line's end, and an own-line comma has none.
+# `hug` is the mixed layout of issue #64: the first member on the `{` line and the `}` on the last member's line.
+_HUGS = st.sampled_from(["none", "open", "close", "both"])
 _LAYOUT = st.one_of(
-    st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comma": st.just("end"), "comments": _COMMENT_LISTS}),
-    st.fixed_dictionaries({**_LAYOUT_FIELDS_INDENTED, "comma": st.just("own-line"), "comments": st.just([])}),
+    st.fixed_dictionaries(
+        {**_LAYOUT_FIELDS_INDENTED, "comma": st.just("end"), "comments": _COMMENT_LISTS, "hug": _HUGS}
+    ),
+    st.fixed_dictionaries(
+        {**_LAYOUT_FIELDS_INDENTED, "comma": st.just("own-line"), "comments": st.just([]), "hug": _HUGS}
+    ),
 )
 
 # Where a document has a trailing comma, as the paths of the containers that end in one. The parser
@@ -802,7 +808,7 @@ def _comment_in_first_empty_object(value, text: str, comment_text: str) -> str:
     return text.replace("{}", body, 1)
 
 
-def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comments, comma="end") -> str:
+def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comments, comma="end", hug="none") -> str:
     """One settings file, laid out the way this combination describes.
 
     Comments go where a member edit cannot need to rewrite one: between the *root* members, found
@@ -840,7 +846,44 @@ def _fuzz_template(value, *, indent, separators, newline, trailing, pad, comment
         # After the comments, which find the root's `,\n<indent>"` separators; and only for an indented
         # document, because with no indent a nested member's separator looks like a root one.
         text = text.replace(root_comma, "\n" + unit + "," + "\n" + unit + '"')
+    if isinstance(value, dict) and value and "\n" in text:
+        text = _hugged(text, unit, hug)
     return text if newline == "\n" else text.replace("\n", newline)
+
+
+def _hugged(text: str, unit: str, hug: str) -> str:
+    """The root object with its first member on the `{` line and/or its `}` on the last member's line.
+
+    A `//` comment runs to the end of its line, so a layout that would put a member or the brace after one is
+    left as it was: `{ // note` keeps its newline, and a `}` after a comment line stays on its own line. A
+    block comment is a closed span, so a member or the brace may follow it. Anything else would make the
+    template a different document than the one the property assumes.
+    """
+    opening, _, rest = text.partition("\n")
+    if hug in ("open", "both") and (opening == "{" or (opening.startswith("{ /*") and opening.endswith("*/"))):
+        text = opening + " " + rest.removeprefix(unit)
+    body, found, tail = text.rpartition("\n}")
+    if hug in ("close", "both") and found and not tail and not body.rpartition("\n")[2].lstrip().startswith("//"):
+        text = body + " }"
+    return text
+
+
+def _render_or_known_limit(adapter, tree, template, *, value, how, layout):
+    """The render, or `None` for the one refusal the design documents (`02-base-and-merge.md`, issue #64).
+
+    A key added to or removed from a root whose first member shares the `{` line, or whose `}` shares the last
+    member's line, is rewritten whole, and a comment inside it is refused rather than dropped. Any other refusal
+    still raises: it is a bug, and a tolerated one would hide the very failures the property exists to catch.
+    """
+    hugged = template != _fuzz_template(value, **{**layout, "hug": "none"})
+    commented = any(placement != "none" for placement, _ in layout["comments"])
+    try:
+        return adapter.render(tree, template)
+    except RenderRefused:
+        # Only a hugged root is a dict, so the key sets are compared after that check.
+        if hugged and commented and set(_mutated(value, how)) != set(value):
+            return None
+        raise
 
 
 @settings(max_examples=500, deadline=None)
@@ -871,8 +914,10 @@ def test_a_render_never_disagrees_with_the_tree_it_was_given(value, how, layout)
 
     # when — nothing here may refuse. The comments sit between root members, where a member edit
     # never needs to rewrite one, so a refusal is a bug and not a verdict — and a tolerated one would
-    # hide the very failures this property exists to catch.
-    rendered = adapter.render(tree, template)
+    # hide the very failures this property exists to catch. The one exception is the documented known
+    # limit: a key added or removed in a hugged, commented root, which the helper turns into `None`.
+    rendered = _render_or_known_limit(adapter, tree, template, value=value, how=how, layout=layout)
+    assume(rendered is not None)
 
     # then — the render must be the tree it was handed, or the merge publishes what no one decided,
     # and it must not invent layout the file did not have: a trailing comma may stay where the

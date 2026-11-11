@@ -506,8 +506,7 @@ class _Diff:
 
         The template's own member order is kept, as `_object` and `_splice_inline` already do.
         """
-        names = [member.key for member in node.members]
-        return len(set(names)) == len(names) and set(names) == set(self._children(path))
+        return {member.key for member in node.members} == set(self._children(path))
 
     def _lone_comma_touched(self, node: _ObjectNode, path: KeyPath) -> bool:
         """True when a line edit of this object would strand a comma that sits alone on its line.
