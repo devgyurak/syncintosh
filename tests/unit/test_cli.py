@@ -174,6 +174,37 @@ def test_sync_exits_1_for_a_path_it_could_not_write(report, expected, tmp_path, 
     assert expected in _combined(result)
 
 
+@pytest.mark.parametrize(
+    ("report", "exit_code"),
+    [
+        (SyncReport(refused=(Refusal(".zshrc", "the path's preset does not own it"),)), 1),
+        (SyncReport(unprojectable=(Refusal(".zshrc", "the file could not be reduced to its synced form"),)), 1),
+        (SyncReport(refused=(Refusal(".vscode", "the path is not in this machine's config", blocking=False),)), 0),
+        (SyncReport(), 0),
+    ],
+)
+def test_resolve_exits_by_the_same_verdict_as_sync(report, exit_code, tmp_path, monkeypatch) -> None:
+    # given — the service settled the conflicts and reports what it could not write
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        paths.config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    monkeypatch.setattr(main_module, "sync_service", lambda *_args, **_kwargs: report)
+
+    # when
+    result = runner.invoke(main_module.app, ["resolve", "--take", "remote", "--yes"])
+
+    # then — a blocking refusal fails the run for resolve too, a record this machine does not track does not
+    assert result.exit_code == exit_code
+
+
 def test_sync_exits_0_for_a_record_this_machine_does_not_track(tmp_path, monkeypatch) -> None:
     # given — the service reports a record this machine's config does not name, which is ordinary:
     # every machine carries every record, and one set up with fewer presets is not broken

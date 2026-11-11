@@ -14,6 +14,14 @@ class DomainError(Exception):
     """Base class for every domain failure that crosses a layer boundary."""
 
 
+class LlmPolicyRefused(DomainError):
+    """An LLM setting or flag the guardrails refuse, with the fix in the message (``AGENTS.md`` §3.5)."""
+
+
+class LlmEndpointDeclined(LlmPolicyRefused):
+    """The person declined to send the conflicting values to an endpoint outside the private network."""
+
+
 class ConflictsNotCovered(DomainError):
     """A resolve run has no decision for some pending conflicts, so nothing is published."""
 

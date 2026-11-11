@@ -427,7 +427,7 @@ def test_a_plain_http_endpoint_to_a_public_host_is_refused_at_resolve_time() -> 
 
     # when & then — refused before any call, and named as the reason
     with pytest.raises(typer.BadParameter, match="plain http"):
-        _assisted_choice(config, None, _ports())
+        _assisted_choice(config, None, _ports(catalog=BuiltinCatalog.default()))
 
 
 def test_a_new_host_in_a_proposal_is_asked_even_when_auto_apply_allows_it() -> None:

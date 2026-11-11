@@ -15,9 +15,17 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
-from syncintosh.core.advice import Advice, MaskedText, new_host_tokens, rationale_for_display
-from syncintosh.core.errors import ConflictsNotCovered, ContentParseError, SyntaxInvalid
+from syncintosh.core.advice import Advice, MaskedText, is_public_endpoint, new_host_tokens, rationale_for_display
+from syncintosh.core.config import LlmConfig
+from syncintosh.core.errors import (
+    ConflictsNotCovered,
+    ContentParseError,
+    LlmEndpointDeclined,
+    LlmPolicyRefused,
+    SyntaxInvalid,
+)
 from syncintosh.core.keyed_array import accepts_group
 from syncintosh.core.manifest import FileFormat
 from syncintosh.core.paths import collision_key
@@ -307,6 +315,35 @@ def shell_presets(catalog: PresetCatalog, names: Iterable[str]) -> tuple[str, ..
         if preset is not None and any(file.validator == "zsh" for file in preset.files):
             shell.append(name)
     return tuple(shell)
+
+
+def refuse_unseen_auto_apply(llm: LlmConfig, *, yes: bool) -> None:
+    """Refuse `--llm --yes` when `llm.auto_apply` names presets: `--yes` skips the only screen that shows the result."""
+    if yes and llm.auto_apply:
+        # --yes skips the approval screen, the only place an auto-applied proposal is seen.
+        raise LlmPolicyRefused("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
+
+
+def check_llm_endpoint(llm: LlmConfig, base_url: str, catalog: PresetCatalog, confirm: Callable[[str], bool]) -> None:
+    """Refuse an endpoint or an `auto_apply` the guardrails do not allow, and confirm one off the private network.
+
+    The checks run in order, and nothing is sent before they all pass: plain http to a public host, a shell preset in
+    `llm.auto_apply`, then the person's confirmation (`confirm` gets the prompt) when the endpoint is not a loopback or
+    private-network address, because the conflicting values leave the machine.
+    """
+    public = is_public_endpoint(base_url, llm.internal_domains)
+    if urlsplit(base_url).scheme == "http" and public:
+        # The key and the conflicting values would travel in clear to a host off the network.
+        raise LlmPolicyRefused("llm.base_url over plain http may not name a public host; use https")
+    shell = shell_presets(catalog, llm.auto_apply)
+    if shell:
+        # A shell file is code the next shell runs. A model's change to it is always shown, never applied unasked.
+        raise LlmPolicyRefused(f"llm.auto_apply names shell presets, which are always asked: {', '.join(shell)}")
+    if public and not confirm(
+        f"{base_url} is not a loopback or private-network address: the conflicting values would leave "
+        "this network. Continue?"
+    ):
+        raise LlmEndpointDeclined(f"{base_url} was not confirmed as an endpoint for the conflicting values")
 
 
 def auto_apply_for(catalog: PresetCatalog, names: frozenset[str]) -> Callable[[ConflictView], bool]:
