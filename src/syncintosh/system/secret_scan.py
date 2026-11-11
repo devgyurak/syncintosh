@@ -52,11 +52,20 @@ _AWS_KEY = (
 )
 
 # Shell `=`, JSON `":`, an escaped `\":\"` (JSON inside a JSON string, a keybinding's `args.text`), TOML
-# ` = `, YAML `: `, `:=`; a quote around the value is optional. A `:`/`=` may be followed by a line break
-# (a JSON value wrapped onto the next line). A bare run of blanks is a separator too, because that is how
-# a command line spells it (`aws configure set aws_secret_access_key <key>`, `launchctl setenv NAME <key>`);
-# it stays on one line, so a key name at the end of a line never pairs with the next line's text.
-_AWS_SEPARATOR = rb"\\?[\"']?(?:\s*+(?::=|[:=])\s*+|[ \t]++)\\?[\"']?"
+# ` = `, YAML `: `, `:=`; a quote around the value is optional. Three spellings, in this order:
+#
+# * `:`/`=`/`:=` and the value on the same line;
+# * `:`/`=`/`:=` and a line break, **only when a quote opens the value** (a JSON value wrapped onto the
+#   next line). An unquoted value on the next line is not read: that line is as likely the next key
+#   (`SecretAccessKey:` / `anotherLongSettingName: 1`) as a value;
+# * a bare run of blanks, which is how a command line spells it (`aws configure set aws_secret_access_key
+#   <key>`, `launchctl setenv NAME <key>`). It stays on one line, and the value must hold a digit within
+#   its first 39 characters: a real key is random base64 and nearly always does, while a path or a word in
+#   a sentence (`reads aws_secret_access_key from/the/vault/…`) usually does not.
+_AWS_SEPARATOR = (
+    rb"\\?[\"']?(?:[ \t]*+(?::=|[:=])[ \t]*+|[ \t]*+(?::=|[:=])\s*+(?=\\?[\"'])"
+    rb"|[ \t]++(?=\\?[\"']?[A-Za-z0-9/+=]{0,39}[0-9]))\\?[\"']?"
+)
 
 # At least 40, not exactly 40: a session token and the 64-hex secret of an AWS-compatible store are the
 # same credential and longer. The class has no `$`, `{` or `(`, so a reference (`$AWS_SECRET`,

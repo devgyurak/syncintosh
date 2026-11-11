@@ -1220,6 +1220,8 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         (b"aws_secret_access_key = " + AWS_KEY_VALUE[:39] + b"\n", "toml"),
         (b'{"SecretAccessKeyId": "' + AWS_KEY_VALUE + b'"}', "jsonc"),
         (b"aws_secret_access_key\n" + AWS_KEY_VALUE + b"\n", "toml"),
+        (b"SecretAccessKey:\n" + b"anotherReallyLongCamelCaseSettingNameHereXyz: 1\n", "yaml"),
+        (b'{"description": "reads aws_secret_access_key from/the/vault/configured/for/this/profile"}', "jsonc"),
     ],
     ids=[
         "hash-under-other-key",
@@ -1231,6 +1233,8 @@ def test_an_aws_secret_access_key_is_refused(payload: bytes, fmt: str) -> None:
         "39-chars",
         "other-key",
         "next-line",
+        "next-key-line",
+        "path-in-prose",
     ],
 )
 def test_a_value_that_is_not_an_aws_secret_access_key_passes(payload: bytes, fmt: str) -> None:
