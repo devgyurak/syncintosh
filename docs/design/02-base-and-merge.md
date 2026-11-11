@@ -290,11 +290,14 @@ decide about survives:
     the apply ledger holds (the ledger digest is of the projection), so it reads as a local change and is
     sealed once more with the same tree. The next sync is unchanged.
   - A machine that has not upgraded refuses to apply the new object for that one file: its restore does not
-    reproduce the object byte for byte, so it stops at the round-trip check (`ProjectionError`, reported like
-    any file that cannot be applied). The other files are unaffected.
-  - Not tested: an older build that still has its own live file of this shape projects it to the old bytes
-    and may seal them again, so a fleet running mixed builds could see this one file change back and forth
-    until every machine is upgraded.
+    reproduce the object byte for byte, so it stops at the round-trip check (`ProjectionError`). The other
+    files are unaffected. The refusal is an `unprojectable` entry, which is blocking, so `SyncReport.failed`
+    is true and `syncintosh sync` exits 1 on **every** cycle until that machine is upgraded.
+  - That machine does not seal its own bytes back. With the file untouched its projection still equals the
+    ledger entry, so `classify` returns `pending-apply` (`core/ledger.py`), which collects nothing. It seals
+    only when the file is edited there (`local-change`). The upgraded build restores an object an older build
+    made, so the layout follows whichever side wrote last. Pinned by
+    `test_an_older_machine_with_an_unchanged_file_refuses_a_resealed_object_and_does_not_seal_again`.
 
   A member-less object that carries a comment is not part of
   this limit: `{ /* note */ }` takes a new member after the comment (`{ /* note */ "x": 1 }`), and a block

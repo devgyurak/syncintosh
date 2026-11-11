@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from _harness import run_sync
 
+from syncintosh.adapters import jsonc
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
@@ -1393,3 +1394,47 @@ def test_a_file_refused_by_its_syntax_check_after_the_reduce_reports_nothing_dro
     assert report.dropped == ()
     assert _read(b, WILD) == before
     assert before.count(FAKE_ENV) == 2
+
+
+MIXED_LIVE = b'{"a": 1,\n "window": {\n    "zoomLevel": 1,\n    "other": 2\n }\n}\n'
+
+
+def _run_as_an_older_build(monkeypatch, machine: Machine) -> SyncReport:
+    """One sync with the renderer as it was before issue #64: no member-by-member splice of a mixed layout."""
+    with monkeypatch.context() as older:
+        older.setattr(jsonc._Diff, "_same_members", lambda self, node, path: False)
+        return _run(machine)
+
+
+def test_an_older_machine_with_an_unchanged_file_refuses_a_resealed_object_and_does_not_seal_again(
+    tmp_path, memory_key_store, monkeypatch
+) -> None:
+    # given — two machines in sync on a mixed-layout file with a nested noise key, both on the older renderer;
+    # after that A upgrades, so its next sync seals the same tree as different bytes
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a, _jsonc_config(a))
+    _write(a, JSONC, MIXED_LIVE)
+    _run_as_an_older_build(monkeypatch, a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, _jsonc_config(b), import_from=a.recovery)
+    (b.home / JSONC).parent.mkdir(parents=True)
+    _run_as_an_older_build(monkeypatch, b)
+    # B's own file has the same layout and its own value for the noise key: it projects to the object B holds
+    _write(b, JSONC, MIXED_LIVE.replace(b'"zoomLevel": 1', b'"zoomLevel": 5'))
+    resealed = _run(a)
+    published = _git(a.repo, "rev-parse", "HEAD").strip()
+    live = _read(b, JSONC)
+
+    # when — B, still the older build and with its file untouched, syncs twice
+    first = _run_as_an_older_build(monkeypatch, b)
+    second = _run_as_an_older_build(monkeypatch, b)
+
+    # then — it refuses that file every cycle (a failed run), publishes nothing, and leaves its file alone
+    assert resealed.unchanged is False
+    assert [refusal.path for refusal in first.unprojectable] == [JSONC]
+    assert [first.failed, second.failed] == [True, True]
+    assert [first.collected, second.collected] == [(), ()]
+    assert _git(remote, "rev-parse", "main").strip() == published
+    assert _git(b.repo, "rev-parse", "HEAD").strip() == published
+    assert _read(b, JSONC) == live

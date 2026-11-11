@@ -16,7 +16,7 @@ from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 from syncintosh.adapters import jsonc
-from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, JsoncAdapter
+from syncintosh.adapters.jsonc import LONE_COMMA_REFUSED, VALUE_WITH_NOTE_REFUSED, JsoncAdapter
 from syncintosh.adapters.text_merge import TextMergeDriver
 from syncintosh.core.content_merge import merge_content
 from syncintosh.core.errors import ContentParseError, RenderRefused
@@ -872,16 +872,16 @@ def _render_or_known_limit(adapter, tree, template, *, value, how, layout):
     """The render, or `None` for the one refusal the design documents (`02-base-and-merge.md`, issue #64).
 
     A key added to or removed from a root whose first member shares the `{` line, or whose `}` shares the last
-    member's line, is rewritten whole, and a comment inside it is refused rather than dropped. Any other refusal
-    still raises: it is a bug, and a tolerated one would hide the very failures the property exists to catch.
+    member's line, is rewritten whole, and a comment inside it is refused rather than dropped (a comma on its own
+    line is refused for the same reason, with its own text). Any other refusal still raises: it is a bug, and a
+    tolerated one would hide the very failures the property exists to catch.
     """
-    hugged = template != _fuzz_template(value, **{**layout, "hug": "none"})
-    commented = any(placement != "none" for placement, _ in layout["comments"])
+    known = {VALUE_WITH_NOTE_REFUSED, *([LONE_COMMA_REFUSED] if layout["comma"] == "own-line" else [])}
+    keys_change = isinstance(value, dict) and set(_mutated(value, how)) != set(value)
     try:
         return adapter.render(tree, template)
-    except RenderRefused:
-        # Only a hugged root is a dict, so the key sets are compared after that check.
-        if hugged and commented and set(_mutated(value, how)) != set(value):
+    except RenderRefused as refused:
+        if layout["hug"] != "none" and keys_change and refused.reason in known:
             return None
         raise
 
@@ -898,6 +898,7 @@ def _render_or_known_limit(adapter, tree, template, *, value, how, layout):
         "pad": False,
         "comma": "end",
         "comments": [("in-empty-object", "// hides **/*.map below")],
+        "hug": "none",
     },
 )
 @given(value=_FUZZ_VALUES, how=_MUTATIONS, layout=_LAYOUT)
