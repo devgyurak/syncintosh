@@ -14,7 +14,6 @@ import functools
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -623,12 +622,10 @@ def sync(adopt: str | None = typer.Option(None, "--adopt", help="local | remote,
         _fail(exc)
         return
     _render(report, config)
-    settled = (*report.refused, *report.unprojectable, *report.invalid)
-    if report.has_conflicts or report.needs_adopt or any(refusal.blocking for refusal in settled):
+    if report.failed:
         # A path that was refused, could not be projected, or would not parse is a failure, not a
         # partial success: a launchd job or a script must not read "nothing was applied here" as
-        # "all is well". A record this machine simply does not track is *not* that — it is a normal
-        # state (every machine carries every record) and is reported on stdout instead.
+        # "all is well" (`SyncReport.failed`).
         raise typer.Exit(code=1)
 
 
@@ -650,7 +647,7 @@ def resolve(
     configured model suggests a choice for each content conflict; you accept or decline each one, and
     the final approval still applies. A run that leaves any conflict without a choice publishes nothing.
     """
-    from syncintosh.services.resolve import decision, scoped_chooser, take_chooser
+    from syncintosh.services.resolve import decision, refuse_unseen_auto_apply, scoped_chooser, take_chooser
     from syncintosh.system.config import load_config
     from syncintosh.system.paths import MachinePaths
 
@@ -666,9 +663,8 @@ def resolve(
     machine = MachinePaths.default()
     try:
         config = load_config(machine.config_file)
-        if llm and yes and config.llm.auto_apply:
-            # --yes skips the approval screen, the only place an auto-applied proposal is seen.
-            raise typer.BadParameter("--yes would publish auto-applied proposals unseen; drop --yes or llm.auto_apply")
+        if llm:
+            _llm_policy(refuse_unseen_auto_apply, config.llm, yes=yes)
         ports = wiring.machine_ports(config, machine)
         when_tag = ports.when_tag
         approve = None if yes else partial(_confirm_resolution, when_tag=when_tag)
@@ -689,7 +685,23 @@ def resolve(
     _render(report, config)
     if report.has_conflicts or report.needs_adopt:
         typer.echo("nothing was published; the conflicts that remain are still pending", err=True)
+    if report.failed:
         raise typer.Exit(code=1)
+
+
+def _llm_policy(check: Callable[..., None], *args, **kwargs) -> None:
+    """Run a service-side LLM guardrail and speak its refusal the way the CLI always has.
+
+    A refusal is a bad option (exit 2, the message as written); a declined confirmation is a plain exit 1.
+    """
+    from syncintosh.core.errors import LlmEndpointDeclined, LlmPolicyRefused
+
+    try:
+        check(*args, **kwargs)
+    except LlmEndpointDeclined as exc:
+        raise typer.Exit(code=1) from exc
+    except LlmPolicyRefused as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _assisted_choice(config, machine, ports: SyncPorts) -> Callable[[ConflictView], Choice | None]:
@@ -701,28 +713,21 @@ def _assisted_choice(config, machine, ports: SyncPorts) -> Callable[[ConflictVie
     from functools import partial
     from getpass import getuser
 
-    from syncintosh.core.advice import is_public_endpoint
     from syncintosh.llm.client import OpenAIAdvisor, OpenAIChatTransport
     from syncintosh.llm.keys import llm_api_key
-    from syncintosh.services.resolve import advised_chooser, auto_apply_for, proposal_problem, shell_presets
+    from syncintosh.services.resolve import advised_chooser, auto_apply_for, check_llm_endpoint, proposal_problem
     from syncintosh.system.masking import TextMasker
 
     llm = config.llm
     if llm.base_url is None or llm.model is None:
         raise typer.BadParameter("set llm.base_url and llm.model in config.json before using --llm")
-    if urlsplit(llm.base_url).scheme == "http" and is_public_endpoint(llm.base_url, llm.internal_domains):
-        # The key and the conflicting values would travel in clear to a host off the network.
-        raise typer.BadParameter("llm.base_url over plain http may not name a public host; use https")
-    shell = shell_presets(ports.catalog, llm.auto_apply)
-    if shell:
-        # A shell file is code the next shell runs. A model's change to it is always shown, never applied unasked.
-        raise typer.BadParameter(f"llm.auto_apply names shell presets, which are always asked: {', '.join(shell)}")
-    if is_public_endpoint(llm.base_url, llm.internal_domains) and not typer.confirm(
-        f"{llm.base_url} is not a loopback or private-network address: the conflicting values would leave "
-        "this network. Continue?",
-        default=False,
-    ):
-        raise typer.Exit(code=1)
+    _llm_policy(
+        check_llm_endpoint,
+        llm,
+        llm.base_url,
+        ports.catalog,
+        lambda prompt: typer.confirm(prompt, default=False),
+    )
     catalog, adapters, validators = ports.catalog, ports.adapters, ports.validators
     return advised_chooser(
         advisor=OpenAIAdvisor(

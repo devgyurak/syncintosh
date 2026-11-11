@@ -345,6 +345,17 @@ class SyncReport:
         return bool(self.first_sight)
 
     @property
+    def failed(self) -> bool:
+        """True when a script or launchd job must read this cycle as a failure; `sync` and `resolve` share this verdict.
+
+        Conflicts, a first-sight record that needs `--adopt`, and any blocking refusal, unprojectable path, or file
+        that would not parse. A path this machine simply does not track is *not* blocking: every machine carries every
+        record, so it is reported and the cycle still did its job.
+        """
+        settled = (*self.refused, *self.unprojectable, *self.invalid)
+        return self.has_conflicts or self.needs_adopt or any(refusal.blocking for refusal in settled)
+
+    @property
     def restore_groups(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
         """`(commit, paths)` for what to restore from, in first-seen order; `paths` is empty for the one-commit case.
 
