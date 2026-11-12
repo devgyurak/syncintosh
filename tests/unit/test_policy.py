@@ -201,7 +201,13 @@ def test_the_digest_ignores_file_order(seed) -> None:
     # given
     files = list(VSCODE.files)
     random.Random(seed).shuffle(files)
-    shuffled = Preset.create(name=VSCODE.name, files=tuple(files), bundle_id=VSCODE.bundle_id, profiles=VSCODE.profiles)
+    shuffled = Preset.create(
+        name=VSCODE.name,
+        files=tuple(files),
+        bundle_id=VSCODE.bundle_id,
+        profiles=VSCODE.profiles,
+        policy_epoch=VSCODE.policy_epoch,
+    )
 
     # when
     digest = policy_digest(shuffled)

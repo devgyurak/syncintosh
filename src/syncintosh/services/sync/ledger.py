@@ -13,6 +13,7 @@ from syncintosh.core.errors import DocumentRefused
 from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord
 from syncintosh.core.models import LedgerEntry
 from syncintosh.core.ports import DenyList, LiveFiles
+from syncintosh.core.profile_rename import profile_anchor
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved
 from syncintosh.services.sync._shared import (
     _NO_SOURCE,
@@ -29,6 +30,36 @@ from syncintosh.services.sync.collect import _real_path_refusal, _unsafe_glob_di
 def _release_of(located: Located) -> str:
     """The release folder name a located path lives in (`DataGrip2026.2`), or `""` for a path without one."""
     return "" if located.config_directory is None else located.config_directory.rsplit("/", 1)[-1]
+
+
+def _profile_anchor_of(paths: LivePaths, path: str) -> tuple[str, str] | None:
+    """`(directory id, anchor)` of the profile a logical path names on this machine, or `None` when it names none here.
+
+    `None` covers a path that is not a profile's, a profile this Mac lacks, and an unreadable list: an entry whose
+    profile cannot be seen keeps the anchor it has, because that is the evidence of what the profile was called when
+    this Mac last had it (`core/profile_rename.py`).
+    """
+    found = paths.logical(path)
+    if found is None:
+        return None
+    spec, parsed = found
+    view = next((candidate for candidate in paths.views if candidate.spec == spec), None)
+    profile = None if view is None else view.profiles.lookup(parsed.name)
+    return None if profile is None else (profile.directory, profile_anchor(parsed.name))
+
+
+def _with_anchors(settled: Mapping[str, LedgerEntry], manifest: Manifest, paths: LivePaths) -> dict[str, LedgerEntry]:
+    """`settled` with each profile record's entry anchored to the directory and name it has on this machine now.
+
+    Done for every entry, not only a rewritten one: a ledger written before the anchor existed gets it at its next
+    save (decision D6), and the anchor says only what the profile is called, never what its file holds.
+    """
+    anchored: dict[str, LedgerEntry] = {}
+    for file_id, entry in settled.items():
+        record = manifest.records.get(file_id)
+        anchor = None if record is None else _profile_anchor_of(paths, record.path)
+        anchored[file_id] = entry if anchor is None else replace(entry, profile_dir=anchor[0], profile_key=anchor[1])
+    return anchored
 
 
 def _drop_foreign_releases(
@@ -132,7 +163,7 @@ def _settle_ledger(
             old = ledger.get(file_id)
             if old is not None:
                 settled[file_id] = old
-    return settled
+    return _with_anchors(settled, target_manifest, paths)
 
 
 def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat, source: _Source) -> str | None:

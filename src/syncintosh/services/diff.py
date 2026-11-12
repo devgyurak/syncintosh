@@ -22,7 +22,7 @@ from syncintosh.core.config import SyncConfig
 from syncintosh.core.diff import changed_addresses
 from syncintosh.core.errors import ContentParseError, DocumentRefused
 from syncintosh.core.manifest import FileFormat, ManifestRecord
-from syncintosh.core.models import ConflictAddress
+from syncintosh.core.models import ConflictAddress, LedgerEntry
 from syncintosh.core.ports import (
     AgentProjectIndex,
     AppConfigDir,
@@ -41,6 +41,7 @@ from syncintosh.core.presets import ValidatorName
 from syncintosh.services.policy_gate import PolicyView
 from syncintosh.services.profile_paths import LivePaths, Unresolved, open_live_paths
 from syncintosh.services.sync._shared import (
+    ProfileRenamed,
     _decode,
     _document_refusal,
     _Presets,
@@ -53,6 +54,7 @@ from syncintosh.services.sync._shared import (
     static_projector,
 )
 from syncintosh.services.sync.collect import _real_path_refusal
+from syncintosh.services.sync.renames import _plan_renames
 
 # How a tracked path stands relative to the repo side.
 DiffStatus = Literal["in-sync", "changed", "missing-here", "deferred"]
@@ -87,6 +89,10 @@ class DiffReport:
     # Presets whose stored policy this build cannot judge (`services/policy_gate.py`): the diff is still shown,
     # read-only, but it compares against objects made under a policy this build does not hold.
     policy_warnings: tuple[str, ...] = ()
+    # What the next sync would do about profiles renamed in the app (issue #67): the moves it would make, and a fixed
+    # sentence for each rename it would leave alone or wait on. The entries above are compared under the new names.
+    renames: tuple[ProfileRenamed, ...] = ()
+    rename_notes: tuple[str, ...] = ()
 
     @property
     def changed(self) -> tuple[FileDiff, ...]:
@@ -110,8 +116,13 @@ def diff_repo(
     config_dirs: AppConfigDir | None = None,
     agent_projects: AgentProjectIndex | None = None,
     documents: DocumentSkips | None = None,
+    ledger: Mapping[str, LedgerEntry] | None = None,
 ) -> DiffReport:
-    """Compare every tracked path's live file with the repo side. Never writes anything."""
+    """Compare every tracked path's live file with the repo side. Never writes anything.
+
+    `ledger` is this machine's apply ledger. With it, a profile renamed in the app is previewed and compared under its
+    new name, as the next sync would carry it; without one nothing is read as a rename.
+    """
     presets = _Presets(
         catalog=catalog,
         adapters=adapters,
@@ -131,8 +142,9 @@ def diff_repo(
     if manifest is None:
         return DiffReport(entries=(), source=source)
 
+    renames = _plan_renames(config, manifest.records, {} if ledger is None else ledger, paths)
     entries: list[FileDiff] = []
-    for file_id, record in manifest.records.items():
+    for file_id, record in renames.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
             continue
         if _record_refusal(presets, config, deny, home, record) is not None:
@@ -141,7 +153,11 @@ def diff_repo(
             continue
         entries.append(_diff_record(view, cipher, live, presets, home, repo_commit, file_id, record, paths, deny))
     return DiffReport(
-        entries=tuple(entries), source=source, policy_warnings=tuple(str(each) for each in view.mismatches)
+        entries=tuple(entries),
+        source=source,
+        policy_warnings=tuple(str(each) for each in view.mismatches),
+        renames=renames.moved,
+        rename_notes=tuple(f"{each.path}: {each.reason}" for each in (*renames.deferrals, *renames.refusals)),
     )
 
 

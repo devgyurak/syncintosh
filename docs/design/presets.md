@@ -208,8 +208,26 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
     fold to one (`collision_key`), or that share a directory, are both skipped. A missing, unreadable or corrupt
     list resolves **no** profile, is reported, and keeps every record: a profile that cannot be seen is not a
     deleted one. A profile directory that is a symbolic link, a denied path, or leaves `$HOME` is refused.
-  - **Known limit:** renaming a profile leaves the old name's record behind (a record is removed only by
-    untracking it). Tracked in #67.
+  - **Renaming a profile** (issue #67). The records follow the profile; nothing is untracked. The apply ledger
+    keeps an **anchor** per profile record — the profile's directory id on this Mac and a digest of its folded
+    name, never the name — so a later cycle can tell who renamed it:
+    - *Renamed on this Mac* (the records carry the anchored name, the anchored directory is now called something
+      else, and no profile here has the old name): the next sync moves **every** record of the profile to the new
+      name, `file_id` unchanged, so no object is re-sealed. The report says `profile "Work" -> "Job": moved N
+      record(s)`. A record with no ledger entry (a borrowed resource that was never applied) moves with its profile.
+    - *Renamed on another Mac* (the records carry a name this Mac's directory does not have yet): nothing is moved
+      back. The local profile is **not collected at all** until the person renames it in the app here too —
+      collecting it under its old name would bring the old records back — and the sync reports it as a
+      non-blocking deferral. `storage.json` is never written (decision D5 of #22); once renamed, the next cycle
+      is in sync. The first cycle that *receives* the rename only reports the usual "create the profile "Job""
+      deferral; the rename-specific sentence appears on the next one.
+    - *Left alone and reported* (the old records stay): the profile list is unreadable, the new name is not in
+      this machine's `names`, the new name already has records, the anchors name two directories, two Macs chose
+      different names, or another profile now has the old name.
+    - **Known limits:** a rename made before the anchor existed (a ledger written by an older build) is not
+      detected — the anchor is filled at the next ledger write — and a rename that only changes case is not a
+      rename (`collision_key`). `diff` previews the move without writing it. `policy_epoch` of `vscode` is 2: a
+      build that predates the move stops on the policy mismatch instead of reviving the old records.
   - To add profiles to an existing config by hand, add
     `"profiles": [{"preset": "vscode", "scope": "common", "names": "*"}]` to `config.json`. A `preset add`
     command is tracked in #68.

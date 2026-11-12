@@ -26,7 +26,10 @@ from types import MappingProxyType
 POLICY_HISTORY: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "zsh": ("1914db8679f8fc449a7c8b0eeb43a67e8ab6c38bd43d44a21acf052bb6bbcec8",),
-        "vscode": ("df4dcae1e246dcbc04cf2bdde13dbb167dacd746d8f26729a040ad497356b602",),
+        "vscode": (
+            "df4dcae1e246dcbc04cf2bdde13dbb167dacd746d8f26729a040ad497356b602",
+            "aed6ca0b580783b434a7c710231257ecb2c1b4cc278bb57504c45eface296e33",
+        ),
         "docker": ("c7551c6c38d3edcecfa3c038eba3a915b9688423d6cc77474a0628f132b55983",),
         "zed": ("42b152727414e64f19e6e819cb4af51f97b6708778cbd2575444ac3fb89636d2",),
         "datagrip": (

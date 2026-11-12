@@ -212,6 +212,11 @@ that then outweighs the other machines' settings in the content merge, with no c
 flag is what prevents that; see the table below.
 
 - `apply` writes an entry as each file lands.
+- **A profile record's entry carries an anchor** — `profile_dir` (the directory id on this Mac) and `profile_key`
+  (a digest of the folded profile name, never the name). It is refreshed at every settle for a profile that exists
+  here, left as it was for one that does not, and absent in a ledger from before it existed; it is the evidence a
+  later cycle uses to carry a renamed VS Code profile's records to its new name (issue #67,
+  [presets](presets.md)). It says what the profile is called, never what its file holds.
 - `init` / `add` seed the ledger by adopting the live files as this machine's baseline.
 - **Publishing settles it too.** A file the user changed locally is collected, committed, and
   pushed, and `apply` then writes nothing — so apply alone would leave the old digest behind.

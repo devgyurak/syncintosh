@@ -218,6 +218,10 @@ VSCODE = Preset.create(
     download_url="https://code.visualstudio.com/download",
     cask="visual-studio-code",
     profiles=PROFILES,
+    # 2: a renamed profile's records are moved to the new name (`core/profile_rename.py`, issue #67). A build that
+    # predates this would collect the renamed profile's directory under its new name and leave the old records, so it
+    # must stop on the policy mismatch instead of reviving them.
+    policy_epoch=2,
 )
 
 _PROFILES_KEY = "userDataProfiles"
