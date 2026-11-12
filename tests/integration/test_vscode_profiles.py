@@ -17,8 +17,10 @@ from typing import Any
 
 import pytest
 from _harness import run_sync
+from typer.testing import CliRunner
 
 from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.cli import main as main_module
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import LocalItem, SyncConfig
 from syncintosh.core.ledger import AdoptChoice
@@ -32,7 +34,7 @@ from syncintosh.presets import BuiltinCatalog, vscode
 from syncintosh.services.keys import import_ring, init_new_repo
 from syncintosh.services.setup import new_machine_config
 from syncintosh.services.sync import NO_APP_INFO, SyncReport
-from syncintosh.system.config import save_config
+from syncintosh.system.config import load_config, save_config
 from syncintosh.system.deny_list import SystemDenyList
 from syncintosh.system.ledger import JsonLedgerStore
 from syncintosh.system.live_files import SystemLiveFiles
@@ -95,17 +97,25 @@ def _machine(tmp_path: Path, make_store, name: str, remote: str) -> Machine:
     )
 
 
-def _initialize(machine: Machine, *, import_from: Path | None = None, extra: tuple[LocalItem, ...] = ()) -> None:
+def _initialize(
+    machine: Machine,
+    *,
+    import_from: Path | None = None,
+    extra: tuple[LocalItem, ...] = (),
+    presets: tuple[str, ...] = ("vscode",),
+    profiles: bool = True,
+) -> None:
+    """Write the machine's config and its repo. `profiles=False` is a config made before #22: no `profiles` entry."""
     machine.home.mkdir(parents=True, exist_ok=True)
     base = new_machine_config(
-        remote=machine.remote, machine_id=machine.machine_id, preset_names=("vscode",), catalog=BuiltinCatalog.default()
+        remote=machine.remote, machine_id=machine.machine_id, preset_names=presets, catalog=BuiltinCatalog.default()
     )
     config = SyncConfig.create(
         remote=base.remote,
         machine_id=base.machine_id,
         items=(*base.items, *extra),
         globs=base.globs,
-        profiles=base.profiles,
+        profiles=base.profiles if profiles else (),
     )
     save_config(config, machine.config_file)
     transport = GitCLITransport(machine.repo)
@@ -423,3 +433,75 @@ def test_a_malformed_index_entry_does_not_stop_the_sync(tmp_path, memory_key_sto
     assert b'"editor.tabSize": 4' in (b.home / USER / "settings.json").read_bytes()
     assert [r for r in report.refused if not r.blocking and r.path == vscode.PROFILE_INDEX] != []
     assert [r for r in (*report.refused, *report.unprojectable, *report.invalid) if r.blocking] == []
+
+
+# ------------------------------------------------------- (e) `preset add` on an existing config (#68)
+
+
+def _seed_profile_files(machine: Machine, directory: str) -> None:
+    for relative, data in PROFILE_FILES.items():
+        _write(machine, f"{USER}/profiles/{directory}/{relative}", data)
+
+
+def _preset_add(machine: Machine, monkeypatch, *args: str) -> None:
+    """Run `syncintosh preset add` against `machine`'s HOME, as the person would."""
+    monkeypatch.setenv("HOME", str(machine.home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(machine.home / ".config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(machine.home / ".local" / "share"))
+    result = CliRunner().invoke(main_module.app, ["preset", "add", *args])
+    assert result.exit_code == 0, result.output
+
+
+def test_preset_add_lets_a_config_from_before_profiles_receive_a_profile(
+    tmp_path, memory_key_store, monkeypatch
+) -> None:
+    # given — B's config tracks vscode's files but has no `profiles` entry, so A's profile records are not allowed
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _register(a, {"name": "Work", "location": "-3f2a1b"})
+    _seed_profile_files(a, "-3f2a1b")
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery, profiles=False)
+    _register(b, {"name": "Work", "location": "7c91e0aa"})
+    _profile_dir(b, "7c91e0aa").mkdir(parents=True)
+    _run(b)
+    assert (_profile_dir(b, "7c91e0aa") / "settings.json").exists() is False
+
+    # when
+    _preset_add(b, monkeypatch, "vscode")
+    report = _run(b)
+
+    # then — the profile's records arrive under B's own directory
+    assert [entry.names for entry in load_config(b.config_file).profiles] == ["*"]
+    assert report.has_conflicts is False
+    assert b'"editor.tabSize": 4' in (_profile_dir(b, "7c91e0aa") / "settings.json").read_bytes()
+
+    # when — B then edits the profile and A receives it, so records move both ways
+    _write(b, f"{USER}/profiles/7c91e0aa/keybindings.json", b"[]\n")
+    _run(b)
+    _run(a)
+
+    # then
+    assert (_profile_dir(a, "-3f2a1b") / "keybindings.json").read_bytes() == b"[]\n"
+
+
+def test_preset_add_to_a_zsh_only_config_makes_the_next_sync_collect_vscode(
+    tmp_path, memory_key_store, monkeypatch
+) -> None:
+    # given — a config that tracks only zsh, and a VS Code settings file on disk
+    a = _machine(tmp_path, memory_key_store, "machine-a", _bare_remote(tmp_path))
+    _initialize(a, presets=("zsh",))
+    _write(a, f"{USER}/settings.json", SETTINGS_TEXT)
+    _run(a)
+    before = _decrypted_objects(a)
+
+    # when
+    _preset_add(a, monkeypatch, "vscode")
+    _run(a)
+
+    # then — the settings file was sealed into the repo, without the stripped keys
+    gained = [o for o in _decrypted_objects(a) if o not in before]
+    assert [o for o in gained if b'"editor.tabSize": 4' in o] != []
+    assert [o for o in gained if b"proxyAuthorization" in o or b"window.zoomLevel" in o] == []

@@ -147,6 +147,68 @@ def scan_allow(
     typer.echo(f"allowed on this machine only: {path} ({label}) {fingerprint}")
 
 
+# The preset group. `add` is its whole surface for now: it brings a built-in preset into a config `init` already wrote.
+preset_app = typer.Typer(help="Add a built-in preset to this machine's config.", no_args_is_help=True)
+app.add_typer(preset_app, name="preset")
+
+_PROFILES_LINES = {
+    "added": "profiles: tracking {names}",
+    "merged": "profiles: now also tracking {names}",
+    "kept": "profiles: kept the names already listed (pass --profile to add more; this never widens to all)",
+    "unchanged": "profiles: already covered",
+}
+
+
+@preset_app.command("add")
+def preset_add(
+    name: str = typer.Argument(..., help="a built-in preset (zsh, vscode, ...)"),
+    profile: list[str] | None = typer.Option(
+        None, "--profile", help="a profile to allow, for a preset with profiles; repeat for more (default: all)"
+    ),
+) -> None:
+    """Track a built-in preset in an existing config, by the same rules `init --preset` uses.
+
+    A file already tracked as this preset is left as it is, and one tracked as another preset or format refuses
+    the command with nothing written. Profiles are never widened: a list of names stays a list.
+    """
+    from syncintosh.presets import BuiltinCatalog
+    from syncintosh.services import add_preset
+    from syncintosh.system.config import load_config_for_rewrite, save_config
+    from syncintosh.system.lock import FileLock
+    from syncintosh.system.paths import MachinePaths
+
+    paths = MachinePaths.default()
+    catalog = BuiltinCatalog.default()
+    lock = FileLock(paths.lock_file)
+    try:
+        # Held across the read and the write: a sync or another `preset add` rewriting the file between them
+        # would have its change overwritten.
+        lock.acquire()
+        try:
+            addition = add_preset(
+                load_config_for_rewrite(paths.config_file, catalog),
+                name=name,
+                catalog=catalog,
+                profile_names=tuple(profile) if profile else None,
+            )
+            save_config(addition.config, paths.config_file)
+        finally:
+            lock.release()
+    except DomainError as exc:
+        _fail(exc)
+        return
+    typer.echo(f"preset {name}:")
+    for path in addition.added:
+        typer.echo(f"  added: {path}")
+    for path in addition.skipped:
+        typer.echo(f"  already tracked: {path}")
+    if addition.profiles in _PROFILES_LINES:
+        names = ", ".join(addition.profile_names) or "all"
+        typer.echo("  " + _PROFILES_LINES[addition.profiles].format(names=names))
+    typer.echo("The background job reads the config once at start; run `syncintosh daemon install` to reload it.")
+    typer.echo("A file the remote already holds may need `syncintosh sync --adopt local|remote` on the next sync.")
+
+
 # The key-lifecycle command group. Rotation, and the out-of-band export/import that hands a
 # generation to another machine without publishing a wrap in the repo.
 key_app = typer.Typer(help="Rotate, export, and import key generations.", no_args_is_help=True)

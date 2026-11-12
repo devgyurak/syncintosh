@@ -10,6 +10,8 @@ file is a `ConfigError`, never a bare exception.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,10 @@ from syncintosh.core.config import NO_LLM, LlmConfig, LocalGlob, LocalItem, Loca
 from syncintosh.core.errors import ConfigError
 from syncintosh.core.ports import PresetCatalog
 from syncintosh.system.paths import MachinePaths
+
+# Every top-level key `config.json` is written with. `config_to_mapping` writes exactly these, and a rewrite refuses
+# a file holding any other, so a key this build does not model is not silently dropped (`load_config_for_rewrite`).
+TOP_LEVEL_KEYS = frozenset({"remote", "machine_id", "items", "globs", "profiles", "agent_projects", "llm"})
 
 _ITEM_KEYS = frozenset({"path", "preset", "scope", "machine", "format"})
 
@@ -105,13 +111,7 @@ def _parse_agent_project(raw: object, where: str, catalog: PresetCatalog) -> Age
     return AgentProject.create(name=raw["name"], path=raw["path"], layouts=layouts)
 
 
-def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) -> SyncConfig:
-    """Read and validate `config.json`, defaulting to this machine's config path.
-
-    `catalog` resolves a `profiles` entry's preset to its layout; it defaults to the shipped catalog, which is
-    imported only when the file has such an entry, so a plain config pays nothing for it.
-    """
-    resolved = path if path is not None else MachinePaths.default().config_file
+def _read_object(resolved: Path) -> dict[str, Any]:
     try:
         text = resolved.read_text(encoding="utf-8")
     except OSError as exc:
@@ -122,6 +122,34 @@ def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) 
         raise ConfigError(f"config {resolved} is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ConfigError(f"config {resolved} must contain a JSON object")
+    return parsed
+
+
+def load_config(path: Path | None = None, catalog: PresetCatalog | None = None) -> SyncConfig:
+    """Read and validate `config.json`, defaulting to this machine's config path.
+
+    `catalog` resolves a `profiles` entry's preset to its layout; it defaults to the shipped catalog, which is
+    imported only when the file has such an entry, so a plain config pays nothing for it.
+    """
+    resolved = path if path is not None else MachinePaths.default().config_file
+    return _config_from(_read_object(resolved), resolved, catalog)
+
+
+def load_config_for_rewrite(path: Path | None = None, catalog: PresetCatalog | None = None) -> SyncConfig:
+    """`load_config`, but refuse a file holding a top-level key this build does not model.
+
+    `load_config` ignores such a key so an older build still reads a newer file. A rewrite would drop it, so a
+    command that saves the config reads it here instead and the person decides what to do with the key.
+    """
+    resolved = path if path is not None else MachinePaths.default().config_file
+    parsed = _read_object(resolved)
+    unknown = sorted(parsed.keys() - TOP_LEVEL_KEYS)
+    if unknown:
+        raise ConfigError(f"config {resolved} has keys this build would drop on rewrite: {unknown}")
+    return _config_from(parsed, resolved, catalog)
+
+
+def _config_from(parsed: Any, resolved: Path, catalog: PresetCatalog | None) -> SyncConfig:
     items_raw = parsed.get("items")
     if not isinstance(items_raw, list):
         raise ConfigError(f"config {resolved} must hold an `items` list")
@@ -246,11 +274,22 @@ def _llm_mapping(llm: LlmConfig) -> dict[str, Any]:
 
 
 def save_config(config: SyncConfig, path: Path | None = None) -> None:
-    """Write `config.json` (human-readable; it is not compared for byte stability)."""
+    """Write `config.json` (human-readable; it is not compared for byte stability).
+
+    Written to a temporary file beside it and renamed over it, so a crash or a full disk leaves the old file
+    whole rather than a truncated one that no command could then read.
+    """
     resolved = path if path is not None else MachinePaths.default().config_file
     resolved.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(config_to_mapping(config), indent=2, ensure_ascii=False, sort_keys=True)
-    resolved.write_text(text + "\n", encoding="utf-8")
+    descriptor, temporary = tempfile.mkstemp(dir=resolved.parent, prefix=f".{resolved.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        Path(temporary).replace(resolved)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
-__all__ = ["config_to_mapping", "load_config", "save_config"]
+__all__ = ["TOP_LEVEL_KEYS", "config_to_mapping", "load_config", "load_config_for_rewrite", "save_config"]
