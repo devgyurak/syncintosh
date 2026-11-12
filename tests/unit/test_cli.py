@@ -413,6 +413,30 @@ def test_sync_prints_a_deferrals_reason_and_install_hint(tmp_path, monkeypatch) 
     assert "brew install --cask visual-studio-code" in _combined(result)
 
 
+def test_sync_says_which_profile_records_moved(tmp_path, monkeypatch) -> None:
+    # given — a cycle that carried a renamed profile's records
+    from syncintosh.core.config import LocalItem, SyncConfig
+    from syncintosh.services.sync import ProfileRenamed
+    from syncintosh.system.config import save_config
+    from syncintosh.system.paths import MachinePaths
+
+    item = LocalItem.create(path=".zshrc", preset="zsh", scope="common", format="text")
+    save_config(
+        SyncConfig.create(remote="git@example.test:settings.git", machine_id="machine-a", items=(item,)),
+        MachinePaths.default().config_file,
+    )
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    report = SyncReport(renamed=(ProfileRenamed(old="Work", new="Job", records=3),))
+    monkeypatch.setattr(main_module, "sync_service", lambda *_args, **_kwargs: report)
+
+    # when
+    result = runner.invoke(main_module.app, ["sync"])
+
+    # then
+    assert result.exit_code == 0
+    assert 'profile "Work" -> "Job": moved 3 record(s)' in _combined(result)
+
+
 def test_watch_wires_the_loop_and_runs_it(tmp_path, monkeypatch) -> None:
     # given — a valid config and no tracked paths, so the command has nothing to observe
     from syncintosh.core.config import SyncConfig
@@ -615,6 +639,29 @@ def test_diff_warns_about_a_policy_it_cannot_judge_and_still_exits_zero(monkeypa
     assert result.exit_code == 0
     assert f"warning: {warning}" in _combined(result)
     assert "in-sync: .zshrc" in _combined(result)
+
+
+def test_diff_previews_a_profile_rename_and_its_notes(monkeypatch) -> None:
+    # given — the next sync would move one profile and wait on another
+    from syncintosh.services import DiffReport, FileDiff
+    from syncintosh.services.sync import ProfileRenamed
+
+    _doctor_config()
+    monkeypatch.setattr("syncintosh.vcs.git.GitCLITransport.branch", lambda _self: "main")
+    report = DiffReport(
+        entries=(FileDiff(".zshrc", "in-sync"),),
+        renames=(ProfileRenamed(old="Work", new="Job", records=3),),
+        rename_notes=("profiles/@Play: renamed on another Mac",),
+    )
+    monkeypatch.setattr(main_module, "diff_repo_service", lambda *_args, **_kwargs: report)
+
+    # when
+    result = runner.invoke(main_module.app, ["diff"])
+
+    # then
+    assert result.exit_code == 0
+    assert 'a sync would move profile "Work" -> "Job": 3 record(s)' in _combined(result)
+    assert "note: profiles/@Play: renamed on another Mac" in _combined(result)
 
 
 def test_diff_values_shows_the_plaintext_labeled_by_side(monkeypatch) -> None:

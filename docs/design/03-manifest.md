@@ -287,6 +287,14 @@ deferral and is never read or written under its logical text. When the list cann
 kept** and the ledger baseline is left as it was: a live file that cannot be seen is not a deletion.
 The real directory is re-checked (symlink, denied, outside `$HOME`) immediately before each write.
 
+**A renamed profile moves its records; it does not delete them** (issue #67). Because the AAD binds the `file_id`
+and not the path, a rename rewrites only each record's `path` field: the object, its nonce and its filename are
+untouched. The move is decided by `core/profile_rename.py` from the records, the apply ledger's per-record anchor
+(`profile_dir`, `profile_key` — a directory id and a digest of the folded name) and this Mac's profile list, and
+`collect` applies it before it matches live files to records. The record-level merge treats `path` as a metadata
+field, so one Mac's rename and another's content edit both survive without a conflict; two Macs choosing different
+names is a path conflict like any other. An unreadable list moves nothing.
+
 ### Versioned config directories (logical paths)
 
 A product whose settings folder carries the release (`DataGrip2026.2`) is recorded by a **logical** path,

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from syncintosh.core.append import append_merge
 from syncintosh.core.config import LocalItem, SyncConfig
@@ -44,6 +44,7 @@ from syncintosh.services.sync._shared import (
     _Source,
     _StaleChange,
 )
+from syncintosh.services.sync.renames import _plan_renames
 
 # --------------------------------------------------------------------------- collect
 
@@ -104,7 +105,13 @@ def _bounded(
 
 
 def _expand_profiles(
-    config: SyncConfig, head: Manifest | None, live: LiveFiles, deny: DenyList, home: str, paths: LivePaths
+    config: SyncConfig,
+    head: Manifest | None,
+    live: LiveFiles,
+    deny: DenyList,
+    home: str,
+    paths: LivePaths,
+    held_directories: frozenset[str] = frozenset(),
 ) -> _Expanded:
     """The logical items of every allowed profile this machine really has.
 
@@ -115,6 +122,9 @@ def _expand_profiles(
     `snippets` directory, after that directory passes the same symlink/deny/escape checks a glob
     directory gets. Problems the profile index reported (a collision, a malformed entry, an unreadable
     list) are surfaced as non-blocking rows, so a person can see why a profile is missing.
+
+    A profile in `held_directories` (real directories) is skipped whole: another Mac renamed it, and collecting it
+    under the name it still has here would bring the old records back (issue #67). `_collect` has already said why.
     """
     head_records = () if head is None else tuple(head.records.values())
     items: list[LocalItem] = []
@@ -127,7 +137,7 @@ def _expand_profiles(
         spec = view.spec
         refusals.extend(Refusal(spec.index, problem, blocking=False) for problem in view.profiles.problems)
         for profile in view.profiles.entries:
-            if not entry.allows(profile.name):
+            if not entry.allows(profile.name) or profile_directory(spec, profile.directory) in held_directories:
                 continue
             for file in spec.files:
                 logical = spec.logical_path(profile.name, file.path)
@@ -341,9 +351,15 @@ def _collect(
     file is compared with (`core/append.py`); `scanner` pre-scans an agent session before anything of it is sealed.
     """
     paths = paths or LivePaths(catalog=presets.catalog)
-    state = _Collect(records={} if head is None else dict(head.records))
+    # A profile renamed in the app moves its records before anything is matched against them, so the collect below
+    # finds them under the new name instead of creating them again (issue #67).
+    renames = _plan_renames(config, {} if head is None else head.records, ledger, paths)
+    state = _Collect(records=dict(renames.records), renamed=list(renames.moved))
+    state.deferred.extend(renames.deferrals)
+    state.refused.extend(renames.refusals)
+    named = None if head is None or not renames.moved else replace(head, records=renames.records)
     expanded = _expand_globs(config, head, live, deny, home, paths)
-    profiled = _expand_profiles(config, head, live, deny, home, paths)
+    profiled = _expand_profiles(config, head if named is None else named, live, deny, home, paths, renames.held)
     projected = _expand_agent_projects(config, head, live, deny, home, paths)
     state.refused.extend((*expanded.refusals, *profiled.refusals, *projected.refusals))
     state.deferred.extend((*expanded.deferrals, *profiled.deferrals, *projected.deferrals))

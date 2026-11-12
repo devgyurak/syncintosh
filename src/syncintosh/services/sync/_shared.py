@@ -179,6 +179,15 @@ class Refusal:
 
 
 @dataclass(frozen=True)
+class ProfileRenamed:
+    """A profile this Mac renamed in the app: `records` records moved from `old` to `new` (`core/profile_rename.py`)."""
+
+    old: str
+    new: str
+    records: int
+
+
+@dataclass(frozen=True)
 class Deferral:
     """A record this machine did not write, with why — and, for a missing app, how to get it.
 
@@ -333,6 +342,8 @@ class SyncReport:
     notes: tuple[str, ...] = ()
     # Agent sessions left out of this cycle, each with a fixed reason (`core/sessions.py`). Never blocking.
     session_skipped: tuple[SessionSkipped, ...] = ()
+    # Profiles whose records this cycle moved to a new name; reported once the collect commit is made.
+    renamed: tuple[ProfileRenamed, ...] = ()
 
     @property
     def has_conflicts(self) -> bool:
@@ -402,6 +413,7 @@ class _Collect:
     refused: list[Refusal] = field(default_factory=list)
     unprojectable: list[Refusal] = field(default_factory=list)
     session_skipped: list[SessionSkipped] = field(default_factory=list)
+    renamed: list[ProfileRenamed] = field(default_factory=list)
 
 
 def _collect_report(
@@ -445,6 +457,7 @@ def _collect_report(
         created=tuple(collected.created) if committed else (),
         collected=tuple(collected.collected) if committed else (),
         suppressed=tuple(collected.suppressed) if committed else (),
+        renamed=tuple(collected.renamed) if committed else (),
         first_sight=first_sight,
         conflicts=conflicts,
         published_commit=published_commit,

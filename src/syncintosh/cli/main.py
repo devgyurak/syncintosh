@@ -393,6 +393,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
     """
     from syncintosh.crypto.cipher import EnvelopeCipher
     from syncintosh.system.config import load_config
+    from syncintosh.system.ledger import JsonLedgerStore
     from syncintosh.system.paths import MachinePaths
     from syncintosh.vcs.git import GitCLITransport
 
@@ -418,6 +419,7 @@ def diff(values: bool = typer.Option(False, "--values", help="also show a unifie
             config_dirs=reads.config_dirs,
             agent_projects=reads.agent_projects,
             documents=reads.documents,
+            ledger=JsonLedgerStore(paths.ledger_file).load(),
         )
     except DomainError as exc:
         _fail(exc)
@@ -462,6 +464,11 @@ def _render_diff(report, *, values: bool, when_tag: WhenTag) -> None:
         _say("nothing is tracked here yet")
         return
     _say(report.source)
+    for renamed in report.renames:
+        # Read-only preview: the next sync moves these records, and the entries below are already under the new name.
+        _say(f'a sync would move profile "{renamed.old}" -> "{renamed.new}": {renamed.records} record(s)')
+    for note in report.rename_notes:
+        _say(f"note: {note}")
     for warning in report.policy_warnings:
         # A fixed sentence from the service; the diff below compares against objects made under a policy this
         # build does not hold.
@@ -946,6 +953,9 @@ def _render(report: SyncReport, config) -> None:
     ):
         for path in paths:
             _say(f"{label}: {_shown(path)}")
+    for renamed in report.renamed:
+        # A profile renamed in the app: its records follow it to the new name, so nothing is re-created or lost.
+        _say(f'profile "{renamed.old}" -> "{renamed.new}": moved {renamed.records} record(s)')
     for deferral in report.deferred:
         # A deferral is not a failure (the next sync on a machine that has the app writes it), so it
         # goes to stdout, with the app's own download page when that is why it was deferred.

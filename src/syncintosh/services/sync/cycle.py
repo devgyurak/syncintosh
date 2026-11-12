@@ -38,7 +38,7 @@ from syncintosh.services.sync._shared import (
 )
 from syncintosh.services.sync.apply import _apply
 from syncintosh.services.sync.collect import _collect
-from syncintosh.services.sync.ledger import _drop_foreign_releases, _settle_ledger
+from syncintosh.services.sync.ledger import _drop_foreign_releases, _fill_anchors, _settle_ledger
 from syncintosh.services.sync.merge import MAX_RESOLVE_ROUNDS, Resolution, _merge_stale
 from syncintosh.services.sync.publish import _publish
 
@@ -339,7 +339,7 @@ def _cycle(
         _settle_ledger(
             target_manifest=target_manifest,
             target_commit=target_commit,
-            ledger=ledger,
+            ledger=_fill_anchors(ledger, head_manifest, paths),
             live=ports.live,
             deny=ports.deny,
             presets=presets,

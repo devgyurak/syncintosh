@@ -457,6 +457,7 @@ def test_diff_names_a_refused_document_as_deferred_and_still_compares_the_others
         catalog=CATALOG,
         adapters={},
         validators={},
+        ledger={},
     )
 
     # then
