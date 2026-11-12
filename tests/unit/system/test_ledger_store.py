@@ -114,3 +114,50 @@ def test_a_malformed_ledger_is_a_domain_error(tmp_path: Path, payload: str) -> N
     # when & then
     with pytest.raises(LedgerCorrupt):
         store.load()
+
+
+def test_a_profile_anchor_round_trips(tmp_path: Path) -> None:
+    # given
+    store = JsonLedgerStore(tmp_path / "applied.json")
+    anchored = LedgerEntry(
+        sha256="a" * 64, commit="b" * 40, suppressed=False, profile_dir="7c91e0aa", profile_key="d" * 64
+    )
+
+    # when
+    store.save({FILE_ID: anchored})
+
+    # then
+    assert store.load() == {FILE_ID: anchored}
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        pytest.param({"profile_dir": "7c91e0aa"}, id="directory-only"),
+        pytest.param({"profile_key": "d" * 64}, id="key-only"),
+        pytest.param({}, id="neither"),
+    ],
+)
+def test_a_half_anchor_is_not_written(tmp_path: Path, partial: dict[str, str]) -> None:
+    # given
+    path = tmp_path / "applied.json"
+    entry = LedgerEntry(sha256="a" * 64, commit="b" * 40, suppressed=False, **partial)
+
+    # when
+    JsonLedgerStore(path).save({FILE_ID: entry})
+
+    # then — a lone half would never match a rename, and an anchor-free ledger stays readable by an older build
+    written = json.loads(path.read_text(encoding="utf-8"))["files"][FILE_ID]
+    assert {"profile_dir", "profile_key"} & written.keys() == set()
+
+
+@pytest.mark.parametrize("field", ["profile_dir", "profile_key"])
+def test_a_non_string_profile_anchor_is_a_domain_error(tmp_path: Path, field: str) -> None:
+    # given
+    path = tmp_path / "applied.json"
+    bad = {"files": {FILE_ID: {"sha256": "a", "commit": "b", "suppressed": False, field: 7}}}
+    path.write_text(json.dumps(bad), encoding="utf-8")
+
+    # when & then
+    with pytest.raises(LedgerCorrupt):
+        JsonLedgerStore(path).load()
