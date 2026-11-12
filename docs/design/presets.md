@@ -230,9 +230,24 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
       upgrade is still seen — and a rename that only changes case is not a
       rename (`collision_key`). `diff` previews the move without writing it. `policy_epoch` of `vscode` is 2: a
       build that predates the move stops on the policy mismatch instead of reviving the old records.
-  - To add profiles to an existing config by hand, add
-    `"profiles": [{"preset": "vscode", "scope": "common", "names": "*"}]` to `config.json`. A `preset add`
-    command is tracked in #68.
+  - To add the preset to an existing config (one made before profiles, or without `vscode`), run
+    `syncintosh preset add vscode [--profile NAME ...]`, one preset per call. It expands the preset by the
+    rules `init --preset` uses, with scope `common`, and prints what it added, skipped, and kept:
+    - A path already tracked as the same preset and format is **skipped** and keeps its scope and machine. The
+      same path under another preset or format **refuses the whole command** and writes nothing. Globs follow
+      the same rule.
+    - `profiles`: no entry yet creates one (`"*"`, or the `--profile` names); an existing `"*"` is left alone; an
+      existing name list gains the `--profile` names (a union under `collision_key`, old order first) and is
+      **kept** when none are given. It is never widened to `"*"`, and an existing entry keeps its scope and
+      machine. `--profile` on a preset without profiles is refused. A profile need not exist locally: `names` only
+      allows, and a missing one is deferred at sync (D3, D5).
+    - Known limit: the overlap check compares folded path strings, so a hand-written glob of another preset that
+      only *matches* a new exact path (not spelled the same) is not caught; the built-in catalog never produces one.
+    - Nothing to add (everything tracked, profiles as asked) leaves `config.json` unwritten and prints no reload notes.
+    - The command holds the sync lock from reading `config.json` to renaming the new file over it, and refuses a
+      config holding a top-level key this build does not model, since the rewrite would drop it.
+    - The background job reads the config once at start, so run `syncintosh daemon install` to reload it. A file
+      the remote already holds may make the next `sync` ask for `--adopt local|remote`.
 - **The user's ignore list** (`settingsSync.ignoredSettings`, issue #23). VS Code does not delete an ignored key
   from what it uploads; it leaves the remote's value in place, and the setting is `disallowSyncIgnore`, so the
   list itself **syncs**. syncintosh does the same: an ignored key is **carried**, not stripped
