@@ -152,6 +152,11 @@ class PresetAddition:
     profiles: ProfilesOutcome
     profile_names: tuple[str, ...]
 
+    @property
+    def changed(self) -> bool:
+        """True when `config` differs from the one given, so there is something to save."""
+        return bool(self.added) or self.profiles in (PROFILES_ADDED, PROFILES_MERGED)
+
     @classmethod
     def create(
         cls,

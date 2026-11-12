@@ -334,11 +334,42 @@ def test_other_entries_and_their_order_are_carried_over() -> None:
     assert addition.config.llm == config.llm
 
 
-@pytest.mark.parametrize("names", [("Work",), ()], ids=["preset without profiles", "empty names"])
-def test_profile_names_are_refused_where_they_do_not_apply(names: tuple[str, ...]) -> None:
+@pytest.mark.parametrize(
+    "name, names",
+    [("zsh", ("Work",)), ("vscode", ())],
+    ids=["preset without profiles", "empty names"],
+)
+def test_profile_names_are_refused_where_they_do_not_apply(name: str, names: tuple[str, ...]) -> None:
     # when & then
     with pytest.raises(ConfigError):
-        add_preset(_config("zsh", "vscode"), name="zsh" if names else "vscode", catalog=CATALOG, profile_names=names)
+        add_preset(_config("zsh", "vscode"), name=name, catalog=CATALOG, profile_names=names)
+
+
+def test_a_repeated_name_for_a_new_entry_is_one_name() -> None:
+    # given
+    config = _swap_profiles(_config("zsh", "vscode"), None)
+
+    # when
+    addition = add_preset(config, name="vscode", catalog=CATALOG, profile_names=("Work", "work"))
+
+    # then
+    assert [entry.names for entry in addition.config.profiles] == [("Work",)]
+
+
+@pytest.mark.parametrize(
+    "existing, asked, changed",
+    [(None, None, True), ("*", None, False), (("Work",), None, False), (("Work",), ("Play",), True)],
+    ids=["new entry", "star", "kept", "merged"],
+)
+def test_changed_is_true_only_when_there_is_something_to_save(existing, asked, changed) -> None:
+    # given — every vscode file is already tracked, so only the profiles entry can change
+    config = _swap_profiles(_config("zsh", "vscode"), None if existing is None else _profiles(existing))
+
+    # when
+    addition = add_preset(config, name="vscode", catalog=CATALOG, profile_names=asked)
+
+    # then
+    assert addition.changed is changed
 
 
 def test_the_addition_is_frozen() -> None:

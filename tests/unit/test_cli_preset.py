@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from syncintosh.cli import main as main_module
+from syncintosh.core.errors import SyncLockError
 from syncintosh.presets import BuiltinCatalog
 from syncintosh.services.setup import new_machine_config
 from syncintosh.system.config import load_config, save_config
@@ -121,31 +122,85 @@ def test_preset_add_refuses_a_config_with_a_key_it_would_drop(config_file) -> No
 
 class _RecordingLock:
     events: list[str] = []
+    fail = False
 
     def __init__(self, *_args, **_kwargs) -> None:
         pass
 
     def acquire(self) -> None:
+        if self.fail:
+            raise SyncLockError("another sync is running")
         self.events.append("acquire")
 
     def release(self) -> None:
         self.events.append("release")
 
 
-@pytest.mark.parametrize("args, exit_code", [(["vscode"], 0), (["nope"], 1)], ids=["after a save", "after a refusal"])
-def test_preset_add_holds_the_sync_lock_around_the_rewrite_and_releases_it(
-    config_file, monkeypatch, args, exit_code
+def _recording(monkeypatch, *, fail: bool = False) -> None:
+    """Replace the lock, `load_config_for_rewrite` and `save_config` with ones that log their order."""
+    import syncintosh.system.config as config_module
+
+    _RecordingLock.events = []
+    _RecordingLock.fail = fail
+    load, save = config_module.load_config_for_rewrite, config_module.save_config
+    monkeypatch.setattr("syncintosh.system.lock.FileLock", _RecordingLock)
+    monkeypatch.setattr(
+        config_module,
+        "load_config_for_rewrite",
+        lambda *a, **k: (_RecordingLock.events.append("load"), load(*a, **k))[1],
+    )
+    monkeypatch.setattr(
+        config_module, "save_config", lambda *a, **k: (_RecordingLock.events.append("save"), save(*a, **k))[1]
+    )
+
+
+@pytest.mark.parametrize(
+    "args, exit_code, events",
+    [
+        (["vscode"], 0, ["acquire", "load", "save", "release"]),
+        (["nope"], 1, ["acquire", "load", "release"]),
+    ],
+    ids=["a save", "a refusal"],
+)
+def test_preset_add_holds_the_sync_lock_from_the_read_to_the_write(
+    config_file, monkeypatch, args, exit_code, events
 ) -> None:
     # given
-    _RecordingLock.events = []
-    monkeypatch.setattr("syncintosh.system.lock.FileLock", _RecordingLock)
+    _recording(monkeypatch)
 
     # when
     result = runner.invoke(main_module.app, ["preset", "add", *args])
 
     # then
-    assert result.exit_code == exit_code
-    assert _RecordingLock.events == ["acquire", "release"]
+    assert (result.exit_code, _RecordingLock.events) == (exit_code, events)
+
+
+def test_preset_add_writes_nothing_when_the_lock_is_held(config_file, monkeypatch) -> None:
+    # given
+    _recording(monkeypatch, fail=True)
+    before = config_file.read_bytes()
+
+    # when
+    result = runner.invoke(main_module.app, ["preset", "add", "vscode"])
+
+    # then
+    assert (result.exit_code, _RecordingLock.events, config_file.read_bytes()) == (1, [], before)
+    assert "another sync is running" in _output(result)
+
+
+def test_preset_add_leaves_the_file_alone_and_prints_no_notes_when_nothing_changes(config_file) -> None:
+    # given
+    runner.invoke(main_module.app, ["preset", "add", "vscode"])
+    config_file.write_text(config_file.read_text(encoding="utf-8").replace("  ", "\t"), encoding="utf-8")
+    before = config_file.read_bytes()
+
+    # when
+    result = runner.invoke(main_module.app, ["preset", "add", "vscode"])
+
+    # then
+    assert (result.exit_code, config_file.read_bytes()) == (0, before)
+    assert "nothing to change" in _output(result)
+    assert "daemon install" not in _output(result)
 
 
 def test_preset_add_without_a_name_prints_help() -> None:

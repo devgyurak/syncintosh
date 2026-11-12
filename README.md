@@ -40,7 +40,8 @@ opt-in (`resolve --llm`, see [06-llm-assist](docs/design/06-llm-assist.md)).
 - The tracked set is whatever `~/.config/syncintosh/config.json` names, expanded from the
   built-in preset catalog (`zsh`, `vscode`, and `docker` today). `syncintosh init --preset`
   names one or more presets, and `syncintosh preset add <name>` adds one to a config you
-  already have (`--profile NAME` limits VS Code profiles).
+  already have (`--profile NAME` allows only those VS Code profiles; a config that
+  already allows all of them keeps doing so).
 - **Key rotation protects future data only.** `syncintosh key rotate --hygiene` mints a new
   generation, re-encrypts every stored object and the manifest under it, and publishes the new
   key wrapped under the old one (`keys/<new_id>.wrap`) so the other Macs absorb it on their next

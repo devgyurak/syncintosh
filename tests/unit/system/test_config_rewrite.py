@@ -60,7 +60,7 @@ def test_a_failed_rename_keeps_the_original_and_removes_the_temporary_file(tmp_p
     monkeypatch.setattr(Path, "replace", broken)
 
     # when & then
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(ConfigError, match="disk full"):
         save_config(_config(".zprofile"), target)
     assert target.read_bytes() == original
     assert sorted(p.name for p in target.parent.iterdir()) == ["config.json"]
@@ -101,7 +101,7 @@ def test_the_known_keys_cover_everything_the_writer_emits() -> None:
     # given — a config that uses every optional section
     from syncintosh.core.agent_projects import AgentLayout, AgentProject
     from syncintosh.core.config import LlmConfig, LocalProfiles
-    from syncintosh.presets import BuiltinCatalog, claude_memory, vscode
+    from syncintosh.presets import claude_memory, vscode
 
     config = SyncConfig.create(
         remote="git@example.test:s.git",
@@ -122,5 +122,19 @@ def test_the_known_keys_cover_everything_the_writer_emits() -> None:
     written = set(config_to_mapping(config))
 
     # then
-    assert (written - TOP_LEVEL_KEYS, BuiltinCatalog.default() is not None) == (set(), True)
     assert written == TOP_LEVEL_KEYS
+
+
+def test_a_save_through_a_symlink_updates_the_real_file_and_keeps_the_link(tmp_path) -> None:
+    # given — a config linked into a dotfiles checkout
+    real = tmp_path / "dotfiles" / "config.json"
+    real.parent.mkdir()
+    link = tmp_path / "cfg" / "config.json"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    # when
+    save_config(_config(".zprofile"), link)
+
+    # then
+    assert (link.is_symlink(), [i.path for i in load_config(real).items]) == (True, [".zprofile"])

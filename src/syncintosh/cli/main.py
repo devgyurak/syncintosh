@@ -32,6 +32,7 @@ from syncintosh.services import prune_generation as prune_generation_service
 from syncintosh.services import remote_commitments as remote_commitments_service
 from syncintosh.services import rotate_repo as rotate_repo_service
 from syncintosh.services import sync as sync_service
+from syncintosh.services.setup import PROFILES_ADDED, PROFILES_KEPT, PROFILES_MERGED, PROFILES_UNCHANGED
 from syncintosh.system.daemon import DEFAULT_POLL_SECONDS
 
 if TYPE_CHECKING:  # these names appear only in annotations
@@ -152,10 +153,10 @@ preset_app = typer.Typer(help="Add a built-in preset to this machine's config.",
 app.add_typer(preset_app, name="preset")
 
 _PROFILES_LINES = {
-    "added": "profiles: tracking {names}",
-    "merged": "profiles: now also tracking {names}",
-    "kept": "profiles: kept the names already listed (pass --profile to add more; this never widens to all)",
-    "unchanged": "profiles: already covered",
+    PROFILES_ADDED: "profiles: tracking {names}",
+    PROFILES_MERGED: "profiles: now also tracking {names}",
+    PROFILES_KEPT: "profiles: kept the names already listed (pass --profile to add more; this never widens to all)",
+    PROFILES_UNCHANGED: "profiles: already covered",
 }
 
 
@@ -191,7 +192,8 @@ def preset_add(
                 catalog=catalog,
                 profile_names=tuple(profile) if profile else None,
             )
-            save_config(addition.config, paths.config_file)
+            if addition.changed:
+                save_config(addition.config, paths.config_file)
         finally:
             lock.release()
     except DomainError as exc:
@@ -205,6 +207,9 @@ def preset_add(
     if addition.profiles in _PROFILES_LINES:
         names = ", ".join(addition.profile_names) or "all"
         typer.echo("  " + _PROFILES_LINES[addition.profiles].format(names=names))
+    if not addition.changed:
+        typer.echo("nothing to change; config.json was not rewritten")
+        return
     typer.echo("The background job reads the config once at start; run `syncintosh daemon install` to reload it.")
     typer.echo("A file the remote already holds may need `syncintosh sync --adopt local|remote` on the next sync.")
 

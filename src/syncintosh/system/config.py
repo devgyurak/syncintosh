@@ -276,20 +276,27 @@ def _llm_mapping(llm: LlmConfig) -> dict[str, Any]:
 def save_config(config: SyncConfig, path: Path | None = None) -> None:
     """Write `config.json` (human-readable; it is not compared for byte stability).
 
-    Written to a temporary file beside it and renamed over it, so a crash or a full disk leaves the old file
-    whole rather than a truncated one that no command could then read.
+    Written to a temporary file beside it, flushed to disk, and renamed over it, so a crash or a full disk leaves the
+    old file whole rather than a truncated or empty one that no command could then read. A config that is a symlink
+    (a dotfiles checkout) is written where it points: replacing the link itself would leave the real file stale.
+    A failed write is a `ConfigError`, not a traceback.
     """
-    resolved = path if path is not None else MachinePaths.default().config_file
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved = (path if path is not None else MachinePaths.default().config_file).resolve()
     text = json.dumps(config_to_mapping(config), indent=2, ensure_ascii=False, sort_keys=True)
-    descriptor, temporary = tempfile.mkstemp(dir=resolved.parent, prefix=f".{resolved.name}.", suffix=".tmp")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text + "\n")
-        Path(temporary).replace(resolved)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=resolved.parent, prefix=f".{resolved.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            Path(temporary).replace(resolved)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+    except OSError as exc:
+        raise ConfigError(f"cannot write config {resolved}: {exc}") from exc
 
 
 __all__ = ["TOP_LEVEL_KEYS", "config_to_mapping", "load_config", "load_config_for_rewrite", "save_config"]
