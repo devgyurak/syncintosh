@@ -86,8 +86,10 @@ erase the other Macs' value (`core/ignore.py`, `core/projection.py`).
   file and to every profile's `settings.json`. A change to the list takes effect on the next cycle.
 - Matching is by top-level key (`"[python]"` is one key). The legacy name `sync.ignoredSettings` is read too;
   `settingsSync.ignoredSettings` and `settingsSync.ignoredExtensions` cannot be ignored.
-- Precedence is excluded > this preset's noise > the user's list. `-x` cancels only an `x` the user listed; it
-  never revives a noise key or an excluded one, and such an entry is reported.
+- This preset's noise is VS Code's default ignore set, so it is carried like the user's list: the ignored keys are
+  `(noise ∪ the user's list) − "-x" entries`. `-x` switches a noise key (or a listed one) back on, and it syncs
+  from then on. An excluded key is cut whatever the list says, and a `-x` aimed at one is reported as a count.
+  Removing the `-x` carries the key again; the repo keeps its last value, which each Mac ignores.
 - An ignored key's value in the sealed object comes from the object this machine last accounted for (the apply
   ledger's); with none, from the object at `HEAD` (so a Mac joining a repo that already holds the file does not delete
   the key for everyone); with neither, the key is left out of what is sealed.
@@ -96,7 +98,9 @@ erase the other Macs' value (`core/ignore.py`, `core/projection.py`).
 
 ## What is out of scope
 
-- Re-enabling a key this preset treats as noise with `-x` is not supported (a follow-up).
+- A Mac that stops carrying a key keeps its own live value until the repo's differs; taking the repo's value on
+  the first cycle is a follow-up (issue #73). Two Macs that switch the same key on in one window conflict, and
+  `resolve` settles it.
 - A snippet file is synced as ordinary JSONC with no strip list, and the secret scan is the backstop
   for a credential inlined in a `body`. `tasks.json`, `mcp.json`, `extensions.json`, `prompts/`, Insiders,
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under
@@ -221,7 +225,10 @@ VSCODE = Preset.create(
     # 2: a renamed profile's records are moved to the new name (`core/profile_rename.py`, issue #67). A build that
     # predates this would collect the renamed profile's directory under its new name and leave the old records, so it
     # must stop on the policy mismatch instead of reviving them.
-    policy_epoch=2,
+    # 3: noise is carried, not stripped, so `-x` can switch a noise key back on (`core/ignore.py`, issue #73). A
+    # build that predates this strips the key, which the merge reads as a deletion on every other machine, and its
+    # apply refuses an object that holds one.
+    policy_epoch=3,
 )
 
 _PROFILES_KEY = "userDataProfiles"
