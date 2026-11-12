@@ -410,6 +410,7 @@ def _collect(
             item.path,
             item.format,
             source=_NO_SOURCE if record is None else baseline(record),
+            entry=None if record is None else ledger.get(record.file_id),
         )
         if projected.failure is not None:
             state.unprojectable.append(_refusal(item.path, projected.failure))

@@ -268,11 +268,18 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
     read as a deletion in the 3-way merge) nor refuses the object, and keeps its own live value. Switching a key on
     is a policy change the other builds cannot read, so the `vscode` policy epoch is 3 and an older build stops on
     the mismatch ([03-manifest.md](03-manifest.md), "Policy stamp").
+  - **A key that stops being carried is adopted** (issue #73). The apply ledger records, per file, a digest of
+    each key the Mac carried at its last settle (`LedgerEntry.carried`; digests, never the names, `AGENTS.md`
+    §3.3). A key in that set that this Mac no longer carries starts to sync from that cycle: it takes the repo's
+    value (the ledger's object, else `HEAD`'s) if the repo has one, and keeps the live value, which is then
+    published, if not. So a Mac that gets the `-x` late neither overwrites the value another Mac shared nor loses
+    its own. The same rule covers a key removed from the user's list. A ledger written before the field counts the
+    preset's noise as carried; an empty set means nothing was carried, which is not the same thing. A key can be
+    adopted only if its name is known: it is looked for among the live file's top-level keys and the preset's noise.
   - Removing the `-x` carries the key again: the repo keeps its last value, which every Mac ignores, and each keeps
     its own live value.
-  - Two Macs that switch the same key on in one window both add it, which is a conflict for `resolve`. Until the
-    adoption follow-up (issue #73, PR B), a Mac that starts syncing a key keeps publishing its own live value, so
-    the later Mac's value wins instead of adopting what the repo already holds.
+  - Two Macs that switch the same key on in one window both add it with their own value, which is a conflict for
+    `resolve`.
   - A default `settings.json` that is a symbolic link, a denied path, or outside `$HOME` has a list that cannot be
     trusted, so a profile's `settings.json` is **not synced** either (the list is unknown, and an empty one would seal
     the keys the user meant to keep local). A default file that is simply absent has no list, as in VS Code.

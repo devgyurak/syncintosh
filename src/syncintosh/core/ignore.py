@@ -30,7 +30,8 @@ not honour.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -87,18 +88,69 @@ class IgnoreSpec:
         A key the file excludes is stripped instead, so it is never carried; and a key outside the file's
         allowlist is already local, so carrying it would add nothing.
         """
-        noise = {segment[0] for segment in policy.noise if len(segment) == 1 and isinstance(segment[0], str)}
-        excluded = policy.excluded
-        synced = policy.synced
         return frozenset(
             path
-            for path in ((key,) for key in (noise | self.keys) - self.cancelled - NON_IGNORABLE)
-            if path not in excluded and (synced is None or any(path[: len(root)] == root for root in synced))
+            for path in ((key,) for key in (noise_keys(policy) | self.keys) - self.cancelled)
+            if _carriable(path, policy)
         )
 
     def blocked_cancellations(self, policy: PresetFile) -> int:
         """How many ``-x`` entries name a key `policy`'s file excludes, which a list cannot switch back on."""
         return sum(1 for key in self.cancelled if (key,) in policy.excluded)
+
+
+def noise_keys(policy: PresetFile) -> frozenset[str]:
+    """The top-level keys `policy`'s noise names: the file's default ignore set."""
+    return frozenset(segment[0] for segment in policy.noise if len(segment) == 1 and isinstance(segment[0], str))
+
+
+def _carriable(path: KeyPath, policy: PresetFile) -> bool:
+    """True when `path` may be carried for `policy`'s file: not excluded, not un-ignorable, inside the allowlist."""
+    synced = policy.synced
+    return (
+        path not in policy.excluded
+        and path[0] not in NON_IGNORABLE
+        and (synced is None or any(path[: len(root)] == root for root in synced))
+    )
+
+
+def carry_digest(key: str) -> str:
+    """What the ledger stores for a carried key: the `sha256` of its name, hex.
+
+    The name itself never reaches the ledger (``AGENTS.md`` §3.3). It is not a secret (the same Mac's settings file
+    holds the name in the clear); it keeps names out of the state file.
+    """
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def carried_digests(paths: Iterable[KeyPath]) -> tuple[str, ...]:
+    """The sorted, de-duplicated `carry_digest` of each carried key, as `LedgerEntry.carried` holds them."""
+    return tuple(sorted({carry_digest(path[0]) for path in paths}))
+
+
+def adopted_paths(
+    previous: tuple[str, ...] | None, policy: PresetFile, carried: frozenset[KeyPath], live_keys: Iterable[str]
+) -> frozenset[KeyPath]:
+    """The keys this Mac carried when it last settled the file and carries no more: they start to sync now.
+
+    `previous` is the ledger's carried set; `None` is a ledger from before the field, which counts as the preset's
+    noise (what the build that wrote it kept local). Only a name can be adopted, and the ledger holds digests, so a
+    key is looked for among `live_keys` and the file's noise keys. An excluded or un-ignorable key, or one outside the
+    allowlist, is never adopted: it never starts to sync.
+
+    The caller gives an adopted key the repo's value if the repo has one and the live value if not, so a Mac that
+    switches a key on neither overwrites the value another Mac already shared nor loses its own.
+    """
+    noise = noise_keys(policy)
+    before = {carry_digest(key) for key in noise} if previous is None else set(previous)
+    gone = before - {carry_digest(path[0]) for path in carried}
+    if not gone:
+        return frozenset()
+    return frozenset(
+        path
+        for path in ((key,) for key in {*live_keys, *noise})
+        if carry_digest(path[0]) in gone and path not in carried and _carriable(path, policy)
+    )
 
 
 NO_IGNORES: Final = IgnoreSpec()
@@ -109,4 +161,8 @@ __all__ = [
     "NON_IGNORABLE",
     "NO_IGNORES",
     "IgnoreSpec",
+    "adopted_paths",
+    "carried_digests",
+    "carry_digest",
+    "noise_keys",
 ]

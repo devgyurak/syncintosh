@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -24,7 +24,7 @@ from syncintosh.core.errors import (
     ProjectionError,
     SyntaxInvalid,
 )
-from syncintosh.core.ignore import NO_IGNORES, IgnoreSpec
+from syncintosh.core.ignore import NO_IGNORES, IgnoreSpec, adopted_paths, carried_digests
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord, tracking_key
 from syncintosh.core.manifest_codec import loads_manifest
@@ -244,6 +244,34 @@ class _Presets:
             return frozenset()
         state = self.ignores.get(policy.path, NO_IGNORES)
         return state.paths_for(policy) if isinstance(state, IgnoreSpec) else frozenset()
+
+    def carried_digests(self, policy: PresetFile) -> tuple[str, ...] | None:
+        """What the ledger records as carried for `policy`'s file this cycle; `None` for a file with no ignore list."""
+        return carried_digests(self.carried(policy)) if policy.ignore_list else None
+
+    def adopted(
+        self, policy: PresetFile, entry: LedgerEntry | None, live_keys: Callable[[], Iterable[str]]
+    ) -> frozenset[KeyPath]:
+        """The keys this machine carried at its last settle and carries no more, which sync from this cycle.
+
+        `live_keys` is asked only when something stopped being carried, so a file that carries what it did
+        before is not parsed for this. A file the ledger has no entry for has nothing to adopt.
+        """
+        if entry is None or not policy.ignore_list:
+            return frozenset()
+        carried = self.carried(policy)
+        previous = entry.carried
+        if previous is not None and set(previous) <= set(carried_digests(carried) or ()):
+            return frozenset()
+        return adopted_paths(previous, policy, carried, live_keys())
+
+    def adopted_in(self, policy: PresetFile, entry: LedgerEntry | None, raw: bytes | None) -> frozenset[KeyPath]:
+        """:meth:`adopted` for a live file's bytes: nothing for a missing or unreadable one."""
+        adapter = self.adapter_for(policy.format)
+        text = None if raw is None else _decode(raw)
+        if adapter is None or text is None:
+            return frozenset()
+        return self.adopted(policy, entry, lambda: _top_level_keys(adapter, text))
 
     def ignore_failure(self, policy: PresetFile) -> str | None:
         """Why the ignore list `policy`'s file obeys cannot be used this cycle, or `None` when it can."""
@@ -738,6 +766,15 @@ def _baseline_reader(
 _NO_SOURCE: _Source = _no_source
 
 
+def _top_level_keys(adapter: ContentAdapter, text: str) -> tuple[str, ...]:
+    """The top-level keys of a keyed document, or none when it is not one or does not parse."""
+    try:
+        value = adapter.parse(text).to_value()
+    except ContentParseError:
+        return ()
+    return tuple(value) if isinstance(value, dict) else ()
+
+
 def _project_file(
     presets: _Presets,
     raw: bytes | None,
@@ -746,12 +783,15 @@ def _project_file(
     *,
     source: _Source = _NO_SOURCE,
     carry: bool = True,
+    entry: LedgerEntry | None = None,
 ) -> _Projected:
     """Reduce a live file to the bytes that would be sealed, or report why it cannot be.
 
     `carry` False projects with the preset's static strip only: a merge result already holds the carried
     values of the objects it merged (``docs/design/02-base-and-merge.md``), so carrying again would replace
     them with an older object's. Otherwise `source` reads the object each carried key's value comes from.
+    `entry` is the file's ledger entry: a key it records as carried that this machine no longer carries is adopted,
+    and takes `source`'s value when `source` has one (`core/ignore.adopted_paths`).
     """
     policy = presets.policy_for(path)
     if policy is None:
@@ -767,20 +807,26 @@ def _project_file(
         # the file anyway would put a key the user meant to keep local into the repo (``AGENTS.md`` §3.4).
         return _Projected(raw=raw, view=None, failure="ignore-list")
     carried = presets.carried(policy) if carry else frozenset()
-    if not policy.strips and not carried:
+    adapter = presets.adapter_for(policy.format)
+    text = _decode(raw)
+    adopted = frozenset()
+    if carry and adapter is not None and text is not None:
+        adopted = presets.adopted(policy, entry, lambda: _top_level_keys(adapter, text))
+    if not policy.strips and not carried and not adopted:
         # Nothing to cut, so no adapter is needed and the projection is the file itself. This is
         # the `text` case: a shell script has no keys to strip.
         return _Projected(raw=raw, view=raw)
-    adapter = presets.adapter_for(policy.format)
     if adapter is None:
         return _Projected(raw=raw, view=None, failure="no-adapter")
-    text = _decode(raw)
     if text is None:
         return _Projected(raw=raw, view=None, failure="not-utf-8")
-    source_bytes = source() if carried else None
+    source_bytes = source() if carried or adopted else None
     try:
         view = project_text(
-            adapter, text, policy, Carry(carried, None if source_bytes is None else _decode(source_bytes))
+            adapter,
+            text,
+            policy,
+            Carry(carried, None if source_bytes is None else _decode(source_bytes), adopted),
         )
     except ProjectionError:
         return _Projected(raw=raw, view=None, failure="unrenderable")
@@ -1067,20 +1113,25 @@ def _decision(
     entry: LedgerEntry | None,
     baseline: bytes | None,
     adopt: AdoptChoice | None,
+    adopting: bool = False,
 ) -> _Decision:
     """Whether apply may write `record` over the live path, per the conservative rules.
 
     `live_view` is the **projection** of the live file — the form whose digest the record and the
     ledger hold — while `baseline` is the raw bytes collect accounted for. `changed` is True when
     the raw file differs from that baseline: an edit made between collect and apply aborts the
-    write, adopt included, even when the edit touched only a key the preset strips.
+    write, adopt included, even when the edit touched only a key the preset strips. `adopting` is True when a key
+    started to sync this cycle: the live file can then match the record's projection and still hold its own value
+    for that key, so "in sync" is not the end of it.
     """
     if live_bytes is None:
         # A missing file is not a deletion. Recreate a record this machine has never written, and
         # never one it wrote and that disappeared (that is the suppressed rule).
         return _WRITE if entry is None else _SKIP
     view = live_bytes if live_view is None else live_view
-    in_sync = not changed and _sha256(view) == record.sha256 and entry is not None and not entry.suppressed
+    in_sync = (
+        not changed and not adopting and _sha256(view) == record.sha256 and entry is not None and not entry.suppressed
+    )
     if in_sync:
         return _SKIP
     if entry is None or entry.suppressed:

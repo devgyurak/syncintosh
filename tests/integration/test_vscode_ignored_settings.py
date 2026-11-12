@@ -346,26 +346,28 @@ def test_a_file_with_no_object_yet_is_sealed_without_its_ignored_keys(tmp_path, 
 # --------------------------------------------------------------------------- 7. dropping a key from the list
 
 
-def test_a_key_dropped_from_the_list_syncs_from_the_next_cycle(tmp_path, memory_key_store) -> None:
+def test_a_key_dropped_from_the_list_syncs_from_the_next_cycle_and_takes_the_repos_value(
+    tmp_path, memory_key_store
+) -> None:
     # given — both Macs ignore the font size; A has its own value
     a, b = _pair(tmp_path, memory_key_store, {**BASE, LIST: ["editor.fontSize"]})
     _write(a, SETTINGS, {**BASE, "editor.fontSize": 15, LIST: ["editor.fontSize"]})
     _run(a)
-    # B stops ignoring it
+    # B stops ignoring it and publishes its own value
     _write(b, SETTINGS, {**BASE, LIST: []})
     _run(b)
 
     # when — A syncs: the list that stops ignoring the key arrives with this cycle, so the key is still carried now
     _run(a)
-    during = [obj for obj in _sealed(a) if obj.get("editor.fontSize") == 15]
-    # and again: the list A reads at the start of the cycle no longer names it
+    during = _live(a)["editor.fontSize"]
+    # and again: the list A reads at the start of the cycle no longer names it, so A adopts what the repo holds
     _run(a)
-    after = [obj for obj in _sealed(a) if obj.get("editor.fontSize") == 15]
 
-    # then
-    assert (during, len(after)) == ([], 1)
+    # then — A's own 15 was never sealed, and A now has the value B shared
+    assert (during, _live(a)["editor.fontSize"]) == (15, 13)
+    assert [obj for obj in _sealed(a) if obj.get("editor.fontSize") == 15] == []
     _run(b)
-    assert _live(b)["editor.fontSize"] == 15
+    assert _live(b)["editor.fontSize"] == 13
 
 
 # --------------------------------------------------------------------------- the report
@@ -528,22 +530,21 @@ def test_a_mac_that_has_not_got_the_cancellation_neither_deletes_nor_loses_the_r
     assert [obj for obj in _sealed(b) if obj.get("window.zoomLevel") == 5] != []
 
 
-def test_a_mac_that_has_the_cancellation_publishes_its_own_zoom_level_and_the_other_follows(
-    tmp_path, memory_key_store
-) -> None:
-    # given — both Macs hold the list; A published 5 and B still lives at 2
+def test_a_mac_that_receives_the_cancellation_adopts_the_value_the_other_mac_shared(tmp_path, memory_key_store) -> None:
+    # given — A published 5 with the cancellation; B lives at 2 and has not seen the list
     a, b = _pair(tmp_path, memory_key_store)
     _write(b, SETTINGS, BASE)
     _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
     _run(a)
     _run(b)
 
-    # when — PR A's behaviour, which adoption (PR B) replaces: the later Mac's value wins, so B's 2 is published
+    # when — B's next cycle reads the list: the key stops being carried, and the repo already has A's value
     _run(b)
     _run(a)
 
-    # then
-    assert (_live(a)["window.zoomLevel"], _live(b)["window.zoomLevel"]) == (2, 2)
+    # then — B takes 5, and A's value is neither overwritten nor changed
+    assert (_live(a)["window.zoomLevel"], _live(b)["window.zoomLevel"]) == (5, 5)
+    assert [obj for obj in _sealed(a) if obj.get("window.zoomLevel") == 2] == []
 
 
 def test_a_noise_key_is_not_sealed_while_nobody_has_cancelled_it(tmp_path, memory_key_store) -> None:
@@ -610,3 +611,96 @@ def test_the_previous_release_stops_on_a_repo_the_new_one_stamped(tmp_path, memo
     with pytest.raises(PolicyMismatch):
         _run(b, catalog=PREVIOUS)
     assert (_remote_head(b), _live(b)["editor.fontSize"]) == (published, 21)
+
+
+def test_a_mac_whose_repo_has_no_value_publishes_its_own_when_it_switches_the_key_on(
+    tmp_path, memory_key_store
+) -> None:
+    # given — both Macs in sync, neither ever shared a zoom level; B lives at 2
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _run(b)
+
+    # when — B switches the key on, so nothing in the repo is there to take
+    _write(b, SETTINGS, {**BASE, LIST: ["-window.zoomLevel"]})
+    _run(b)
+    _run(a)
+
+    # then — B's own value is what the repo holds, and A receives it
+    assert [obj for obj in _sealed(b) if obj.get("window.zoomLevel") == 2] != []
+    assert _live(a)["window.zoomLevel"] == 2
+
+
+def test_a_ledger_from_before_the_carried_set_counts_the_preset_noise_as_carried(tmp_path, memory_key_store) -> None:
+    # given — B's ledger is as an older build wrote it: no carried set at all
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    _run(b)
+    legacy = json.loads(b.ledger.read_text(encoding="utf-8"))
+    legacy["files"] = {
+        file_id: {k: v for k, v in entry.items() if k != "carried"} for file_id, entry in legacy["files"].items()
+    }
+    b.ledger.write_text(json.dumps(legacy), encoding="utf-8")
+
+    # when
+    _run(b)
+
+    # then — the noise key B used to keep local is adopted
+    assert _live(b)["window.zoomLevel"] == 5
+
+
+def test_the_ledger_records_digests_of_the_carried_keys_never_their_names(tmp_path, memory_key_store) -> None:
+    # given
+    a, _ = _pair(tmp_path, memory_key_store, {**BASE, LIST: ["editor.fontSize"]})
+
+    # when
+    text = a.ledger.read_text(encoding="utf-8")
+
+    # then
+    assert ("carried" in text, "zoomLevel" in text, "fontSize" in text) == (True, False, False)
+
+
+def test_two_macs_that_switch_the_same_key_on_in_one_window_conflict(tmp_path, memory_key_store) -> None:
+    # given — both Macs live at their own zoom and have the cancellation
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _write(b, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 7})
+    _run(a)
+
+    # when
+    report = _run(b)
+
+    # then — both added the key with different values, which `resolve` settles
+    assert report.has_conflicts is True
+
+
+def _held_at(machine: Machine, commit: str) -> list[Any]:
+    """Every object the commit holds that opens, parsed. Only fixtures are ever in them."""
+    transport = GitCLITransport(machine.repo)
+    cipher = EnvelopeCipher(machine.store)
+    stems = [Path(rel).stem for rel in FileRepo(machine.repo).list_paths("objects")]
+    blobs = [(stem, transport.read_blob(commit, f"objects/{stem}.enc")) for stem in stems]
+    return [
+        ADAPTER.parse(cipher.open(blob, domain="object", file_id=stem).decode()).to_value()
+        for stem, blob in blobs
+        if blob is not None
+    ]
+
+
+def test_the_value_an_adopting_mac_overwrites_is_kept_in_a_restore_point(tmp_path, memory_key_store) -> None:
+    # given — A published zoom 5 with the cancellation; B lives at 2 and has not seen the list
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    _run(b)
+
+    # when — B adopts, which overwrites its 2
+    report = _run(b)
+
+    # then — a restore point holds the settings as they were, with B's own zoom level
+    points = [point for point in report.restore_points if point.path == SETTINGS]
+    assert len(points) == 1
+    assert [value for value in _held_at(b, points[0].commit) if value.get("window.zoomLevel") == 2] != []

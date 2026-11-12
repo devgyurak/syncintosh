@@ -128,6 +128,11 @@ class LedgerEntry:
     # for a ledger written before the fields existed, which is never read as a rename.
     profile_dir: str = ""
     profile_key: str = ""
+    # The keys this Mac carried (kept local) when it last settled the file, as sorted `carry_digest`s — never the names
+    # (`AGENTS.md` §3.3). `None` is a ledger written before the field existed, which a reader takes as "the preset's
+    # noise"; `()` is "carried nothing", the case of a user who switched every noise key on. A key in this set that the
+    # Mac no longer carries is *adopted*: it starts to sync, taking the repo's value (`core/ignore.py`).
+    carried: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
