@@ -84,19 +84,21 @@ def _with_anchors(
     manifest: Manifest,
     paths: LivePaths,
 ) -> dict[str, LedgerEntry]:
-    """`settled` with the entries whose live file this cycle read anchored to the profile that file belongs to.
+    """`settled` with each profile entry anchored to the directory its profile has on this machine.
 
-    An entry that was not read keeps the anchor it had: it says nothing new about the directory, and a different
-    profile that merely carries the new name must not replace the evidence of where the baseline came from
-    (`core/profile_rename.py`). One that was read takes the directory and name the file was read from.
+    One whose live file this cycle read takes the directory and name the file was read from. One that was not read
+    keeps its anchor, because a different profile that merely carries the new name must not replace the evidence of
+    where the baseline came from (`core/profile_rename.py`) — except when the anchored *name* is unchanged and the
+    name now belongs to another directory (a swap, or a profile created again): the name is what the record is keyed
+    by, so the anchor follows it, or two records would keep claiming one directory.
     """
     anchored: dict[str, LedgerEntry] = {}
     for file_id, entry in settled.items():
         record = manifest.records.get(file_id)
-        anchor = None if file_id not in read or record is None else _profile_anchor_of(paths, record.path)
+        current = None if record is None else _profile_anchor_of(paths, record.path)
         old = previous.get(file_id)
-        if anchor is not None:
-            anchored[file_id] = replace(entry, profile_dir=anchor[0], profile_key=anchor[1])
+        if current is not None and (file_id in read or (old is not None and old.profile_key == current[1])):
+            anchored[file_id] = replace(entry, profile_dir=current[0], profile_key=current[1])
         else:
             anchored[file_id] = (
                 entry if old is None else replace(entry, profile_dir=old.profile_dir, profile_key=old.profile_key)

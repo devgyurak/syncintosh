@@ -330,16 +330,18 @@ def test_another_profile_that_merely_has_the_new_name_does_not_replace_the_ancho
     assert {e.profile_key for e in _ledger(b).values()} == {profile_anchor("Work")}
 
 
-def test_a_swap_of_names_moves_nothing_and_says_so(tmp_path, memory_key_store) -> None:
-    # given — the profile is renamed to "Job" and another profile takes the name "Work"
+@pytest.mark.parametrize("files", [(), ("settings.json",)], ids=["empty-directory", "directory-with-files"])
+def test_a_swap_of_names_moves_nothing_and_says_so_once(tmp_path, memory_key_store, files) -> None:
+    # given — the profile is renamed to "Job" and another profile, with or without files, takes the name "Work"
     a, _ = _pair(tmp_path, memory_key_store)
     before = _paths(a)
     _register(a, {"name": "Job", "location": A_DIR}, {"name": "Work", "location": "11aa22bb"})
     _profile_dir(a, "11aa22bb").mkdir(parents=True)
+    [_write(a, f"{USER}/profiles/11aa22bb/{name}", SETTINGS_TEXT) for name in files]
 
     # when
     report = _run(a)
-    again = _run(a)
+    later = [_run(a) for _ in range(3)]
 
     # then — the old records keep their name and the renamed directory's files are collected as its own: the content
     # follows the name, not the directory
@@ -347,8 +349,9 @@ def test_a_swap_of_names_moves_nothing_and_says_so(tmp_path, memory_key_store) -
     assert report.renamed == ()
     assert {file_id: path for file_id, path in after.items() if file_id in before} == before
     assert [r for r in report.refused if "another profile now has the old name" in r.reason and not r.blocking] != []
-    # and the next cycle is quiet: the warning does not repeat
-    assert [r for r in again.refused if "another profile now has the old name" in r.reason] == []
+    # and the following cycles are quiet: no rename-related row repeats
+    assert [(r.reason, r.blocking) for cycle in later for r in cycle.refused] == []
+    assert [cycle.renamed for cycle in later] == [()] * 3
 
 
 def test_two_macs_renaming_to_different_names_end_in_a_conflict_not_a_duplicate(tmp_path, memory_key_store) -> None:
