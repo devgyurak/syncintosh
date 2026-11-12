@@ -32,7 +32,19 @@ def _parse_entry(file_id: str, raw: object) -> LedgerEntry:
     release = raw.get("release", "")
     if not isinstance(release, str):
         raise LedgerCorrupt(f"ledger entry for {file_id!r} has a non-string release")
-    return LedgerEntry(sha256=sha256, commit=commit, suppressed=suppressed, release=release)
+    # Same rule for the profile anchor: absent means "no anchor", a wrong type means a damaged ledger.
+    profile_dir = raw.get("profile_dir", "")
+    profile_key = raw.get("profile_key", "")
+    if not isinstance(profile_dir, str) or not isinstance(profile_key, str):
+        raise LedgerCorrupt(f"ledger entry for {file_id!r} has a non-string profile anchor")
+    return LedgerEntry(
+        sha256=sha256,
+        commit=commit,
+        suppressed=suppressed,
+        release=release,
+        profile_dir=profile_dir,
+        profile_key=profile_key,
+    )
 
 
 class JsonLedgerStore:
@@ -59,10 +71,16 @@ class JsonLedgerStore:
 
     def save(self, entries: Mapping[str, LedgerEntry]) -> None:
         """Replace the ledger atomically."""
-        # `release` is written only when set, so a ledger without versioned dirs is unchanged for older builds.
+        # `release` and the profile anchor are written only when set, so a ledger without versioned dirs or profiles
+        # is unchanged for older builds.
         files = {
             file_id: {"sha256": entry.sha256, "commit": entry.commit, "suppressed": entry.suppressed}
             | ({"release": entry.release} if entry.release else {})
+            | (
+                {"profile_dir": entry.profile_dir, "profile_key": entry.profile_key}
+                if entry.profile_dir and entry.profile_key
+                else {}
+            )
             for file_id, entry in entries.items()
         }
         payload = json.dumps({"version": LEDGER_VERSION, "files": files}, indent=2, sort_keys=True)

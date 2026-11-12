@@ -122,6 +122,12 @@ class LedgerEntry:
     # and for a ledger written before this field existed. A baseline taken in one release folder says nothing about
     # the file in another, so a differing value makes the baseline count as absent (`services/sync.py`).
     release: str = ""
+    # Where a VS Code profile's record sat when this baseline was settled: the profile's directory id on this Mac and
+    # `profile_anchor(name)` (a digest, never the name — `AGENTS.md` §3.3). The pair is how a later cycle tells "this
+    # Mac renamed the profile" from "another Mac did" (`core/profile_rename.py`). Both are "" for any other record and
+    # for a ledger written before the fields existed, which is never read as a rename.
+    profile_dir: str = ""
+    profile_key: str = ""
 
 
 @dataclass(frozen=True)
