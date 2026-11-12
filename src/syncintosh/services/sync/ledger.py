@@ -86,27 +86,21 @@ def _with_anchors(
 ) -> dict[str, LedgerEntry]:
     """`settled` with the entries whose live file this cycle read anchored to the profile that file belongs to.
 
-    An entry that was not read keeps the anchor it has: it says nothing new about the directory. One that was read
-    takes the profile's current name, and its directory too unless it already has another one that this Mac still
-    lists, because that anchor is the evidence of which directory the baseline came from — a different profile that
-    merely carries the new name must not replace it (`core/profile_rename.py`).
+    An entry that was not read keeps the anchor it had: it says nothing new about the directory, and a different
+    profile that merely carries the new name must not replace the evidence of where the baseline came from
+    (`core/profile_rename.py`). One that was read takes the directory and name the file was read from.
     """
     anchored: dict[str, LedgerEntry] = {}
     for file_id, entry in settled.items():
         record = manifest.records.get(file_id)
-        found = None if file_id not in read or record is None else _profile_of(paths, record.path)
-        profile = None if found is None else found[0].lookup(found[1])
+        anchor = None if file_id not in read or record is None else _profile_anchor_of(paths, record.path)
         old = previous.get(file_id)
-        if found is None or profile is None:
+        if anchor is not None:
+            anchored[file_id] = replace(entry, profile_dir=anchor[0], profile_key=anchor[1])
+        else:
             anchored[file_id] = (
                 entry if old is None else replace(entry, profile_dir=old.profile_dir, profile_key=old.profile_key)
             )
-            continue
-        listed = {each.directory for each in found[0].entries}
-        keeps = old is not None and old.profile_dir not in ("", profile.directory) and old.profile_dir in listed
-        directory = old.profile_dir if keeps and old is not None else profile.directory
-        key = old.profile_key if keeps and old is not None else profile_anchor(found[1])
-        anchored[file_id] = replace(entry, profile_dir=directory, profile_key=key)
     return anchored
 
 

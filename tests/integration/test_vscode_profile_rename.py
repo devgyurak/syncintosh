@@ -339,6 +339,7 @@ def test_a_swap_of_names_moves_nothing_and_says_so(tmp_path, memory_key_store) -
 
     # when
     report = _run(a)
+    again = _run(a)
 
     # then — the old records keep their name and the renamed directory's files are collected as its own: the content
     # follows the name, not the directory
@@ -346,6 +347,8 @@ def test_a_swap_of_names_moves_nothing_and_says_so(tmp_path, memory_key_store) -
     assert report.renamed == ()
     assert {file_id: path for file_id, path in after.items() if file_id in before} == before
     assert [r for r in report.refused if "another profile now has the old name" in r.reason and not r.blocking] != []
+    # and the next cycle is quiet: the warning does not repeat
+    assert [r for r in again.refused if "another profile now has the old name" in r.reason] == []
 
 
 def test_two_macs_renaming_to_different_names_end_in_a_conflict_not_a_duplicate(tmp_path, memory_key_store) -> None:
