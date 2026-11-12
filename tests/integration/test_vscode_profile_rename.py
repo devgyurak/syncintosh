@@ -283,6 +283,85 @@ def test_a_ledger_from_before_the_anchor_is_never_read_as_a_rename(tmp_path, mem
     assert profile_anchor("Job") in {e.profile_key for e in _ledger(a).values()}
 
 
+def test_a_mac_with_no_anchor_yet_does_not_bring_the_old_name_back(tmp_path, memory_key_store) -> None:
+    # given — B was upgraded but has not synced since, so its ledger has no anchor; then A renames and publishes
+    a, b = _joined(tmp_path, memory_key_store)
+    legacy = json.loads(b.ledger.read_text(encoding="utf-8"))
+    b.ledger.write_text(
+        json.dumps(
+            {
+                "version": legacy["version"],
+                "files": {
+                    file_id: {k: v for k, v in entry.items() if not k.startswith("profile_")}
+                    for file_id, entry in legacy["files"].items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _rename_in_the_app(a, A_DIR, "Job")
+    _run(a)
+
+    # when — B syncs twice with its profile still called Work, and A syncs again
+    _run(b)
+    waiting = _run(b)
+    _run(a)
+
+    # then — the rename was seen from the anchor B took from the records it started the cycle with
+    assert [d.reason for d in waiting.deferred if 'renamed to "Job"' in d.reason] != []
+    assert (_profiles_of(a), _profiles_of(b)) == (["@Job"] * 3, ["@Job"] * 3)
+
+
+def test_another_profile_that_merely_has_the_new_name_does_not_replace_the_anchor(tmp_path, memory_key_store) -> None:
+    # given — B has an empty profile "Job" that never had records, and A then renames its "Work" to "Job"
+    a, b = _joined(tmp_path, memory_key_store)
+    _register(b, {"name": "Work", "location": B_DIR}, {"name": "Job", "location": "11aa22bb"})
+    _profile_dir(b, "11aa22bb").mkdir(parents=True)
+    _rename_in_the_app(a, A_DIR, "Job")
+    _run(a)
+
+    # when
+    _run(b)
+    _run(b)
+    _run(a)
+
+    # then — B's Work directory is still the one the records came from, so it is held and no "@Work" comes back
+    assert (_profiles_of(a), _profiles_of(b)) == (["@Job"] * 3, ["@Job"] * 3)
+    assert {e.profile_key for e in _ledger(b).values()} == {profile_anchor("Work")}
+
+
+def test_a_swap_of_names_moves_nothing_and_says_so(tmp_path, memory_key_store) -> None:
+    # given — the profile is renamed to "Job" and another profile takes the name "Work"
+    a, _ = _pair(tmp_path, memory_key_store)
+    before = _paths(a)
+    _register(a, {"name": "Job", "location": A_DIR}, {"name": "Work", "location": "11aa22bb"})
+    _profile_dir(a, "11aa22bb").mkdir(parents=True)
+
+    # when
+    report = _run(a)
+
+    # then — the old records keep their name and the renamed directory's files are collected as its own: the content
+    # follows the name, not the directory
+    after = _paths(a)
+    assert report.renamed == ()
+    assert {file_id: path for file_id, path in after.items() if file_id in before} == before
+    assert [r for r in report.refused if "another profile now has the old name" in r.reason and not r.blocking] != []
+
+
+def test_two_macs_renaming_to_different_names_end_in_a_conflict_not_a_duplicate(tmp_path, memory_key_store) -> None:
+    # given — A published "Job"; B, which has not synced, renamed the same profile to "Gig"
+    a, b = _joined(tmp_path, memory_key_store)
+    _rename_in_the_app(a, A_DIR, "Job")
+    _run(a)
+    _rename_in_the_app(b, B_DIR, "Gig")
+
+    # when
+    report = _run(b)
+
+    # then — the same records were given two paths: that is a conflict for `resolve`, and nothing is duplicated
+    assert (report.has_conflicts, len(_paths(b))) == (True, 3)
+
+
 # --------------------------------------------------------------------------- diff previews and writes nothing
 
 

@@ -112,16 +112,17 @@ def diff_repo(
     catalog: PresetCatalog,
     adapters: Mapping[FileFormat, ContentAdapter],
     validators: Mapping[ValidatorName, SyntaxValidator],
+    ledger: Mapping[str, LedgerEntry],
     profiles: ProfileIndex | None = None,
     config_dirs: AppConfigDir | None = None,
     agent_projects: AgentProjectIndex | None = None,
     documents: DocumentSkips | None = None,
-    ledger: Mapping[str, LedgerEntry] | None = None,
 ) -> DiffReport:
     """Compare every tracked path's live file with the repo side. Never writes anything.
 
-    `ledger` is this machine's apply ledger. With it, a profile renamed in the app is previewed and compared under its
-    new name, as the next sync would carry it; without one nothing is read as a rename.
+    `ledger` is this machine's apply ledger, required so that no caller can silently see a different result than
+    `sync` would: a profile renamed in the app is previewed and compared under its new name, as the next sync would
+    carry it.
     """
     presets = _Presets(
         catalog=catalog,
@@ -142,7 +143,7 @@ def diff_repo(
     if manifest is None:
         return DiffReport(entries=(), source=source)
 
-    renames = _plan_renames(config, manifest.records, {} if ledger is None else ledger, paths)
+    renames = _plan_renames(config, manifest.records, ledger, paths)
     entries: list[FileDiff] = []
     for file_id, record in renames.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:

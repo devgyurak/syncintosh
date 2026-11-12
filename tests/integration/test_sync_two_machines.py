@@ -1092,6 +1092,7 @@ def _diff(machine: Machine) -> DiffReport:
         catalog=EMPTY_CATALOG,
         adapters={},
         validators={},
+        ledger={},
     )
 
 

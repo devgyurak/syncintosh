@@ -982,6 +982,7 @@ def test_a_diff_warns_and_still_shows_what_it_can_when_the_repo_is_newer(tmp_pat
         catalog=OLD_BUILD,
         adapters={"jsonc": JsoncAdapter()},
         validators={},
+        ledger={},
     )
 
     # then — read-only, with the warning

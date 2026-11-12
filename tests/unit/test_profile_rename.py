@@ -297,6 +297,18 @@ def test_two_profiles_renamed_to_one_name_both_stay() -> None:
     )
 
 
+def test_two_groups_anchored_to_one_directory_are_both_left_alone_even_when_one_has_not_moved() -> None:
+    # given — "Work" was renamed to "Job" here, and "Job" records claim that directory too
+    records = _by_id(_record(ID_1, "Work"), _record(ID_2, "Job"))
+    ledger = {ID_1: _entry(DIR_A, "Work"), ID_2: _entry(DIR_A, "Job")}
+
+    # when
+    plan = _plan(records, ledger, _map(("Job", DIR_A)))
+
+    # then
+    assert (plan.moves, plan.elsewhere, [b.reason for b in plan.blocked]) == ((), (), [ANCHORS_DISAGREE] * 2)
+
+
 def test_a_move_is_asked_about_the_records_as_they_would_be() -> None:
     # given
     records = _by_id(_record(ID_1, "Work"))

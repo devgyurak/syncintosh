@@ -14,6 +14,7 @@ from syncintosh.core.manifest import FileFormat, Manifest, ManifestRecord
 from syncintosh.core.models import LedgerEntry
 from syncintosh.core.ports import DenyList, LiveFiles
 from syncintosh.core.profile_rename import profile_anchor
+from syncintosh.core.profiles import ProfileMap
 from syncintosh.services.profile_paths import LivePaths, Located, Unresolved
 from syncintosh.services.sync._shared import (
     _NO_SOURCE,
@@ -32,6 +33,16 @@ def _release_of(located: Located) -> str:
     return "" if located.config_directory is None else located.config_directory.rsplit("/", 1)[-1]
 
 
+def _profile_of(paths: LivePaths, path: str) -> tuple[ProfileMap, str] | None:
+    """This machine's profile list and the profile name a logical path names, or `None` for a path that names none."""
+    found = paths.logical(path)
+    if found is None:
+        return None
+    spec, parsed = found
+    view = next((candidate for candidate in paths.views if candidate.spec == spec), None)
+    return None if view is None else (view.profiles, parsed.name)
+
+
 def _profile_anchor_of(paths: LivePaths, path: str) -> tuple[str, str] | None:
     """`(directory id, anchor)` of the profile a logical path names on this machine, or `None` when it names none here.
 
@@ -39,26 +50,63 @@ def _profile_anchor_of(paths: LivePaths, path: str) -> tuple[str, str] | None:
     profile cannot be seen keeps the anchor it has, because that is the evidence of what the profile was called when
     this Mac last had it (`core/profile_rename.py`).
     """
-    found = paths.logical(path)
-    if found is None:
-        return None
-    spec, parsed = found
-    view = next((candidate for candidate in paths.views if candidate.spec == spec), None)
-    profile = None if view is None else view.profiles.lookup(parsed.name)
-    return None if profile is None else (profile.directory, profile_anchor(parsed.name))
+    found = _profile_of(paths, path)
+    profile = None if found is None else found[0].lookup(found[1])
+    return None if found is None or profile is None else (profile.directory, profile_anchor(found[1]))
 
 
-def _with_anchors(settled: Mapping[str, LedgerEntry], manifest: Manifest, paths: LivePaths) -> dict[str, LedgerEntry]:
-    """`settled` with each profile record's entry anchored to the directory and name it has on this machine now.
+def _fill_anchors(
+    ledger: Mapping[str, LedgerEntry], manifest: Manifest | None, paths: LivePaths
+) -> dict[str, LedgerEntry]:
+    """`ledger` with an anchor on each profile entry that lacks one, taken from the records this cycle started from.
 
-    Done for every entry, not only a rewritten one: a ledger written before the anchor existed gets it at its next
-    save (decision D6), and the anchor says only what the profile is called, never what its file holds.
+    A ledger from before the anchor existed has none, and the merge below may replace the records with a rename this
+    Mac has not seen: the anchor has to be what the profile was called *before* that, or the old directory would be
+    collected under its old name again (decision D6 covers only a rename made before the anchor existed).
+    """
+    records = {} if manifest is None else manifest.records
+    filled: dict[str, LedgerEntry] = {}
+    for file_id, entry in ledger.items():
+        record = records.get(file_id)
+        anchor = (
+            None
+            if (entry.profile_dir and entry.profile_key) or record is None
+            else _profile_anchor_of(paths, record.path)
+        )
+        filled[file_id] = entry if anchor is None else replace(entry, profile_dir=anchor[0], profile_key=anchor[1])
+    return filled
+
+
+def _with_anchors(
+    settled: Mapping[str, LedgerEntry],
+    read: frozenset[str],
+    previous: Mapping[str, LedgerEntry],
+    manifest: Manifest,
+    paths: LivePaths,
+) -> dict[str, LedgerEntry]:
+    """`settled` with the entries whose live file this cycle read anchored to the profile that file belongs to.
+
+    An entry that was not read keeps the anchor it has: it says nothing new about the directory. One that was read
+    takes the profile's current name, and its directory too unless it already has another one that this Mac still
+    lists, because that anchor is the evidence of which directory the baseline came from — a different profile that
+    merely carries the new name must not replace it (`core/profile_rename.py`).
     """
     anchored: dict[str, LedgerEntry] = {}
     for file_id, entry in settled.items():
         record = manifest.records.get(file_id)
-        anchor = None if record is None else _profile_anchor_of(paths, record.path)
-        anchored[file_id] = entry if anchor is None else replace(entry, profile_dir=anchor[0], profile_key=anchor[1])
+        found = None if file_id not in read or record is None else _profile_of(paths, record.path)
+        profile = None if found is None else found[0].lookup(found[1])
+        old = previous.get(file_id)
+        if found is None or profile is None:
+            anchored[file_id] = (
+                entry if old is None else replace(entry, profile_dir=old.profile_dir, profile_key=old.profile_key)
+            )
+            continue
+        listed = {each.directory for each in found[0].entries}
+        keeps = old is not None and old.profile_dir not in ("", profile.directory) and old.profile_dir in listed
+        directory = old.profile_dir if keeps and old is not None else profile.directory
+        key = old.profile_key if keeps and old is not None else profile_anchor(found[1])
+        anchored[file_id] = replace(entry, profile_dir=directory, profile_key=key)
     return anchored
 
 
@@ -108,6 +156,7 @@ def _settle_ledger(
     """
     paths = paths or LivePaths(catalog=presets.catalog)
     settled: dict[str, LedgerEntry] = {}
+    read: set[str] = set()
     unsafe = _unsafe_glob_directories(config, live, deny, home, paths)
     for file_id, record in target_manifest.records.items():
         if record.scope == "machine" and record.machine != config.machine_id:
@@ -159,11 +208,12 @@ def _settle_ledger(
             settled[file_id] = LedgerEntry(
                 sha256=digest, commit=target_commit, suppressed=False, release=_release_of(located)
             )
+            read.add(file_id)
         else:
             old = ledger.get(file_id)
             if old is not None:
                 settled[file_id] = old
-    return _with_anchors(settled, target_manifest, paths)
+    return _with_anchors(settled, frozenset(read), ledger, target_manifest, paths)
 
 
 def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat, source: _Source) -> str | None:

@@ -51,7 +51,8 @@ OLD_NAME_PRESENT: Final[BlockReason] = "old-name-present"
 def profile_anchor(name: str) -> str:
     """The digest the ledger stores for a profile name: `sha256` of its `collision_key`, hex.
 
-    The name itself never reaches the ledger (``AGENTS.md`` §3.3). Folding first makes a case- or
+    The name itself never reaches the ledger (``AGENTS.md`` §3.3). This keeps names out of the state file; it is not
+    a secret, since the same Mac's `storage.json` holds the name in the clear. Folding first makes a case- or
     normalization-only change the same anchor, which is what keeps it from reading as a rename.
     """
     return hashlib.sha256(profile_name_key(name).encode("utf-8")).hexdigest()
@@ -115,19 +116,25 @@ def plan_profile_renames(
     moves: list[ProfileMove] = []
     elsewhere: list[RenamedElsewhere] = []
     blocked: list[RenameBlocked] = []
-    for key in sorted(groups):
-        group = groups[key]
-        anchors = {
+    anchored = {
+        key: {
             (entry.profile_dir, entry.profile_key)
             for record, _ in group.members
             if (entry := ledger.get(record.file_id)) is not None and entry.profile_dir and entry.profile_key
         }
+        for key, group in groups.items()
+    }
+    # One directory answers for one profile: two groups anchored to it cannot both be what it was called.
+    claims = [directory for anchors in anchored.values() for directory in {each[0] for each in anchors}]
+    for key in sorted(groups):
+        group = groups[key]
+        anchors = anchored[key]
         if not anchors:
             continue
         if not profiles.readable:
             blocked.append(RenameBlocked(group.name, UNREADABLE))
             continue
-        if len(anchors) > 1:
+        if len(anchors) > 1 or claims.count(next(iter(anchors))[0]) > 1:
             blocked.append(RenameBlocked(group.name, ANCHORS_DISAGREE))
             continue
         ((directory, ledger_key),) = anchors

@@ -223,9 +223,11 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
       deferral; the rename-specific sentence appears on the next one.
     - *Left alone and reported* (the old records stay): the profile list is unreadable, the new name is not in
       this machine's `names`, the new name already has records, the anchors name two directories, two Macs chose
-      different names, or another profile now has the old name.
+      different names (the same records get two paths, which `resolve` settles), or another profile now has the old
+      name. A **swap** of two names moves nothing: the content follows the name, not the directory.
     - **Known limits:** a rename made before the anchor existed (a ledger written by an older build) is not
-      detected — the anchor is filled at the next ledger write — and a rename that only changes case is not a
+      detected — the anchor is filled from the records a cycle starts from, so a rename that arrives *after* the
+      upgrade is still seen — and a rename that only changes case is not a
       rename (`collision_key`). `diff` previews the move without writing it. `policy_epoch` of `vscode` is 2: a
       build that predates the move stops on the policy mismatch instead of reviving the old records.
   - To add profiles to an existing config by hand, add
