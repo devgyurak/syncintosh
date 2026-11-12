@@ -88,16 +88,20 @@ def _with_anchors(
 
     One whose live file this cycle read takes the directory and name the file was read from. One that was not read
     keeps its anchor, because a different profile that merely carries the new name must not replace the evidence of
-    where the baseline came from (`core/profile_rename.py`) — except when the anchored *name* is unchanged and the
-    name now belongs to another directory (a swap, or a profile created again): the name is what the record is keyed
-    by, so the anchor follows it, or two records would keep claiming one directory.
+    where the baseline came from (`core/profile_rename.py`). Two cases follow the profile instead, or the profile's
+    records would be anchored two ways and block each other: the record's name is found in the *same directory* the
+    anchor names (this Mac renamed it, so the baseline came from there), or the anchored *name* is unchanged and now
+    belongs to another directory (a swap, or a profile created again).
     """
     anchored: dict[str, LedgerEntry] = {}
     for file_id, entry in settled.items():
         record = manifest.records.get(file_id)
         current = None if record is None else _profile_anchor_of(paths, record.path)
         old = previous.get(file_id)
-        if current is not None and (file_id in read or (old is not None and old.profile_key == current[1])):
+        follows = (
+            current is not None and old is not None and (old.profile_dir == current[0] or old.profile_key == current[1])
+        )
+        if current is not None and (file_id in read or follows):
             anchored[file_id] = replace(entry, profile_dir=current[0], profile_key=current[1])
         else:
             anchored[file_id] = (

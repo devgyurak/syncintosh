@@ -330,6 +330,50 @@ def test_another_profile_that_merely_has_the_new_name_does_not_replace_the_ancho
     assert {e.profile_key for e in _ledger(b).values()} == {profile_anchor("Work")}
 
 
+def _quiet(report) -> list[tuple[str, bool]]:
+    """Every rename-related row of a cycle: a refusal, or a deferral that waits for a rename."""
+    return [(r.reason, r.blocking) for r in report.refused] + [
+        (d.reason, False) for d in report.deferred if "renamed to" in d.reason
+    ]
+
+
+def test_a_rename_here_with_a_file_the_person_removed_leaves_one_anchor(tmp_path, memory_key_store) -> None:
+    # given — keybindings.json was removed in A's Work profile and synced (suppressed), so it is never read again
+    a, _ = _pair(tmp_path, memory_key_store)
+    (_profile_dir(a, A_DIR) / "keybindings.json").unlink()
+    _run(a)
+
+    # when
+    _rename_in_the_app(a, A_DIR, "Job")
+    first = _run(a)
+    later = [_run(a) for _ in range(3)]
+
+    # then — all three records moved, and no later cycle reports a disagreement
+    assert first.renamed == (ProfileRenamed(old="Work", new="Job", records=3),)
+    assert [_quiet(cycle) for cycle in later] == [[]] * 3
+    assert {(e.profile_dir, e.profile_key) for e in _ledger(a).values()} == {(A_DIR, profile_anchor("Job"))}
+
+
+def test_the_mac_that_converges_with_a_removed_file_leaves_one_anchor(tmp_path, memory_key_store) -> None:
+    # given — B removed a file (suppressed) before A renamed the profile; B waits, then renames its own directory
+    a, b = _joined(tmp_path, memory_key_store)
+    (_profile_dir(b, B_DIR) / "keybindings.json").unlink()
+    _run(b)
+    _rename_in_the_app(a, A_DIR, "Job")
+    _run(a)
+    _run(b)
+    _run(b)
+
+    # when
+    _rename_in_the_app(b, B_DIR, "Job")
+    later = [_run(b) for _ in range(4)]
+
+    # then — in sync, nothing reported, and every entry is anchored to B's directory under the new name
+    assert [_quiet(cycle) for cycle in later] == [[]] * 4
+    assert {(e.profile_dir, e.profile_key) for e in _ledger(b).values()} == {(B_DIR, profile_anchor("Job"))}
+    assert _profiles_of(b) == ["@Job"] * 3
+
+
 @pytest.mark.parametrize("files", [(), ("settings.json",)], ids=["empty-directory", "directory-with-files"])
 def test_a_swap_of_names_moves_nothing_and_says_so_once(tmp_path, memory_key_store, files) -> None:
     # given — the profile is renamed to "Job" and another profile, with or without files, takes the name "Work"
@@ -350,7 +394,7 @@ def test_a_swap_of_names_moves_nothing_and_says_so_once(tmp_path, memory_key_sto
     assert {file_id: path for file_id, path in after.items() if file_id in before} == before
     assert [r for r in report.refused if "another profile now has the old name" in r.reason and not r.blocking] != []
     # and the following cycles are quiet: no rename-related row repeats
-    assert [(r.reason, r.blocking) for cycle in later for r in cycle.refused] == []
+    assert [_quiet(cycle) for cycle in later] == [[]] * 3
     assert [cycle.renamed for cycle in later] == [()] * 3
 
 
