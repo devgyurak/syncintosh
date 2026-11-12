@@ -37,6 +37,10 @@ def _parse_entry(file_id: str, raw: object) -> LedgerEntry:
     profile_key = raw.get("profile_key", "")
     if not isinstance(profile_dir, str) or not isinstance(profile_key, str):
         raise LedgerCorrupt(f"ledger entry for {file_id!r} has a non-string profile anchor")
+    # Absent is a ledger from before carry tracking (`None`, which is not the same as an empty list).
+    carried = raw.get("carried")
+    if carried is not None and (not isinstance(carried, list) or not all(isinstance(item, str) for item in carried)):
+        raise LedgerCorrupt(f"ledger entry for {file_id!r} has a malformed carried set")
     return LedgerEntry(
         sha256=sha256,
         commit=commit,
@@ -44,6 +48,7 @@ def _parse_entry(file_id: str, raw: object) -> LedgerEntry:
         release=release,
         profile_dir=profile_dir,
         profile_key=profile_key,
+        carried=None if carried is None else tuple(carried),
     )
 
 
@@ -71,8 +76,8 @@ class JsonLedgerStore:
 
     def save(self, entries: Mapping[str, LedgerEntry]) -> None:
         """Replace the ledger atomically."""
-        # `release` and the profile anchor are written only when set, so a ledger without versioned dirs or profiles
-        # is unchanged for older builds.
+        # `release`, the profile anchor and the carried set are written only when set, so a ledger without versioned
+        # dirs, profiles or an ignore list is unchanged for older builds.
         files = {
             file_id: {"sha256": entry.sha256, "commit": entry.commit, "suppressed": entry.suppressed}
             | ({"release": entry.release} if entry.release else {})
@@ -81,6 +86,7 @@ class JsonLedgerStore:
                 if entry.profile_dir and entry.profile_key
                 else {}
             )
+            | ({} if entry.carried is None else {"carried": list(entry.carried)})
             for file_id, entry in entries.items()
         }
         payload = json.dumps({"version": LEDGER_VERSION, "files": files}, indent=2, sort_keys=True)

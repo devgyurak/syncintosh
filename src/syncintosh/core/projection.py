@@ -72,6 +72,10 @@ class Carry:
 
     paths: frozenset[KeyPath] = frozenset()
     source: str | None = field(default=None, repr=False)
+    # Keys this machine carried at its last settle and carries no more (`core/ignore.adopted_paths`). They sync now:
+    # a projection takes the source's value for one when the source has it, and keeps the live value when it does not.
+    # They are not in `paths`, so `restore_text` writes the repo's value instead of putting this machine's back.
+    adopted: frozenset[KeyPath] = frozenset()
 
 
 NO_CARRY = Carry()
@@ -318,7 +322,7 @@ def project_text(adapter: ContentAdapter, text: str, policy: PresetFile, carried
     `carried` swaps the value of each user-ignored key for the one in its source object. Strip runs
     again afterwards because that object may hold a key the preset excludes.
     """
-    if not policy.strips and not carried.paths:
+    if not policy.strips and not carried.paths and not carried.adopted:
         return text
     tree, projected, verbatim = _projection(adapter, text, policy, carried)
     if projected == tree:
@@ -336,10 +340,16 @@ def _projection(
     paths, synced = policy.stripped, policy.synced
     tree = _parse(adapter, text, policy)
     source = None if carried.source is None else _parse(adapter, carried.source, policy)
-    projected = strip(carry(strip(tree, paths, synced), carried.paths, source), paths, synced)
+    # An adopted key is carried only when the source holds it: with nothing to take, the live value stays.
+    taken = carried.paths | (
+        frozenset()
+        if source is None
+        else frozenset(path for path in carried.adopted if any(held[: len(path)] == path for held in source.entries))
+    )
+    projected = strip(carry(strip(tree, paths, synced), taken, source), paths, synced)
     # The carried values are copied as the source wrote them, not re-serialized: `1e3` must stay `1e3` for the
     # next cycle's projection of the same source to be this very text.
-    verbatim = None if carried.source is None or not carried.paths else Verbatim(carried.source, carried.paths)
+    verbatim = None if carried.source is None or not taken else Verbatim(carried.source, taken)
     return tree, projected, verbatim
 
 

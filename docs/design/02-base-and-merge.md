@@ -206,6 +206,10 @@ and `apply` puts this machine's own value back.
   ledger object, the object at `HEAD` is used; where there is none at all (a file not yet published), the carried
   keys are left out of the seal. That is what a strip produced, so a repo that never held a noise key keeps
   byte-identical objects.
+- **A key that stops being carried is adopted.** The ledger entry lists digests of the keys carried when it was
+  settled; one that this cycle no longer carries is projected as an ordinary synced key whose value is the
+  source's if the source has it (`Carry.adopted`), else the live one. `apply` does not treat it as carried, so the
+  repo's value is written, and a file whose only difference is an adopted value is not "in sync" until it is.
 - **Strip, carry, strip.** The source is a stored object and may predate an exclusion, so the static strip runs
   again after the carry; an excluded key inside a carried value is never sealed.
 - **The round trip is checked against the object being applied.** That object is the next cycle's ledger object,

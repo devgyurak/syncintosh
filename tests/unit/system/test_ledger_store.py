@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -138,7 +139,7 @@ def test_a_profile_anchor_round_trips(tmp_path: Path) -> None:
         pytest.param({}, id="neither"),
     ],
 )
-def test_a_half_anchor_is_not_written(tmp_path: Path, partial: dict[str, str]) -> None:
+def test_a_half_anchor_is_not_written(tmp_path: Path, partial: dict[str, Any]) -> None:
     # given
     path = tmp_path / "applied.json"
     entry = LedgerEntry(sha256="a" * 64, commit="b" * 40, suppressed=False, **partial)

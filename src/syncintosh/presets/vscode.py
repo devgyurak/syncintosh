@@ -98,9 +98,9 @@ erase the other Macs' value (`core/ignore.py`, `core/projection.py`).
 
 ## What is out of scope
 
-- A Mac that stops carrying a key keeps its own live value until the repo's differs; taking the repo's value on
-  the first cycle is a follow-up (issue #73). Two Macs that switch the same key on in one window conflict, and
-  `resolve` settles it.
+- A key that stops being carried (a `-x`, or a key removed from the list) is *adopted*: the Mac takes the repo's value
+  if the repo has one, and publishes its own live value if not (`core/ignore.adopted_paths`). Two Macs that switch the
+  same key on in one window conflict, and `resolve` settles it.
 - A snippet file is synced as ordinary JSONC with no strip list, and the secret scan is the backstop
   for a credential inlined in a `body`. `tasks.json`, `mcp.json`, `extensions.json`, `prompts/`, Insiders,
   portable mode, `--user-data-dir`, and project snippets (`<project>/.vscode/*.code-snippets`, which are not under

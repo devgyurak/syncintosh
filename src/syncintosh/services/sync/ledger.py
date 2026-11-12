@@ -203,10 +203,20 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = replace(old, suppressed=True)
             continue
+        # No adoption here: the digest says whether the live file *already* agrees with the record. An adopted key
+        # whose write did not happen (aborted, refused, deferred) holds this Mac's own value, so it must not match,
+        # and the entry keeps its old carried set for the next cycle to adopt again.
         digest = _ledger_digest(presets, live_bytes, record.path, record.format, target(record))
         if digest is not None and digest == record.sha256:
+            policy = presets.policy_for(record.path)
             settled[file_id] = LedgerEntry(
-                sha256=digest, commit=target_commit, suppressed=False, release=_release_of(located)
+                sha256=digest,
+                commit=target_commit,
+                suppressed=False,
+                release=_release_of(located),
+                # What this cycle carried, so the next one can tell a key that stopped being carried (and so
+                # starts to sync) from one that never was.
+                carried=None if policy is None else presets.carried_digests(policy),
             )
             read.add(file_id)
         else:
@@ -216,13 +226,15 @@ def _settle_ledger(
     return _with_anchors(settled, frozenset(read), ledger, target_manifest, paths)
 
 
-def _ledger_digest(presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat, source: _Source) -> str | None:
+def _ledger_digest(
+    presets: _Presets, live_bytes: bytes, path: str, fmt: FileFormat, source: _Source, entry: LedgerEntry | None = None
+) -> str | None:
     """The digest the ledger should hold for a live file, or `None` when it cannot be projected.
 
     `source` reads the object the cycle ended on, because that is the object the next collect measures the file
     against (``docs/design/02-base-and-merge.md``).
     """
-    projected = _project_file(presets, live_bytes, path, fmt, source=source)
+    projected = _project_file(presets, live_bytes, path, fmt, source=source, entry=entry)
     if projected.failure is not None or projected.view is None:
         return None
     return _sha256(projected.view)

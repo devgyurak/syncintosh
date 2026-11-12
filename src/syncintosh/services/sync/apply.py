@@ -308,6 +308,7 @@ def _apply(
             live_bytes is not None
             and live_bytes == collect_baseline
             and stripped_policy is not None
+            and not stripped_policy.ignore_list
             and not presets.carried(stripped_policy)
         )
         cached = views.get(file_id) if reusable else None
@@ -320,6 +321,7 @@ def _apply(
                 record.path,
                 record.format,
                 source=_object_reader(transport, cipher, target_commit, record),
+                entry=ledger.get(file_id),
             )
             if view.failure is not None:
                 unprojectable.append(_refusal(record.path, view.failure))
@@ -327,6 +329,15 @@ def _apply(
             live_view = view.view
         changed = live_bytes is not None and collect_baseline is not None and live_bytes != collect_baseline
         entry = ledger.get(file_id)
+        # Keys this Mac stopped carrying take the repo's value, which only a write can do: the live projection
+        # already agrees with the record, so without this the file would read as in sync.
+        adopted = (
+            frozenset()
+            if stripped_policy is None or entry is None
+            else presets.adopted_in(
+                stripped_policy, entry, live_bytes, _entry_reader(transport, cipher, file_id, entry)
+            )
+        )
         # With no collect baseline, `_decision` compares the view with the ledger digest. That digest is of the
         # ledger's object, so a file with carried keys is measured against that object here, not the one about
         # to be written: a remote change to a carried key would otherwise read as an edit and abort the write.
@@ -337,7 +348,7 @@ def _apply(
             entry is not None
             and live_bytes is not None
             and stripped_policy is not None
-            and presets.carried(stripped_policy)
+            and (stripped_policy.ignore_list or presets.carried(stripped_policy))
         ):
             measured = _project_file(
                 presets,
@@ -345,6 +356,7 @@ def _apply(
                 record.path,
                 record.format,
                 source=_entry_reader(transport, cipher, file_id, entry),
+                entry=entry,
             )
             ledger_view = measured.view if measured.failure is None else live_view
         decision = _decision(
@@ -356,6 +368,7 @@ def _apply(
             entry=entry,
             baseline=collect_baseline,
             adopt=adopt,
+            adopting=bool(adopted),
         )
         if decision == _ABORT:
             aborted.append(record.path)
@@ -389,6 +402,9 @@ def _apply(
                 unprojectable.append(Refusal(record.path, reduced))
                 continue
             data, losses = reduced
+        if adopted and live_bytes == data:
+            # The live file already holds the repo's value for each adopted key, so there is nothing to write.
+            continue
         if not _syntax_ok(presets, data, record.path):
             invalid.append(Refusal(record.path, _SYNTAX_FAILED))
             continue
@@ -401,8 +417,10 @@ def _apply(
             refused.append(Refusal(record.path, _NO_RESTORE_POINT))
             continue
         if live_bytes is not None and live_bytes != data:
-            if entry is None or entry.suppressed or file_id in unstored:
+            if entry is None or entry.suppressed or file_id in unstored or adopted:
                 # Its bytes are in no commit (an `--adopt remote` overwrite, or a stale-baseline edit): save them first.
+                # So are an adopted key's: every commit holds the repo's value there, and this Mac's own is what the
+                # write replaces, so the view is the live projection with no adoption.
                 held_in = _save_restore_point(
                     transport=transport,
                     cipher=cipher,
@@ -410,7 +428,9 @@ def _apply(
                     backup=backup,
                     key_generation=target_manifest.key_generation,
                     record=record,
-                    view=ledger_view,
+                    view=_unadopted_view(presets, live_bytes, record, entry, ledger_view, transport, cipher, file_id)
+                    if adopted
+                    else ledger_view,
                 )
             else:
                 held_in = _restore_point(backup, file_id, ledger_view, entry.commit)
@@ -452,6 +472,28 @@ def _apply(
             )
         ),
     )
+
+
+def _unadopted_view(
+    presets: _Presets,
+    live_bytes: bytes | None,
+    record: ManifestRecord,
+    entry: LedgerEntry | None,
+    fallback: bytes | None,
+    transport: PolicyView,
+    cipher: Cipher,
+    file_id: str,
+) -> bytes | None:
+    """The live file's projection with this Mac's own value for each adopted key, which is what an apply overwrites.
+
+    The ledger's source still decides the keys that are carried. `fallback` stands in when it cannot be projected.
+    """
+    if live_bytes is None or entry is None:
+        return fallback
+    measured = _project_file(
+        presets, live_bytes, record.path, record.format, source=_entry_reader(transport, cipher, file_id, entry)
+    )
+    return fallback if measured.failure is not None else measured.view
 
 
 def _save_restore_point(

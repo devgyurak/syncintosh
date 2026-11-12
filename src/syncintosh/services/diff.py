@@ -152,7 +152,11 @@ def diff_repo(
             # A path this machine does not track or may not write is not part of *this* machine's
             # diff; `sync` reports it, `diff` stays quiet about it.
             continue
-        entries.append(_diff_record(view, cipher, live, presets, home, repo_commit, file_id, record, paths, deny))
+        entries.append(
+            _diff_record(
+                view, cipher, live, presets, home, repo_commit, file_id, record, paths, deny, ledger.get(file_id)
+            )
+        )
     return DiffReport(
         entries=tuple(entries),
         source=source,
@@ -173,6 +177,7 @@ def _diff_record(
     record: ManifestRecord,
     paths: LivePaths,
     deny: DenyList,
+    entry: LedgerEntry | None = None,
 ) -> FileDiff:
     located = paths.resolve(record.path)
     if isinstance(located, Unresolved):
@@ -195,7 +200,7 @@ def _diff_record(
     if raw is None:
         return FileDiff(record.path, "missing-here", repo=repo_text)
     # The repo side is the carry source, so an ignored key never shows as a difference.
-    projected = _project_file(presets, raw, record.path, record.format, source=lambda: repo_bytes)
+    projected = _project_file(presets, raw, record.path, record.format, source=lambda: repo_bytes, entry=entry)
     view = projected.view
     if view is not None and _sha256(view) == record.sha256:
         return FileDiff(record.path, "in-sync")
