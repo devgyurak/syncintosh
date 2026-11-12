@@ -203,7 +203,10 @@ def _settle_ledger(
             if old is not None:
                 settled[file_id] = replace(old, suppressed=True)
             continue
-        digest = _ledger_digest(presets, live_bytes, record.path, record.format, target(record), ledger.get(file_id))
+        # No adoption here: the digest says whether the live file *already* agrees with the record. An adopted key
+        # whose write did not happen (aborted, refused, deferred) holds this Mac's own value, so it must not match,
+        # and the entry keeps its old carried set for the next cycle to adopt again.
+        digest = _ledger_digest(presets, live_bytes, record.path, record.format, target(record))
         if digest is not None and digest == record.sha256:
             policy = presets.policy_for(record.path)
             settled[file_id] = LedgerEntry(

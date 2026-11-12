@@ -243,7 +243,8 @@ class _Presets:
         if not policy.ignore_list:
             return frozenset()
         state = self.ignores.get(policy.path, NO_IGNORES)
-        return state.paths_for(policy) if isinstance(state, IgnoreSpec) else frozenset()
+        # A list that could not be read still carries the noise, so a caller that skipped `ignore_failure` seals none.
+        return (state if isinstance(state, IgnoreSpec) else NO_IGNORES).paths_for(policy)
 
     def carried_digests(self, policy: PresetFile) -> tuple[str, ...] | None:
         """What the ledger records as carried for `policy`'s file this cycle; `None` for a file with no ignore list."""
@@ -265,13 +266,15 @@ class _Presets:
             return frozenset()
         return adopted_paths(previous, policy, carried, live_keys())
 
-    def adopted_in(self, policy: PresetFile, entry: LedgerEntry | None, raw: bytes | None) -> frozenset[KeyPath]:
+    def adopted_in(
+        self, policy: PresetFile, entry: LedgerEntry | None, raw: bytes | None, source: _Source | None = None
+    ) -> frozenset[KeyPath]:
         """:meth:`adopted` for a live file's bytes: nothing for a missing or unreadable one."""
         adapter = self.adapter_for(policy.format)
         text = None if raw is None else _decode(raw)
         if adapter is None or text is None:
             return frozenset()
-        return self.adopted(policy, entry, lambda: _top_level_keys(adapter, text))
+        return self.adopted(policy, entry, lambda: _candidate_keys(adapter, text, source))
 
     def ignore_failure(self, policy: PresetFile) -> str | None:
         """Why the ignore list `policy`'s file obeys cannot be used this cycle, or `None` when it can."""
@@ -766,6 +769,17 @@ def _baseline_reader(
 _NO_SOURCE: _Source = _no_source
 
 
+def _candidate_keys(adapter: ContentAdapter, text: str, source: _Source | None) -> tuple[str, ...]:
+    """The names an adopted key can have: the live file's top-level keys and the source object's.
+
+    The ledger holds digests, so a key is found by name. One the user dropped from the list may be in neither the
+    live file nor the noise, but the object this Mac last accounted for still has it, and that object is already
+    decrypted in memory, so reading its names reveals nothing new.
+    """
+    held = None if source is None else source()
+    return (*_top_level_keys(adapter, text), *(() if held is None else _top_level_keys(adapter, _decode(held) or "")))
+
+
 def _top_level_keys(adapter: ContentAdapter, text: str) -> tuple[str, ...]:
     """The top-level keys of a keyed document, or none when it is not one or does not parse."""
     try:
@@ -811,7 +825,7 @@ def _project_file(
     text = _decode(raw)
     adopted = frozenset()
     if carry and adapter is not None and text is not None:
-        adopted = presets.adopted(policy, entry, lambda: _top_level_keys(adapter, text))
+        adopted = presets.adopted(policy, entry, lambda: _candidate_keys(adapter, text, source))
     if not policy.strips and not carried and not adopted:
         # Nothing to cut, so no adapter is needed and the projection is the file itself. This is
         # the `text` case: a shell script has no keys to strip.

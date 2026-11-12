@@ -22,7 +22,7 @@ from _harness import run_sync
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
-from syncintosh.core.errors import PolicyMismatch
+from syncintosh.core.errors import DocumentRefused, PolicyMismatch
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -129,7 +129,7 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
-def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog=None) -> SyncReport:
+def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog=None, **ports: Any) -> SyncReport:
     return run_sync(
         machine.home,
         machine.store,
@@ -139,6 +139,7 @@ def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog=None) ->
         apps=NO_APP_INFO,
         profiles=SystemProfileIndex(str(machine.home), SystemDenyList(), vscode.read_profiles),
         adopt=adopt,
+        **ports,
     )
 
 
@@ -704,3 +705,44 @@ def test_the_value_an_adopting_mac_overwrites_is_kept_in_a_restore_point(tmp_pat
     points = [point for point in report.restore_points if point.path == SETTINGS]
     assert len(points) == 1
     assert [value for value in _held_at(b, points[0].commit) if value.get("window.zoomLevel") == 2] != []
+
+
+class _RefusingWrites(SystemLiveFiles):
+    """A live store that refuses every write, as an apply that could not happen."""
+
+    def write(self, path: str, data: bytes, *, private: bool = False) -> None:
+        raise DocumentRefused("this write is refused")
+
+
+def test_an_adoption_that_was_not_written_is_tried_again_on_the_next_cycle(tmp_path, memory_key_store) -> None:
+    # given — A published zoom 5 with the cancellation; B lives at 2, has the list, and its first adoption write fails
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    _run(b)
+    _run(b, live=_RefusingWrites())
+    assert _live(b)["window.zoomLevel"] == 2
+
+    # when — the next cycle can write
+    _run(b)
+    _run(a)
+
+    # then — B still adopts A's value instead of publishing its own 2 over it
+    assert (_live(a)["window.zoomLevel"], _live(b)["window.zoomLevel"]) == (5, 5)
+    assert [obj for obj in _sealed(a) if obj.get("window.zoomLevel") == 2] == []
+
+
+def test_a_listed_key_that_this_mac_does_not_have_is_adopted_with_the_repos_value(tmp_path, memory_key_store) -> None:
+    # given — the font size is listed and A has no value for it in its own file; the repo holds B's 13
+    a, _ = _pair(tmp_path, memory_key_store)
+    _write(a, SETTINGS, {"editor.tabSize": 4, "window.zoomLevel": 2, LIST: ["editor.fontSize"]})
+    _run(a)
+    _write(a, SETTINGS, {"editor.tabSize": 4, "window.zoomLevel": 2, LIST: []})
+
+    # when — the list stops naming it
+    _run(a)
+
+    # then — A takes the repo's 13 instead of publishing a deletion
+    assert _live(a)["editor.fontSize"] == 13
+    assert [obj for obj in _sealed(a) if "editor.fontSize" not in obj] == []

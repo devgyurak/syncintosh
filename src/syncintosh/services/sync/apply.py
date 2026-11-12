@@ -331,7 +331,13 @@ def _apply(
         entry = ledger.get(file_id)
         # Keys this Mac stopped carrying take the repo's value, which only a write can do: the live projection
         # already agrees with the record, so without this the file would read as in sync.
-        adopted = frozenset() if stripped_policy is None else presets.adopted_in(stripped_policy, entry, live_bytes)
+        adopted = (
+            frozenset()
+            if stripped_policy is None or entry is None
+            else presets.adopted_in(
+                stripped_policy, entry, live_bytes, _entry_reader(transport, cipher, file_id, entry)
+            )
+        )
         # With no collect baseline, `_decision` compares the view with the ledger digest. That digest is of the
         # ledger's object, so a file with carried keys is measured against that object here, not the one about
         # to be written: a remote change to a carried key would otherwise read as an edit and abort the write.

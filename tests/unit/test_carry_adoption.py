@@ -15,10 +15,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from syncintosh.adapters.jsonc import JsoncAdapter
+from syncintosh.core.errors import LedgerCorrupt
 from syncintosh.core.ignore import adopted_paths, carried_digests, carry_digest
 from syncintosh.core.models import LedgerEntry
 from syncintosh.core.presets import PresetFile
 from syncintosh.core.projection import Carry, project_text, restore_text
+from syncintosh.presets import BuiltinCatalog, vscode
+from syncintosh.services.sync._shared import _IGNORE_LIST_UNREADABLE, _Presets
 from syncintosh.system.ledger import JsonLedgerStore
 
 ADAPTER = JsoncAdapter()
@@ -105,8 +108,6 @@ def test_an_entry_without_a_carried_set_is_not_written_with_one(tmp_path: Path) 
 @pytest.mark.parametrize("bad", ["abc", [1], {"a": 1}])
 def test_a_malformed_carried_set_is_a_corrupt_ledger(tmp_path: Path, bad) -> None:
     # given
-    from syncintosh.core.errors import LedgerCorrupt
-
     path = tmp_path / "applied.json"
     entry = {"sha256": "a" * 64, "commit": "b" * 40, "suppressed": False, "carried": bad}
     path.write_text(json.dumps({"version": 1, "files": {FILE_ID: entry}}), encoding="utf-8")
@@ -149,3 +150,21 @@ def test_restoring_an_object_writes_the_repos_value_for_an_adopted_key(live, rep
 
     # then
     assert json.loads(restored) == {"zoom": repo, "a": other}
+
+
+def test_a_list_that_could_not_be_read_still_carries_the_noise() -> None:
+    # given — noise is no longer stripped, so a caller that skipped the ignore-list check must not seal it
+
+    presets = _Presets(
+        catalog=BuiltinCatalog.default(),
+        adapters={},
+        validators={},
+        ignores={vscode.SETTINGS: _IGNORE_LIST_UNREADABLE},
+    )
+    policy = presets.policy_for(vscode.SETTINGS)
+
+    # when
+    carried = presets.carried(policy) if policy is not None else frozenset()
+
+    # then
+    assert carried == {("window.zoomLevel",), *({(key,) for (key,) in vscode.NOISE})}
