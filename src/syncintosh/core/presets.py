@@ -279,7 +279,8 @@ class PresetFile:
 
     `ignore_list` marks the file that holds the user's own list of settings to keep to themselves
     (VS Code's ``settingsSync.ignoredSettings``) and obeys it (`core/ignore.py`). The list is read from
-    this exact path, and the files a profile takes this policy for obey the same list.
+    this exact path, and the files a profile takes this policy for obey the same list. Its `noise` is the default
+    ignore set that list starts from: carried, not stripped, and `-x` switches a key back on.
 
     `synced` is an allowlist, the opposite way round: when it is set, **only** the keys at or beneath its paths
     travel, and every other key is local — cut before sealing and put back from the live file on apply, as a
@@ -360,6 +361,9 @@ class PresetFile:
             # The ignore list carries exact top-level keys (`core/ignore.py`); a wildcard beside it would blur
             # which keys are carried and which are stripped.
             raise ConfigError(f"{validated_path}: an ignore-list file cannot use a wildcard key pattern")
+        if ignore_list and any(len(pattern) != 1 for pattern in noise_paths):
+            # Noise of such a file is the default ignore set, and the list names and cancels top-level keys.
+            raise ConfigError(f"{validated_path}: an ignore-list file's noise must be top-level keys")
         allowed = None if synced is None else frozenset(synced)
         if allowed is not None:
             _check_allowlist(validated_path, allowed, excluded_paths, validated_format, ignore_list)
@@ -399,8 +403,12 @@ class PresetFile:
 
     @property
     def stripped(self) -> frozenset[KeyPattern]:
-        """Every key pattern this file removes before sealing, noise and excluded together."""
-        return self.noise | self.excluded
+        """Every key pattern this file removes before sealing: noise and excluded together.
+
+        An ignore-list file's noise is not removed but carried (`core/ignore.py`): it is VS Code's default ignore
+        set, which the user's list can subtract from, so only `excluded` is cut for good.
+        """
+        return self.excluded if self.ignore_list else self.noise | self.excluded
 
     @property
     def strips(self) -> bool:

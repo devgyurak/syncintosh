@@ -188,8 +188,9 @@ its format, a file that is not UTF-8, a value that cannot be rewritten without d
 
 ### Carrying an ignored key
 
-A key the **user** chose to keep local (VS Code's `settingsSync.ignoredSettings`) is not noise and is not
-stripped. Stripping it would make the 3-way merge read it as *deleted* on this side and erase the value from
+A key the **user** chose to keep local (VS Code's `settingsSync.ignoredSettings`), and every `noise` key of the
+file that obeys that list (`PresetFile.ignore_list`), is not stripped: noise is VS Code's default ignore set, and
+`-x` can switch a key back on (issue #73). Only `excluded` is a static strip there. Stripping it would make the 3-way merge read it as *deleted* on this side and erase the value from
 every other Mac. It is **carried**: its value in the sealed object comes from an object the repo already holds,
 and `apply` puts this machine's own value back.
 
@@ -203,7 +204,8 @@ and `apply` puts this machine's own value back.
   `pending-apply` rather than as a change here. Carrying from `HEAD` would make the same remote-only change look
   like a local one and send an unchanged file through a stale-base merge every cycle. Where this machine has no
   ledger object, the object at `HEAD` is used; where there is none at all (a file not yet published), the carried
-  keys are left out of the seal.
+  keys are left out of the seal. That is what a strip produced, so a repo that never held a noise key keeps
+  byte-identical objects.
 - **Strip, carry, strip.** The source is a stored object and may predate an exclusion, so the static strip runs
   again after the carry; an excluded key inside a carried value is never sealed.
 - **The round trip is checked against the object being applied.** That object is the next cycle's ledger object,

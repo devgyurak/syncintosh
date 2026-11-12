@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The user's own ignore list: which top-level settings this machine keeps to itself.
+"""The settings this machine keeps to itself: the preset's noise, the user's own ignore list, and ``-x``.
 
 VS Code's ``settingsSync.ignoredSettings`` names settings that a machine does not share. VS Code
 does not delete an ignored key from what it uploads; it leaves the remote's value in place
@@ -7,20 +7,25 @@ does not delete an ignored key from what it uploads; it leaves the remote's valu
 why this is a *carry* and not a strip (:mod:`syncintosh.core.projection`): stripping the key would
 make the 3-way merge read it as deleted and erase the value from every other machine.
 
+The preset's own noise keys are VS Code's **default** ignore set, so they are carried the same way and
+the list can subtract from them. ``PresetFile.stripped`` therefore holds only what a file excludes.
+
 This module only reads the list. It takes the **parsed** settings (``AGENTS.md`` §2.1), so it
 holds no file, adapter, or I/O, and returns the top-level keys to carry plus the entries it could
 not honour.
 
 * ``settingsSync.ignoredSettings`` and its legacy name ``sync.ignoredSettings`` are both read and
   their entries pooled.
-* An entry ``-x`` cancels the **user's own** ``x``. VS Code uses it to subtract from a built-in
-  default set, which syncintosh does not have; a ``-x`` with no matching ``x`` is reported instead
-  of silently doing nothing, and it never revives a key a preset strips.
+* The ignored set is ``(noise ∪ the user's keys) − cancelled − NON_IGNORABLE``. An entry ``-x`` cancels
+  ``x`` wherever it came from, the preset's noise included, which re-enables the key: it syncs again.
+* An excluded key is stripped whatever the list says, so a ``-x`` aimed at one is reported, as a count.
+  A ``-x`` that matches nothing is not: the key it names already syncs.
 * ``settingsSync.ignoredSettings`` and ``settingsSync.ignoredExtensions`` cannot be ignored
   (``disallowSyncIgnore`` upstream), so the list itself does travel.
-* Matching is by top-level key: ``"[python]"`` is one key, and so is ``"editor.fontSize"``.
-* Precedence: excluded > preset noise > the user's list. A key the preset already strips is never
-  also carried, because carrying would put a value back that the preset exists to keep out.
+* Matching is by top-level key: ``"[python]"`` is one key, and so is ``"editor.fontSize"``. A noise entry of an
+  ignore-list file is such a key (``PresetFile.create`` refuses any other), so ``-x`` names it exactly.
+* Until a key has a value in the repo, carrying it leaves it out of the sealed object, which is what stripping
+  does; objects of a repo that never held the key are byte-identical under both.
 """
 
 from __future__ import annotations
@@ -46,14 +51,14 @@ _CANCEL: Final = "-"
 class IgnoreSpec:
     """The top-level settings this machine ignores, built once per cycle by :meth:`create`.
 
-    `keys` are the user's ignored keys after cancellation, before the preset's policy is applied;
-    :meth:`paths_for` applies it. `unmatched_cancellations` are the ``-x`` entries with no ``x``
-    to cancel, kept so a report can say that one did nothing (``docs/design/presets.md``).
+    `keys` are the user's ignored keys and `cancelled` the keys a ``-x`` entry names, both before the preset's
+    policy is applied; :meth:`paths_for` applies it and :meth:`blocked_cancellations` counts the ``-x`` entries it
+    cannot honour (``docs/design/presets.md``).
     """
 
     # Setting names come from the user's file, so a repr never shows them (``AGENTS.md`` §4).
     keys: frozenset[str] = field(default=frozenset(), repr=False)
-    unmatched_cancellations: tuple[str, ...] = field(default=(), repr=False)
+    cancelled: frozenset[str] = field(default=frozenset(), repr=False)
 
     @classmethod
     def create(cls, settings: Mapping[str, object]) -> IgnoreSpec:
@@ -71,25 +76,29 @@ class IgnoreSpec:
             if not isinstance(value, list) or not all(isinstance(entry, str) for entry in value):
                 raise IgnoreListMalformed("the settings ignore list is not a list of strings")
             entries.extend(value)
-        added = {entry for entry in entries if not entry.startswith(_CANCEL)}
-        cancelled = {entry[len(_CANCEL) :] for entry in entries if entry.startswith(_CANCEL)}
         return cls(
-            keys=frozenset((added - cancelled) - NON_IGNORABLE),
-            unmatched_cancellations=tuple(sorted(cancelled - added)),
+            keys=frozenset(entry for entry in entries if not entry.startswith(_CANCEL)),
+            cancelled=frozenset(entry[len(_CANCEL) :] for entry in entries if entry.startswith(_CANCEL)),
         )
 
     def paths_for(self, policy: PresetFile) -> frozenset[KeyPath]:
-        """The key paths to carry for `policy`'s file: the user's keys minus whatever the preset strips.
+        """The key paths to carry for `policy`'s file: ``(noise ∪ the user's keys) − cancelled − NON_IGNORABLE``.
 
-        A key outside the preset's allowlist is already local, so carrying it would add nothing.
+        A key the file excludes is stripped instead, so it is never carried; and a key outside the file's
+        allowlist is already local, so carrying it would add nothing.
         """
-        stripped = policy.stripped
+        noise = {segment[0] for segment in policy.noise if len(segment) == 1 and isinstance(segment[0], str)}
+        excluded = policy.excluded
         synced = policy.synced
         return frozenset(
             path
-            for path in ((key,) for key in self.keys)
-            if path not in stripped and (synced is None or any(path[: len(root)] == root for root in synced))
+            for path in ((key,) for key in (noise | self.keys) - self.cancelled - NON_IGNORABLE)
+            if path not in excluded and (synced is None or any(path[: len(root)] == root for root in synced))
         )
+
+    def blocked_cancellations(self, policy: PresetFile) -> int:
+        """How many ``-x`` entries name a key `policy`'s file excludes, which a list cannot switch back on."""
+        return sum(1 for key in self.cancelled if (key,) in policy.excluded)
 
 
 NO_IGNORES: Final = IgnoreSpec()

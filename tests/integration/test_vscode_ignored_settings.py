@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from _harness import run_sync
 from syncintosh.adapters.jsonc import JsoncAdapter
 from syncintosh.core.commitments import loads_commitments
 from syncintosh.core.config import SyncConfig
+from syncintosh.core.errors import PolicyMismatch
 from syncintosh.core.ledger import AdoptChoice
 from syncintosh.core.repo import COMMITMENTS_PATH
 from syncintosh.crypto.cipher import EnvelopeCipher
@@ -128,13 +129,13 @@ def _initialize(machine: Machine, *, import_from: Path | None = None) -> None:
     )
 
 
-def _run(machine: Machine, *, adopt: AdoptChoice | None = None) -> SyncReport:
+def _run(machine: Machine, *, adopt: AdoptChoice | None = None, catalog=None) -> SyncReport:
     return run_sync(
         machine.home,
         machine.store,
         codec=machine.codec,
         adapters={"jsonc": ADAPTER},
-        catalog=BuiltinCatalog.default(),
+        catalog=BuiltinCatalog.default() if catalog is None else catalog,
         apps=NO_APP_INFO,
         profiles=SystemProfileIndex(str(machine.home), SystemDenyList(), vscode.read_profiles),
         adopt=adopt,
@@ -370,19 +371,33 @@ def test_a_key_dropped_from_the_list_syncs_from_the_next_cycle(tmp_path, memory_
 # --------------------------------------------------------------------------- the report
 
 
-def test_a_cancellation_that_cancels_nothing_is_noted_without_quoting_the_list(tmp_path, memory_key_store) -> None:
-    # given — `-window.zoomLevel` names a preset noise key the user never listed
+def test_a_cancellation_aimed_at_an_excluded_key_is_noted_without_quoting_the_list(tmp_path, memory_key_store) -> None:
+    # given — `-http.proxyAuthorization` names a credential the preset never syncs
     remote = _bare_remote(tmp_path)
     a = _machine(tmp_path, memory_key_store, "machine-a", remote)
     _initialize(a)
-    _write(a, SETTINGS, {**BASE, LIST: ["editor.fontSize", "-window.zoomLevel"]})
+    _write(a, SETTINGS, {**BASE, LIST: ["editor.fontSize", "-http.proxyAuthorization"], "http.proxyAuthorization": "x"})
 
     # when
     report = _run(a)
 
-    # then — the noise key stays local, and the report counts the entry instead of naming it
-    assert [note for note in report.notes if "1 entries" in note and "zoomLevel" not in note] != []
-    assert [obj for obj in _sealed(a) if "window.zoomLevel" in obj] == []
+    # then — the credential is still not sealed, and the report counts the entry instead of naming it
+    assert [note for note in report.notes if "1 entries" in note and "proxyAuthorization" not in note] != []
+    assert [obj for obj in _sealed(a) if "http.proxyAuthorization" in obj] == []
+
+
+def test_a_cancellation_of_a_noise_key_syncs_it_and_needs_no_note(tmp_path, memory_key_store) -> None:
+    # given — `-window.zoomLevel` switches a preset noise key back on
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write(a, SETTINGS, {**BASE, LIST: ["-window.zoomLevel"], "window.zoomLevel": 3})
+
+    # when
+    report = _run(a)
+
+    # then
+    assert (report.notes, len([obj for obj in _sealed(a) if "window.zoomLevel" in obj])) == ((), 1)
 
 
 def test_a_list_with_nothing_to_note_adds_no_note(tmp_path, memory_key_store) -> None:
@@ -466,3 +481,132 @@ def test_apply_leaves_an_ignored_value_exactly_as_the_live_file_spelled_it(tmp_p
 
     # then — only the tab size moved; `1e3` is not rewritten as `1000.0`
     assert (a.home / SETTINGS).read_text(encoding="utf-8") == text.replace('"editor.tabSize": 4', '"editor.tabSize": 2')
+
+
+# --------------------------------------------------------------------------- re-enabling noise with -x (#73)
+
+
+class _PreviousRelease(BuiltinCatalog):
+    """The build before `-x` could re-enable noise: vscode at policy epoch 2, one release behind the history."""
+
+    def get(self, name: str):
+        found = super().get(name)
+        return replace(found, policy_epoch=2) if name == "vscode" and found is not None else found
+
+    def preset_for(self, path: str):
+        found = super().preset_for(path)
+        return replace(found, policy_epoch=2) if found is not None and found.name == "vscode" else found
+
+    def policy_history(self, name: str):
+        history = super().policy_history(name)
+        return history[:-1] if name == "vscode" and history is not None else history
+
+
+PREVIOUS = _PreviousRelease.create(BuiltinCatalog.default().presets)
+ZOOM_ON = {**BASE, LIST: ["-window.zoomLevel"]}
+
+
+def _settings_refusals(report: SyncReport) -> list[str]:
+    return [refusal.path for refusal in report.refused if refusal.path == SETTINGS]
+
+
+def test_a_mac_that_has_not_got_the_cancellation_neither_deletes_nor_loses_the_re_enabled_key(
+    tmp_path, memory_key_store
+) -> None:
+    # given — A switches the zoom level back on and publishes 5; B has not seen the list and lives at 2
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+
+    # when
+    report = _run(b)
+
+    # then — B receives the list, keeps its own zoom, and nothing was refused or conflicted
+    assert (report.has_conflicts, _settings_refusals(report)) == (False, [])
+    assert (_live(b)["window.zoomLevel"], _live(b)[LIST]) == (2, ["-window.zoomLevel"])
+    assert [obj for obj in _sealed(b) if obj.get("window.zoomLevel") == 5] != []
+
+
+def test_a_mac_that_has_the_cancellation_publishes_its_own_zoom_level_and_the_other_follows(
+    tmp_path, memory_key_store
+) -> None:
+    # given — both Macs hold the list; A published 5 and B still lives at 2
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(b, SETTINGS, BASE)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    _run(b)
+
+    # when — PR A's behaviour, which adoption (PR B) replaces: the later Mac's value wins, so B's 2 is published
+    _run(b)
+    _run(a)
+
+    # then
+    assert (_live(a)["window.zoomLevel"], _live(b)["window.zoomLevel"]) == (2, 2)
+
+
+def test_a_noise_key_is_not_sealed_while_nobody_has_cancelled_it(tmp_path, memory_key_store) -> None:
+    # given
+    a, _ = _pair(tmp_path, memory_key_store)
+
+    # when
+    _write(a, SETTINGS, {**BASE, "window.zoomLevel": 9})
+    report = _run(a)
+
+    # then — still machine-local: nothing to publish and no object holds it
+    assert (report.unchanged, [obj for obj in _sealed(a) if "window.zoomLevel" in obj]) == (True, [])
+
+
+def test_a_mac_without_a_settings_file_applies_an_object_that_holds_a_re_enabled_key(
+    tmp_path, memory_key_store
+) -> None:
+    # given — A published the zoom level; B has no settings file at all
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    b = _machine(tmp_path, memory_key_store, "machine-b", remote)
+    _initialize(b, import_from=a.recovery)
+    (b.home / USER).mkdir(parents=True)
+
+    # when
+    report = _run(b)
+
+    # then
+    assert _settings_refusals(report) == []
+    assert _live(b) == {**ZOOM_ON, "window.zoomLevel": 5}
+
+
+def test_a_repo_stamped_before_the_change_migrates_with_its_objects_unchanged(tmp_path, memory_key_store) -> None:
+    # given — the previous release published, and the settings never held a noise key
+    remote = _bare_remote(tmp_path)
+    a = _machine(tmp_path, memory_key_store, "machine-a", remote)
+    _initialize(a)
+    _write(a, SETTINGS, BASE | {"window.zoomLevel": 2})
+    _run(a, catalog=PREVIOUS)
+    before = sorted(FileRepo(a.repo).list_paths("objects"))
+    blobs = {rel: FileRepo(a.repo).read(rel) for rel in before}
+
+    # when
+    report = _run(a)
+
+    # then — the stamp moved to release 3 and every object is the very same ciphertext
+    after = {rel: FileRepo(a.repo).read(rel) for rel in FileRepo(a.repo).list_paths("objects")}
+    assert after == blobs
+    assert [note for note in report.notes if "policy migrated: vscode rev 2" in note] != []
+
+
+def test_the_previous_release_stops_on_a_repo_the_new_one_stamped(tmp_path, memory_key_store) -> None:
+    # given — the new release published; the previous one has an edit of its own
+    a, b = _pair(tmp_path, memory_key_store)
+    _write(a, SETTINGS, {**ZOOM_ON, "window.zoomLevel": 5})
+    _run(a)
+    published = _remote_head(a)
+    _write(b, SETTINGS, {**BASE, "editor.fontSize": 21})
+
+    # when & then — stopped before anything was merged, pushed, or applied
+    with pytest.raises(PolicyMismatch):
+        _run(b, catalog=PREVIOUS)
+    assert (_remote_head(b), _live(b)["editor.fontSize"]) == (published, 21)

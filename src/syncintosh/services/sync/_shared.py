@@ -236,8 +236,13 @@ class _Presets:
         return self.catalog.policy_for(path)
 
     def carried(self, policy: PresetFile) -> frozenset[KeyPath]:
-        """The top-level keys this machine carries for `policy`'s file: the ignore list minus the preset's strip."""
-        state = self.ignores.get(policy.path) if policy.ignore_list else None
+        """The top-level keys this machine carries for `policy`'s file: its noise and the ignore list, less `-x`.
+
+        A file with no list still carries its noise, so a cycle that did not read one never seals those keys.
+        """
+        if not policy.ignore_list:
+            return frozenset()
+        state = self.ignores.get(policy.path, NO_IGNORES)
         return state.paths_for(policy) if isinstance(state, IgnoreSpec) else frozenset()
 
     def ignore_failure(self, policy: PresetFile) -> str | None:
@@ -251,12 +256,14 @@ class _Presets:
 
     def notes(self) -> tuple[str, ...]:
         """Fixed sentences about the ignore list that are not failures, for the report."""
-        unmatched = sum(
-            len(state.unmatched_cancellations) for state in self.ignores.values() if isinstance(state, IgnoreSpec)
+        blocked = sum(
+            state.blocked_cancellations(policy)
+            for policy in self.catalog.ignore_list_files()
+            if isinstance(state := self.ignores.get(policy.path), IgnoreSpec)
         )
-        if not unmatched:
+        if not blocked:
             return ()
-        return (_IGNORE_CANCEL_NOTE.format(count=unmatched),)
+        return (_IGNORE_CANCEL_NOTE.format(count=blocked),)
 
     def adapter_for(self, fmt: FileFormat) -> ContentAdapter | None:
         """The structural adapter for `fmt`, or `None` when this build has none."""
@@ -809,12 +816,10 @@ _PROJECTION_FAILURE_MIGRATED = "the stored content could not be reduced to this 
 _PROJECTION_FAILURE_MERGED = "the merged content could not be reduced to this machine's synced form"
 
 
-# What the report says about an ignore list that is usable but has entries that do nothing. A count, never the
-# entries: they are file content (``AGENTS.md`` §4). VS Code uses a leading "-" to subtract from its own default
-# set, which this tool does not have; here it can only cancel what the user listed.
+# What the report says about a `-x` that names a key the preset excludes. A count, never the entries: they are file
+# content (``AGENTS.md`` §4). Any other `-x` is honoured, so it needs no note.
 _IGNORE_CANCEL_NOTE = (
-    '{count} entries of the settings ignore list start with "-" but cancel nothing you listed; '
-    "a setting the preset manages cannot be switched back on this way"
+    '{count} entries of the settings ignore list start with "-" but name a setting the preset never syncs'
 )
 
 

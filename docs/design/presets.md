@@ -257,11 +257,22 @@ and an excluded value is in no object at all ([02-base-and-merge.md](02-base-and
   - Both `settingsSync.ignoredSettings` and the legacy `sync.ignoredSettings` are read. Matching is by top-level
     key (`"[python]"` is one key). `settingsSync.ignoredSettings` and `settingsSync.ignoredExtensions` cannot be
     ignored.
-  - Precedence: **excluded > preset noise > the user's list.** The keys actually carried are the user's list
-    minus what the preset strips, so listing `http.proxyAuthorization` seals nothing more and nothing less.
-  - `-x` cancels only an `x` the user listed. It does not switch a noise key back on or release an excluded one
-    (VS Code uses `-x` to subtract from its own built-in default set, which this tool does not have); such an
-    entry is counted in a note on the report. Re-enabling a noise key this way is a follow-up.
+  - **The preset's noise is VS Code's default ignore set** (issue #73), so it is carried like the user's list and
+    the list can subtract from it. The keys carried are `(noise ∪ the user's list) − "-x" entries`. A file with no
+    list still carries its noise. Excluded keys are stripped whatever the list says, so listing
+    `http.proxyAuthorization` seals nothing more and nothing less.
+  - `-x` switches a noise key (or a listed one) back on: it is no longer carried and syncs from then on. It cannot
+    release an excluded key; such an entry is counted in a note on the report. A `-x` that matches nothing is not
+    reported, because the key it names already syncs. Only top-level keys match.
+  - A Mac that has not yet received the `-x` still carries the key, so it neither deletes the value (a strip would
+    read as a deletion in the 3-way merge) nor refuses the object, and keeps its own live value. Switching a key on
+    is a policy change the other builds cannot read, so the `vscode` policy epoch is 3 and an older build stops on
+    the mismatch ([03-manifest.md](03-manifest.md), "Policy stamp").
+  - Removing the `-x` carries the key again: the repo keeps its last value, which every Mac ignores, and each keeps
+    its own live value.
+  - Two Macs that switch the same key on in one window both add it, which is a conflict for `resolve`. Until the
+    adoption follow-up (issue #73, PR B), a Mac that starts syncing a key keeps publishing its own live value, so
+    the later Mac's value wins instead of adopting what the repo already holds.
   - A default `settings.json` that is a symbolic link, a denied path, or outside `$HOME` has a list that cannot be
     trusted, so a profile's `settings.json` is **not synced** either (the list is unknown, and an empty one would seal
     the keys the user meant to keep local). A default file that is simply absent has no list, as in VS Code.
